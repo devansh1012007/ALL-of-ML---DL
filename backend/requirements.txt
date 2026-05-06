@@ -1,0 +1,14 @@
+fastapi          
+uvicorn
+#db
+sqlalchemy        
+asyncpg          
+#auth
+python-jose[cryptography] 
+bcrypt       
+python-multipart
+
+python-dotenv==1.0.1      # Loads environment variables from a .env file (useful for local testing)
+
+alembic
+

@@ -1,2 +1,18 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+/__pycache__/*
+*.pyc 
+*.pyo 
+*.pyd 
+*.so 
+*.dll 
+*log 
+*.csv 
+*.tsv 
+/venv/
+/.venv/ 
+/env/
+/.env/ 
+*.env 
+*.log 
+/Training_Data/

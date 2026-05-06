@@ -1,0 +1,30 @@
+2026-03-25 19:01:56,140 - INFO - PrimeTradeAPI - Login attempt for user: 'admin'
+2026-03-25 19:01:56,595 - INFO - PrimeTradeAPI - Success: User 'admin' logged in successfully.
+2026-03-25 19:01:56,628 - INFO - PrimeTradeAPI - User 'admin' is fetching their notes.
+2026-03-25 19:05:57,200 - INFO - PrimeTradeAPI - Login attempt for user: 'admin'
+2026-03-25 19:05:57,637 - INFO - PrimeTradeAPI - Success: User 'admin' logged in successfully.
+2026-03-25 19:17:32,057 - INFO - PrimeTradeAPI - Login attempt for user: 'admin'
+2026-03-25 19:17:32,434 - INFO - PrimeTradeAPI - Success: User 'admin' logged in successfully.
+2026-03-25 19:17:32,460 - INFO - PrimeTradeAPI - User 'admin' is fetching their notes.
+2026-03-25 19:17:43,227 - INFO - PrimeTradeAPI - Login attempt for user: 'admin'
+2026-03-25 19:17:43,611 - INFO - PrimeTradeAPI - Success: User 'admin' logged in successfully.
+2026-03-25 19:17:43,626 - INFO - PrimeTradeAPI - User 'admin' is fetching their notes.
+2026-03-25 19:31:24,410 - INFO - PrimeTradeAPI - Registration attempt for new user: 'string'
+2026-03-25 19:31:24,849 - INFO - PrimeTradeAPI - Success: User 'string' registered with role 'string'.
+2026-03-25 19:31:25,004 - INFO - PrimeTradeAPI - User 'admin' attempting to delete note ID 2695.
+2026-03-25 19:31:25,010 - WARNING - PrimeTradeAPI - Delete failed: Note ID 2695 not found or unauthorized for 'admin'.
+2026-03-25 19:31:25,095 - INFO - PrimeTradeAPI - User 'admin' is fetching their notes.
+2026-03-25 19:31:25,319 - INFO - PrimeTradeAPI - Login attempt for user: 'string'
+2026-03-25 19:31:25,703 - INFO - PrimeTradeAPI - Success: User 'string' logged in successfully.
+2026-03-25 19:39:44,322 - INFO - PrimeTradeAPI - Registration attempt for new user: 'string'
+2026-03-25 19:39:44,942 - INFO - PrimeTradeAPI - User 'string' attempting to delete note ID 2695.
+2026-03-25 19:39:44,945 - WARNING - PrimeTradeAPI - Delete failed: Note ID 2695 not found or unauthorized for 'string'.
+2026-03-25 19:39:45,008 - INFO - PrimeTradeAPI - User 'string' is fetching their notes.
+2026-03-25 19:39:45,208 - INFO - PrimeTradeAPI - Login attempt for user: 'string'
+2026-03-25 19:39:45,676 - INFO - PrimeTradeAPI - Success: User 'string' logged in successfully.
+2026-03-25 19:42:31,222 - INFO - PrimeTradeAPI - Registration attempt for new user: 'string'
+2026-03-25 19:42:31,747 - INFO - PrimeTradeAPI - User 'string' attempting to delete note ID 2695.
+2026-03-25 19:42:31,750 - WARNING - PrimeTradeAPI - Delete failed: Note ID 2695 not found or unauthorized for 'string'.
+2026-03-25 19:42:31,829 - INFO - PrimeTradeAPI - User 'string' is fetching their notes.
+2026-03-25 19:42:32,041 - INFO - PrimeTradeAPI - Login attempt for user: 'string'
+2026-03-25 19:42:32,479 - INFO - PrimeTradeAPI - Success: User 'string' logged in successfully.

@@ -1,0 +1,2 @@
+docker-compose run --rm web alembic revision --autogenerate -m "initial migration"
+docker-compose run web alembic upgrade head
