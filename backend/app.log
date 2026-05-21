@@ -28,3 +28,55 @@
 2026-03-25 19:42:31,829 - INFO - PrimeTradeAPI - User 'string' is fetching their notes.
 2026-03-25 19:42:32,041 - INFO - PrimeTradeAPI - Login attempt for user: 'string'
 2026-03-25 19:42:32,479 - INFO - PrimeTradeAPI - Success: User 'string' logged in successfully.
+2026-05-20 12:23:12,508 - INFO - PrimeTradeAPI - Registration attempt for new user: 'admin'
+2026-05-20 12:23:13,228 - INFO - PrimeTradeAPI - Success: User 'admin' registered with role 'user'.
+2026-05-20 14:12:21,803 - INFO - PrimeTradeAPI - Login attempt for user: 'admin'
+2026-05-20 14:12:21,824 - WARNING - PrimeTradeAPI - Failed login: Incorrect credentials for 'admin'
+2026-05-20 14:12:30,659 - INFO - PrimeTradeAPI - Registration attempt for new user: 'admin'
+2026-05-20 14:12:31,060 - INFO - PrimeTradeAPI - Success: User 'admin' registered with role 'user'.
+2026-05-20 14:12:31,109 - INFO - PrimeTradeAPI - Login attempt for user: 'admin'
+2026-05-20 14:12:31,485 - INFO - PrimeTradeAPI - Success: User 'admin' logged in successfully.
+2026-05-20 14:55:24,399 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/main/README.md "HTTP/1.1 307 Temporary Redirect"
+2026-05-20 14:55:24,407 - WARNING - huggingface_hub.utils._http - Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-05-20 14:55:24,644 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/api/resolve-cache/datasets/ShadenA/MathNet/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/README.md "HTTP/1.1 200 OK"
+2026-05-20 14:55:24,697 - INFO - httpx - HTTP Request: GET https://huggingface.co/api/resolve-cache/datasets/ShadenA/MathNet/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/README.md "HTTP/1.1 200 OK"
+2026-05-20 14:55:25,011 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/MathNet.py "HTTP/1.1 404 Not Found"
+2026-05-20 14:55:25,764 - INFO - httpx - HTTP Request: HEAD https://s3.amazonaws.com/datasets.huggingface.co/datasets/datasets/ShadenA/MathNet/ShadenA/MathNet.py "HTTP/1.1 404 Not Found"
+2026-05-20 14:55:26,073 - INFO - httpx - HTTP Request: GET https://huggingface.co/api/datasets/ShadenA/MathNet/revision/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9 "HTTP/1.1 200 OK"
+2026-05-20 14:55:26,359 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/.huggingface.yaml "HTTP/1.1 404 Not Found"
+2026-05-20 14:55:26,694 - INFO - httpx - HTTP Request: GET https://datasets-server.huggingface.co/info?dataset=ShadenA/MathNet "HTTP/1.1 200 OK"
+2026-05-20 14:55:26,985 - INFO - httpx - HTTP Request: GET https://huggingface.co/api/datasets/ShadenA/MathNet/tree/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data%2Fall?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-05-20 14:55:27,293 - INFO - httpx - HTTP Request: GET https://huggingface.co/api/datasets/ShadenA/MathNet/tree/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data?recursive=false&expand=false "HTTP/1.1 200 OK"
+2026-05-20 14:55:27,634 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/dataset_infos.json "HTTP/1.1 404 Not Found"
+2026-05-20 14:55:28,079 - INFO - httpx - HTTP Request: GET https://huggingface.co/api/datasets/ShadenA/MathNet/revision/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9 "HTTP/1.1 200 OK"
+2026-05-20 14:55:28,348 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00000-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:28,728 - INFO - httpx - HTTP Request: GET https://huggingface.co/api/datasets/ShadenA/MathNet/xet-read-token/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9 "HTTP/1.1 200 OK"
+2026-05-20 14:55:36,498 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00001-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:39,466 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00002-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:41,101 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00003-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:43,353 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00004-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:45,066 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00005-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:46,824 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00006-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:48,158 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00007-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:49,499 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00008-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:51,245 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00009-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:52,561 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00010-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:53,819 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00011-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:55,240 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00012-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:55:57,072 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00013-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:00,159 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00014-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:01,308 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00015-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:04,577 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00016-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:06,303 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00017-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:10,922 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00018-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:12,107 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00019-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:13,343 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00020-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:16,190 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00021-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:19,239 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00022-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:20,497 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00023-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:21,858 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00024-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:23,559 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00025-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:25,296 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00026-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:26,818 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00027-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:28,462 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00028-of-00056.parquet "HTTP/1.1 302 Found"
+2026-05-20 14:56:31,597 - INFO - httpx - HTTP Request: HEAD https://huggingface.co/datasets/ShadenA/MathNet/resolve/ae12e35eef0fc52bbbef270d6ef0f5b002252eb9/data/all/train-00029-of-00056.parquet "HTTP/1.1 302 Found"

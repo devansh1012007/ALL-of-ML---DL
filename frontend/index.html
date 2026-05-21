@@ -1,57 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure Notes | Intern Assignment</title>
-    <link rel="stylesheet" href="style.css">
-</head>
-<body>
-    <div class="container">
-        <h1>📝 Secure Notes App</h1>
-
-        <div id="auth-section" class="card">
-            <h2>Login or Register</h2>
-            <input type="text" id="username" placeholder="Username" required>
-            <input type="password" id="password" placeholder="Password" required>
-            
-            <label for="role-select">Role:</label>
-            <select id="role-select">
-                <option value="user">Standard User</option>
-                <option value="admin">Administrator</option>
-            </select>
-
-            <div class="btn-group">
-                <button id="login-btn">Login</button>
-                <button id="register-btn" class="secondary">Register</button>
-            </div>
-            <p id="auth-message"></p>
-        </div>
-
-        <div id="dashboard-section" class="card hidden">
-            <div class="header-row">
-                <h2>My Notes</h2>
-                <button id="logout-btn" class="danger">Logout</button>
-            </div>
-
-            <div id="admin-panel" class="admin-panel hidden">
-                <div class="admin-header">
-                    <h3 class="admin-title">👑 Admin Panel</h3>
-                    <button id="fetch-users-btn" class="view-users-btn">View All Users</button>
-                </div>
-                <div id="users-list" class="users-list"></div>
-            </div>
-            
-            <div class="create-note">
-                <input type="text" id="note-title" placeholder="Note Title">
-                <textarea id="note-content" placeholder="Write your note here..."></textarea>
-                <button id="add-note-btn">Save Note</button>
-            </div>
-
-            <div id="notes-list"></div>
-        </div>
-    </div>
-
-    <script src="app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PrimeTrade AutoML Dashboard</title>
+  </head>
+  <body class="bg-zinc-950 text-zinc-100">
+    <div id="root"></div>
+    <script type="module" src="/main.jsx"></script>
+  </body>
 </html>

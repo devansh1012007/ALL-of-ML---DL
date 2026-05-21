@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vite/
+.env
+.DS_Store
+.venv/
+.venv
+.vscode/
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+*.log
+*.bak

@@ -1,14 +1,30 @@
-fastapi          
+fastapi
 uvicorn
 #db
-sqlalchemy        
-asyncpg          
-#auth
-python-jose[cryptography] 
-bcrypt       
+sqlalchemy
+asyncpg
+#authcd..
+python-jose[cryptography]
+bcrypt
 python-multipart
 
 python-dotenv==1.0.1      # Loads environment variables from a .env file (useful for local testing)
 
 alembic
+pandas
+scikit-learn
+joblib
+datasets
+xgboost
+lightgbm
+catboost
+hmmlearn
+torch
+torchvision
+transformers
+gymnasium
+stable-baselines3
+openai
+sentence-transformers
+pytest
 
