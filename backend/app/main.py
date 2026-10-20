@@ -5,8 +5,9 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.encoders import jsonable_encoder
-from jose import JWTError, jwt
+from jose import JOSEError, jwt
 from pathlib import Path
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .database import get_db, engine, Base
@@ -43,20 +44,32 @@ async def get_active_user(
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
-    if authorization:
+    if authorization is not None:
+        # A credential was supplied, so it has to be valid: an invalid, malformed or
+        # expired token is rejected with 401 instead of being silently downgraded to
+        # the shared anonymous user. That keeps the frontend's 401 -> logout path
+        # working and stops a user's runs from disappearing after token expiry.
+        # The check is `is not None` (not truthiness) on purpose: a present but empty
+        # Authorization header is a broken credential, not a missing one, so it must
+        # be rejected instead of falling through to the anonymous fallback.
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
         try:
-            scheme, _, token = authorization.partition(" ")
-            if scheme.lower() == "bearer" and token:
-                payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-                username: str = payload.get("sub")
-                if username:
-                    result = await db.execute(select(User).where(User.username == username))
-                    user = result.scalars().first()
-                    if user:
-                        return user
-        except JWTError:
-            pass
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        except JOSEError:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}) from None
+        username: str = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+        result = await db.execute(select(User).where(User.username == username))
+        user = result.scalars().first()
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+        return user
 
+    # No Authorization header: the API stays usable without authentication by falling
+    # back to a shared anonymous user, which is created on first use.
     result = await db.execute(select(User).where(User.username == "anonymous"))
     user = result.scalars().first()
     if user:
@@ -71,7 +84,9 @@ async def get_active_user(
 class UserCreate(BaseModel):
     username: str
     password: str
-    role: Optional[str] = "user"
+    # Accepted for backwards compatibility but ignored: a client may never choose its
+    # own role. Admin promotion is a manual database operation.
+    role: Optional[str] = Field(default="user", description="Ignored: new accounts are always created with role 'user'.")
 
 class TrainRequest(BaseModel):
     model_name: str
@@ -92,16 +107,15 @@ class TrainRequest(BaseModel):
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise HTTPException(status_code=401)
-    except JWTError:
-        raise HTTPException(status_code=401)
-
+    except JOSEError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}) from None
+    username: str = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalars().first()
     if user is None:
-        raise HTTPException(status_code=401)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
     return user
 
 async def get_current_admin(current_user: User = Depends(get_current_user)):
@@ -119,10 +133,17 @@ async def register(user: UserCreate, db=Depends(get_db)):
     logger.info(f"Registration attempt for new user: '{user.username}'")
     safe_password = user.password[:72]
     hashed = hash_pass(safe_password)
-    new_user = User(username=user.username, hashed_password=hashed, role=user.role)
+    # The role is always 'user': a client-supplied role is never trusted, promoting
+    # an account to admin is a manual database operation.
+    new_user = User(username=user.username, hashed_password=hashed, role="user")
     db.add(new_user)
-    await db.commit()
-    logger.info(f"Success: User '{user.username}' registered with role '{user.role}'.")
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        logger.warning(f"Registration rejected: username '{user.username}' is already taken")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Username '{user.username}' is already taken")
+    logger.info(f"Success: User '{user.username}' registered with role 'user'.")
     return {"message": "User registered successfully"}
 
 @app.post("/token")
@@ -177,7 +198,7 @@ async def get_training_modes(current_user: User = Depends(get_active_user)):
         "manual": "User-defined hyperparameters - full control over training settings",
         "auto_tune": "Grid search optimization - automatically searches for optimal parameters",
         "auto_fine_tune": "Adaptive tuning - fine-tuning with reduced learning rates for stability",
-        "llm_fine_tune": "AI-guided parameters - uses OpenAI to suggest optimal hyperparameters",
+        "llm_fine_tune": "AI-guided parameters - uses Google Gemini to suggest optimal hyperparameters",
         "auto_search": "Bayesian optimization - searches across multiple model candidates",
     }
     return {
@@ -218,6 +239,9 @@ async def get_datasets(current_user: User = Depends(get_active_user)):
 
 @app.post("/api/v1/ml/train")
 async def train_model_endpoint(payload: TrainRequest, current_user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+    # The requested optimisation metric is passed through untouched: resolving or
+    # remapping it here would hide the training internals from the HTTP layer and
+    # would silently optimise for a different metric than the one requested.
     training_run = TrainingRun(
         owner_id=current_user.id,
         model_name=payload.model_name,
@@ -282,6 +306,10 @@ async def list_training_runs(current_user: User = Depends(get_active_user), db: 
             "model_name": run.model_name,
             "dataset_source": run.dataset_source,
             "dataset_tag": run.dataset_tag,
+            "mode": run.mode,
+            "env_id": run.env_id,
+            "optimize_metric": run.optimize_metric,
+            "model_candidates": run.model_candidates,
             "status": run.status,
             "artifact_path": run.artifact_path,
             "metrics": run.metrics,
@@ -307,6 +335,10 @@ async def get_training_run(run_id: int, current_user: User = Depends(get_active_
         "metrics": run.metrics,
         "artifact_path": run.artifact_path,
         "status": run.status,
+        "mode": run.mode,
+        "env_id": run.env_id,
+        "optimize_metric": run.optimize_metric,
+        "model_candidates": run.model_candidates,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
     }

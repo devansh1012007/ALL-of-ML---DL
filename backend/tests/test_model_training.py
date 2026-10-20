@@ -38,7 +38,9 @@ def test_resnet50_catalog_entry():
 
 def test_train_model_auto_fine_tune_tabular(tmp_path):
     data_file = tmp_path / "simple.csv"
-    data = "feature,label\n1,0\n2,1\n3,0\n4,1\n"
+    # Three rows per class: with test_size=0.5 the training fold keeps both
+    # classes, otherwise the solver raises "needs samples of at least 2 classes".
+    data = "feature,label\n1,0\n2,1\n3,0\n4,1\n5,0\n6,1\n"
     data_file.write_text(data)
     metrics, source, tag, artifact = train_model(
         "Logistic_Regression",

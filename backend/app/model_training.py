@@ -120,6 +120,20 @@ DATA_DIR = ROOT / "data"
 MODEL_DIR = ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+# Parameters that belong to the training loop instead of the estimator: they configure the
+# train/test split and are passed to train_test_split() separately. They are stripped from
+# the client-supplied hyperparameters in train_model() (so no estimator can ever receive
+# them) and again in build_model() / _train_clustering() as defence in depth. Unknown
+# parameter names are deliberately NOT filtered - a typo must still raise TypeError from
+# the constructor.
+_TRAINER_OWNED_PARAMS = {"test_size"}
+
+# Keys that only one branch of a shared catalog entry accepts: SVC has "probability" and
+# "random_state", SVR has neither. A catalog entry shared by two estimators can only hold
+# the intersection of their parameters, so these are set or dropped per branch in
+# build_model() and are never taken from the catalog.
+_BRANCH_SPECIFIC_PARAMS = {"probability", "random_state"}
+
 MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     "K-Mean": {
         "category": "clustering",
@@ -134,7 +148,10 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         },
     },
     "HMM_timeseries": {
-        "category": "time-series",
+        # Category "clustering" routes the model to _train_clustering(), which owns the
+        # GaussianHMM branch. The former "time-series" category fell through to the
+        # tabular flow and died with "Unsupported model: HMM_timeseries".
+        "category": "clustering",
         "description": "HMM-based time-series modeling.",
         "params": {"n_components": 4, "covariance_type": "diag", "n_iter": 100},
         "optimization": ["n_components"],
@@ -239,7 +256,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "min_samples_leaf": 1,
             "random_state": 42,
             "n_jobs": -1,
-            "test_size": 0.2,
         },
         "optimization": ["n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"],
         "test_results": {
@@ -258,7 +274,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "solver": "lbfgs",
             "penalty": "l2",
             "random_state": 42,
-            "test_size": 0.2,
         },
         "optimization": ["C", "penalty"],
         "test_results": {
@@ -271,7 +286,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     "MLR": {
         "category": "regression",
         "description": "Multiple Linear Regression for numeric prediction.",
-        "params": {"fit_intercept": True, "test_size": 0.2, "random_state": 42},
+        "params": {"fit_intercept": True},
         "optimization": ["fit_intercept"],
         "test_results": {
             "expected_r2": (0.60, 0.95),
@@ -289,8 +304,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "algorithm": "auto",
             "p": 2,
             "n_jobs": -1,
-            "test_size": 0.2,
-            "random_state": 42,
         },
         "optimization": ["n_neighbors", "p"],
         "test_results": {
@@ -303,14 +316,14 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     "SVM": {
         "category": "classification",
         "description": "Support Vector Machine for classification or regression.",
+        # The entry feeds both SVC (classification) and SVR (regression): only keys that
+        # both estimators accept belong here - SVR has no "probability" and, since
+        # scikit-learn 1.9, no "random_state".
         "params": {
             "C": 1.0,
             "kernel": "rbf",
             "gamma": "scale",
-            "probability": True,
             "tol": 1e-3,
-            "random_state": 42,
-            "test_size": 0.2,
         },
         "optimization": ["C", "kernel", "gamma"],
         "test_results": {
@@ -331,7 +344,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "colsample_bytree": 0.8,
             "gamma": 0,
             "random_state": 42,
-            "test_size": 0.2,
         },
         "optimization": ["n_estimators", "learning_rate", "max_depth"],
         "test_results": {
@@ -352,7 +364,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "subsample": 0.8,
             "max_depth": -1,
             "random_state": 42,
-            "test_size": 0.2,
         },
         "optimization": ["n_estimators", "learning_rate", "num_leaves"],
         "test_results": {
@@ -372,7 +383,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "l2_leaf_reg": 3,
             "border_count": 32,
             "random_state": 42,
-            "test_size": 0.2,
         },
         "optimization": ["iterations", "learning_rate", "depth"],
         "test_results": {
@@ -867,9 +877,25 @@ def list_model_categories() -> List[str]:
 
 
 def list_local_datasets() -> List[str]:
+    """List the selectable local datasets: CSV files plus image dataset folders.
+
+    Vision models need a directory with one subdirectory per class, so directories are
+    listed as well. A tabular model pointed at a folder fails with a clear message in
+    _prepare_dataset(). Hidden files and hidden directories are skipped.
+    """
     if not DATA_DIR.exists():
         return []
-    return [str(path.name) for path in sorted(DATA_DIR.glob("*.csv"))]
+    names = {
+        path.name
+        for path in DATA_DIR.glob("*.csv")
+        if path.is_file() and not path.name.startswith(".")
+    }
+    names.update(
+        path.name
+        for path in DATA_DIR.iterdir()
+        if path.is_dir() and not path.name.startswith(".")
+    )
+    return sorted(names)
 
 
 def parse_hugging_face_reference(value: str) -> str:
@@ -904,6 +930,33 @@ def infer_task_type(y: pd.Series) -> str:
             return "classification"
         return "regression"
     return "classification"
+
+
+# Metrics for which a lower value is the better one.
+_LOWER_IS_BETTER_METRICS = ("mse", "rmse", "mae")
+
+# Metrics used to rank a candidate when the requested one is not reported by the run.
+_CANDIDATE_SCORE_KEYS = ("accuracy", "r2", "mse", "mean_reward")
+
+
+def score_candidate(metrics: Dict[str, Any], optimize_metric: str) -> float:
+    """Rank a trained candidate by a metric the run actually reports.
+
+    The previous lookup used `or`, so a missing metric (a regression run has no
+    "accuracy") collapsed every candidate to 0 and the first candidate always won.
+    Missing metrics are skipped, and error metrics are negated because lower is
+    better for them.
+    """
+    for key in (optimize_metric, *_CANDIDATE_SCORE_KEYS):
+        value = metrics.get(key)
+        if value is None:
+            continue
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            continue
+        return -score if key in _LOWER_IS_BETTER_METRICS else score
+    return 0.0
 
 
 def safe_json(value: Any) -> Any:
@@ -977,94 +1030,113 @@ def suggest_hyperparameters(
             prediction = prediction.strip()
             
             suggested = json.loads(prediction)
-            base_params.update({k: suggested[k] for k in suggested if k in base_params or isinstance(suggested[k], (int, float, str, bool))})
+            # Only keys the catalog declares for this model are accepted: the result is
+            # merged into the estimator constructor, so any other key (e.g. learning_rate
+            # for LogisticRegression) would raise TypeError during training.
+            base_params.update({k: v for k, v in suggested.items() if k in base_params})
             return base_params
         except Exception as exc:
             raise RuntimeError(f"LLM hyperparameter suggestion failed: {exc}")
 
-    if task_type == "classification":
-        base_params["learning_rate"] = base_params.get("learning_rate", 1e-3)
-    if task_type == "regression":
-        base_params["learning_rate"] = base_params.get("learning_rate", 1e-3)
-    if entry.get("category") == "clustering":
-        base_params["n_clusters"] = base_params.get("n_clusters", 4)
-    if entry.get("category") == "vision":
-        base_params["batch_size"] = base_params.get("batch_size", 16)
-        base_params["epochs"] = base_params.get("epochs", 3)
-    if entry.get("category") == "nlp":
-        base_params["batch_size"] = base_params.get("batch_size", 8)
-        base_params["epochs"] = base_params.get("epochs", 1)
+    # Without the LLM the function returns the catalog parameters of the model as they
+    # are: there is no heuristic that could add a value the catalog does not declare
+    # (an undeclared key would be rejected by the estimator constructor) and no grid
+    # search is implemented. A real search for the auto_tune mode is still TODO.
     return base_params
 
 
 def build_model(model_name: str, task_type: str, params: Dict[str, Any]):
+    # Trainer-owned keys (e.g. test_size) are removed before the constructor call; every
+    # other key is forwarded as-is so invalid names still raise TypeError.
+    estimator_params = {k: v for k, v in params.items() if k not in _TRAINER_OWNED_PARAMS}
     if model_name == "Random_Forest":
         if task_type == "classification":
-            return RandomForestClassifier(**params)
-        return RandomForestRegressor(**params)
+            return RandomForestClassifier(**estimator_params)
+        return RandomForestRegressor(**estimator_params)
     if model_name == "Logistic_Regression":
-        return LogisticRegression(**params)
+        return LogisticRegression(**estimator_params)
     if model_name == "MLR":
-        return LinearRegression(**params)
+        return LinearRegression(**estimator_params)
     if model_name == "KNN":
         if task_type == "classification":
-            return KNeighborsClassifier(**params)
-        return KNeighborsRegressor(**params)
+            return KNeighborsClassifier(**estimator_params)
+        return KNeighborsRegressor(**estimator_params)
     if model_name == "SVM":
         if task_type == "classification":
-            return SVC(probability=True, **params)
-        return SVR(**params)
+            # "probability" and "random_state" are set inside the dict: passing them
+            # twice raised "SVC() got multiple values for keyword argument ...". The
+            # seed is needed because probability=True enables the internal Platt
+            # calibration, which shuffles the data and is otherwise not reproducible.
+            svc_params = dict(estimator_params)
+            svc_params["probability"] = True
+            seed = svc_params.get("random_state")
+            svc_params["random_state"] = 42 if seed is None else seed
+            return SVC(**svc_params)
+        # The regression branch is SVR: it accepts neither "probability" nor
+        # "random_state" (scikit-learn >= 1.9), so both are dropped here.
+        return SVR(**{k: v for k, v in estimator_params.items() if k not in _BRANCH_SPECIFIC_PARAMS})
     if model_name == "XGboost_timeseries":
         if xgb is None:
             raise RuntimeError("xgboost is not installed")
         if task_type == "classification":
-            return xgb.XGBClassifier(use_label_encoder=False, eval_metric="logloss", **params)
-        return xgb.XGBRegressor(**params)
+            # The forced value must not collide with a client-supplied one, otherwise
+            # XGBClassifier() raises "got multiple values for keyword argument".
+            xgb_params = {**estimator_params, "eval_metric": estimator_params.get("eval_metric", "logloss")}
+            return xgb.XGBClassifier(**xgb_params)
+        return xgb.XGBRegressor(**estimator_params)
     if model_name == "lightGBM_timeseries":
         if lgb is None:
             raise RuntimeError("lightgbm is not installed")
         if task_type == "classification":
-            return lgb.LGBMClassifier(**params)
-        return lgb.LGBMRegressor(**params)
+            return lgb.LGBMClassifier(**estimator_params)
+        return lgb.LGBMRegressor(**estimator_params)
     if model_name == "CATboost_timeseries":
         if cb is None:
             raise RuntimeError("catboost is not installed")
+        # Same as above: "verbose" is forced, so it is merged into the dict instead of
+        # being passed as a separate keyword.
+        cb_params = {**estimator_params, "verbose": estimator_params.get("verbose", 0)}
         if task_type == "classification":
-            return cb.CatBoostClassifier(verbose=0, **params)
-        return cb.CatBoostRegressor(verbose=0, **params)
+            return cb.CatBoostClassifier(**cb_params)
+        return cb.CatBoostRegressor(**cb_params)
     raise ValueError(f"Unsupported model: {model_name}")
 
 
 def _train_clustering(model_name: str, X: pd.DataFrame, params: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+    # Defence in depth: the trainer-owned keys (e.g. test_size) belong to the training
+    # loop and are never valid estimator arguments. train_model() already strips them
+    # from the client-supplied hyperparameters, this filter keeps the function safe
+    # for every caller. Every other key is forwarded as-is, so a typo still raises.
+    estimator_params = {k: v for k, v in params.items() if k not in _TRAINER_OWNED_PARAMS}
     is_embedding = False
     model = None
     if model_name == "K-Mean":
-        model = KMeans(**params)
+        model = KMeans(**estimator_params)
     elif model_name == "GMM":
-        model = GaussianMixture(**params)
+        model = GaussianMixture(**estimator_params)
     elif model_name == "Hierarchical_Clustering":
-        model = AgglomerativeClustering(**params)
+        model = AgglomerativeClustering(**estimator_params)
     elif model_name == "DBSCAN":
-        model = DBSCAN(**params)
+        model = DBSCAN(**estimator_params)
     elif model_name == "HDBSCAN":
         if hdbscan is None:
             raise RuntimeError("hdbscan is not installed")
-        model = hdbscan.HDBSCAN(**params)
+        model = hdbscan.HDBSCAN(**estimator_params)
     elif model_name == "PCA":
-        model = PCA(**params)
+        model = PCA(**estimator_params)
         is_embedding = True
     elif model_name == "t-SNE":
-        model = TSNE(**params)
+        model = TSNE(**estimator_params)
         is_embedding = True
     elif model_name == "UMAP":
         if umap is None:
             raise RuntimeError("umap is not installed")
-        model = umap.UMAP(**params)
+        model = umap.UMAP(**estimator_params)
         is_embedding = True
     elif model_name == "HMM_timeseries":
         if hmm is None:
             raise RuntimeError("hmmlearn is not installed")
-        model = hmm.GaussianHMM(**params)
+        model = hmm.GaussianHMM(**estimator_params)
     else:
         raise ValueError(f"Unsupported clustering model: {model_name}")
 
@@ -1386,17 +1458,45 @@ def train_model(
     
     hyperparameters = ensure_dict(hyperparameters, "hyperparameters")
     
-    # Apply preset configuration
-    if preset and preset in TRAINING_PRESETS:
-        hyperparameters = apply_preset(hyperparameters, preset)
+    # Trainer-owned keys (e.g. test_size) configure the training loop, not the
+    # estimator: they are dropped from the client-supplied hyperparameters here, so no
+    # estimator constructor can ever receive them. The split is governed by the
+    # top-level test_size argument, a client-supplied hyperparameters["test_size"] is
+    # ignored. Every other key is kept, so a typo still raises TypeError later on.
+    hyperparameters = {k: v for k, v in hyperparameters.items() if k not in _TRAINER_OWNED_PARAMS}
+    
+    # The raw client values (the trainer-owned keys are already stripped). They are
+    # kept unadjusted on purpose: the preset is applied by _effective_params() below,
+    # exactly once, to the merged base - never to the raw request. Adjusting the
+    # request here would make the preset a no-op for the modes whose requests carry
+    # an empty "hyperparameters" dict (the catalog defaults are merged in later and
+    # would never be scaled).
+    user_hyperparameters = hyperparameters
     
     model_def = get_model_entry(model_name)
+    
+    def _effective_params(suggested: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Merge the catalog defaults, the mode suggestions and the client's values.
+
+        The preset is applied exactly once, to the merged base, so it scales the
+        catalog/suggested values even when the client sends an empty
+        ``hyperparameters`` dict. The client's own values are scaled as well and
+        still win over the base.
+        """
+        base = {**model_def["params"], **(suggested or {})}
+        client = apply_preset(user_hyperparameters, preset)
+        if preset and preset in TRAINING_PRESETS:
+            base = apply_preset(base, preset)
+        return {**base, **client}
+    
+    # The category of the catalog entry selects the training path - see the routing
+    # table in backend/app/README.md.
     
     # REINFORCEMENT LEARNING MODELS
     if model_def["category"] == "reinforcement-learning":
         if env_id is None:
             raise ValueError("env_id is required for reinforcement learning models.")
-        metrics = _train_rl_model(model_name, env_id, {**model_def["params"], **hyperparameters})
+        metrics = _train_rl_model(model_name, env_id, _effective_params())
         artifact_path = write_artifact(model_name, metrics)
         return metrics, "rl", env_id, artifact_path
     
@@ -1408,22 +1508,21 @@ def train_model(
                 "Provide an absolute path or a path under the data/ folder."
             )
         
-        # Apply mode-specific hyperparameter adjustments for vision
+        # The mode's own suggestions for this model. They are merged into the base
+        # by _effective_params() below, they never overwrite the client's values.
+        vision_suggested: Dict[str, Any] = {}
         if mode == "auto_tune":
             # Auto-tune: Try different learning rates and batch sizes
-            suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=False)
-            hyperparameters = {**model_def["params"], **suggested, **hyperparameters}
+            vision_suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=False)
         elif mode == "auto_fine_tune":
             # Auto fine-tune: Adaptive tuning with smaller initial LR for fine-tuning
-            suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=False)
-            suggested["learning_rate"] = suggested.get("learning_rate", 1e-3) * 0.1  # Smaller for fine-tuning
-            hyperparameters = {**model_def["params"], **suggested, **hyperparameters}
+            vision_suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=False)
+            vision_suggested["learning_rate"] = vision_suggested.get("learning_rate", 1e-3) * 0.1  # Smaller for fine-tuning
         elif mode == "llm_fine_tune":
             # LLM-guided fine-tuning
-            suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=True)
-            hyperparameters = {**model_def["params"], **suggested, **hyperparameters}
+            vision_suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=True)
         
-        metrics, model = _train_resnet_image_model(model_name, dataset_name, {**model_def["params"], **hyperparameters})
+        metrics, model = _train_resnet_image_model(model_name, dataset_name, _effective_params(vision_suggested))
         artifact_path = write_artifact(model_name, model)
         return metrics, "local", dataset_name, artifact_path
     
@@ -1439,11 +1538,22 @@ def train_model(
     
     # AUTO_SEARCH: Try multiple model candidates
     if mode == "auto_search" and model_candidates:
-        best_metrics = None
+        best_score = None
         best_result = None
         best_candidate = None
         for candidate in model_candidates:
             try:
+                # Only the parameters the candidate itself declares are forwarded.
+                # In the single-model path an unknown key still raises TypeError
+                # (that contract is deliberate: a silently ignored parameter is
+                # worse than a loud failure), but in a multi-candidate search a
+                # parameter that a candidate does not accept would make that
+                # candidate fail and silently disappear from the comparison.
+                candidate_params = {
+                    key: value
+                    for key, value in user_hyperparameters.items()
+                    if key in get_model_entry(candidate).get("params", {})
+                }
                 candidate_metrics, ds, ds_tag, artifact_path = train_model(
                     candidate,
                     dataset_name,
@@ -1451,7 +1561,7 @@ def train_model(
                     label_column,
                     test_size,
                     random_state,
-                    hyperparameters,
+                    candidate_params,
                     sep,
                     usecols,
                     "manual",
@@ -1459,9 +1569,11 @@ def train_model(
                     env_id,
                     preset=preset,
                 )
-                score = candidate_metrics.get(optimize_metric) or candidate_metrics.get("accuracy") or 0
-                if best_metrics is None or score > best_metrics:
-                    best_metrics = score
+                score = score_candidate(candidate_metrics, optimize_metric)
+                # "best_score is None" (not "or score") so that a legitimate score of 0
+                # is kept as the incumbent instead of being discarded.
+                if best_score is None or score > best_score:
+                    best_score = score
                     best_result = (candidate_metrics, ds, ds_tag, artifact_path)
                     best_candidate = candidate
             except Exception as exc:
@@ -1472,9 +1584,14 @@ def train_model(
         best_result[0]["best_candidate"] = best_candidate
         return best_result
     
+    # The mode's own suggestions. They are merged into the base by
+    # _effective_params() at the leaf (the single merge point of the run); they
+    # never overwrite the client's values.
+    mode_suggested: Dict[str, Any] = {}
+    
     # Mode: AUTO_TUNE - Grid search over key hyperparameters
     if mode == "auto_tune":
-        suggested = suggest_hyperparameters(
+        mode_suggested = suggest_hyperparameters(
             model_name,
             task_type,
             optimize_metric,
@@ -1482,11 +1599,10 @@ def train_model(
             hf_dataset_url,
             use_llm=False,
         )
-        hyperparameters = {**model_def["params"], **suggested, **hyperparameters}
     
     # Mode: AUTO_FINE_TUNE - Adaptive parameter adjustment
     elif mode == "auto_fine_tune":
-        suggested = suggest_hyperparameters(
+        mode_suggested = suggest_hyperparameters(
             model_name,
             task_type,
             optimize_metric,
@@ -1495,15 +1611,14 @@ def train_model(
             use_llm=False,
         )
         # Apply fine-tuning adjustments: lower learning rate for stability
-        if "learning_rate" in suggested:
-            suggested["learning_rate"] = suggested["learning_rate"] * 0.1
-        if "epochs" in suggested:
-            suggested["epochs"] = max(1, int(suggested["epochs"] * 0.5))
-        hyperparameters = {**model_def["params"], **suggested, **hyperparameters}
+        if "learning_rate" in mode_suggested:
+            mode_suggested["learning_rate"] = mode_suggested["learning_rate"] * 0.1
+        if "epochs" in mode_suggested:
+            mode_suggested["epochs"] = max(1, int(mode_suggested["epochs"] * 0.5))
     
     # Mode: LLM_FINE_TUNE - AI-guided parameter selection
     elif mode == "llm_fine_tune":
-        suggested = suggest_hyperparameters(
+        mode_suggested = suggest_hyperparameters(
             model_name,
             task_type,
             optimize_metric,
@@ -1511,12 +1626,11 @@ def train_model(
             hf_dataset_url,
             use_llm=True,
         )
-        hyperparameters = {**model_def["params"], **suggested, **hyperparameters}
     
     # CLUSTERING MODELS
     if model_def["category"] == "clustering":
         X = dataset.drop(columns=[label_column]) if label_column in dataset.columns else dataset
-        metrics, model = _train_clustering(model_name, X, {**model_def["params"], **hyperparameters})
+        metrics, model = _train_clustering(model_name, X, _effective_params(mode_suggested))
         artifact_path = write_artifact(model_name, model)
         return metrics, dataset_source, dataset_tag, artifact_path
     
@@ -1527,7 +1641,7 @@ def train_model(
             model_def,
             dataset,
             label_column,
-            {**model_def["params"], **hyperparameters},
+            _effective_params(mode_suggested),
         )
         artifact_path = write_artifact(model_name, model)
         return metrics, dataset_source, dataset_tag, artifact_path
@@ -1538,7 +1652,7 @@ def train_model(
             model_name,
             dataset,
             label_column,
-            {**model_def["params"], **hyperparameters, "test_size": test_size, "random_state": random_state},
+            {**_effective_params(mode_suggested), "test_size": test_size, "random_state": random_state},
         )
         artifact_path = write_artifact(model_name, model)
         return metrics, dataset_source, dataset_tag, artifact_path
@@ -1552,7 +1666,7 @@ def train_model(
     task_type = infer_task_type(y)
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
-    model = build_model(model_name, task_type, {**model_def["params"], **hyperparameters})
+    model = build_model(model_name, task_type, _effective_params(mode_suggested))
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
     
@@ -1564,7 +1678,9 @@ def train_model(
         "train_size": len(X_train),
         "test_size": len(X_test),
         "feature_count": X.shape[1],
-        "model_parameters": safe_json({**model_def["params"], **hyperparameters}),
+        # The parameters that were really used: the catalog defaults, the mode's
+        # suggestions and the client's values, with the preset applied once.
+        "model_parameters": safe_json(_effective_params(mode_suggested)),
     }
     
     artifact_path = write_artifact(model_name, model)
