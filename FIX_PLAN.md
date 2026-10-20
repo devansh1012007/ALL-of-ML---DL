@@ -93,6 +93,8 @@ A reviewer subagent audits each phase's diff; findings are fixed and re-reviewed
 
 ## Deferred (deliberately out of scope this round)
 
+> **All six items below are now planned in detail in [`FOLLOWUP_PLAN.md`](FOLLOWUP_PLAN.md)** (phases 6-11), with the decisions taken by the repository owner: require a token everywhere, drop the `notes` table, make Alembic the only schema owner, and make the placeholder models honest.
+
 - **Async training** (`POST /api/v1/ml/train` trains synchronously inside the request → the UI blocks for the whole run and a proxy timeout leaves the run stuck in `running`). Fix = `BackgroundTasks` + status polling in the frontend; it changes the API contract and requires rewriting `test_train_invalid_dataset`. Planned as its own phase after Phases 1-4 are green.
 - **Alembic drift**: the migrations create `notes` and never `training_runs`, so `alembic upgrade head` yields an unusable schema (the app relies on `create_all`). Needs a new revision.
 - **`@app.on_event("startup")` deprecation** → migrate to a `lifespan` handler.
