@@ -12,7 +12,8 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from .database import get_db, engine, Base
+from .base import Base
+from .database import get_db, engine
 from .models import User, TrainingRun
 from .auth import ALGORITHM, SECRET_KEY, verify_pass, create_token, hash_pass
 from .model_training import list_available_models, list_local_datasets, list_model_categories, suggest_hyperparameters, train_model, TRAINING_MODES, TRAINING_PRESETS
@@ -42,21 +43,70 @@ async def lifespan(app: FastAPI):
 async def verify_schema() -> None:
     """Fail fast when the database schema is behind the migrations.
 
-    Every table the ORM knows about must exist in the database. A missing
-    table means the migrations were not applied (or not applied completely),
-    which is a deployment error and not a runtime condition to work around.
+    Three things are checked, because each of them breaks the application in
+    a different way:
+
+    * every table the ORM knows about must exist;
+    * every column the ORM declares must exist in its table - a table that was
+      created by an older version of the application has the right name but
+      the wrong columns, and the application would fail on the first query
+      that touches the missing column;
+    * the database must be under the control of Alembic, i.e. it must carry
+      the ``alembic_version`` table. A database that was only ever touched by
+      the application itself has the right tables but no migration history,
+      so the next ``alembic upgrade head`` would try to create them again.
     """
     async with engine.connect() as conn:
+        inspector = await conn.run_sync(lambda sync_conn: sa.inspect(sync_conn))
         names = await conn.run_sync(
             lambda sync_conn: sa.inspect(sync_conn).get_table_names()
         )
-    missing = [
+        columns = {
+            table.name: await conn.run_sync(
+                lambda sync_conn, name=table.name: {
+                    column["name"] for column in sa.inspect(sync_conn).get_columns(name)
+                }
+            )
+            for table in Base.metadata.sorted_tables
+            if table.name in names
+        }
+
+    problems: List[str] = []
+
+    missing_tables = [
         table.name for table in Base.metadata.sorted_tables if table.name not in names
     ]
-    if missing:
+    if missing_tables:
+        problems.append(f"missing table(s) {missing_tables}")
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in columns:
+            continue
+        declared = {column.name for column in table.columns}
+        present = columns[table.name]
+        missing_columns = sorted(declared - present)
+        extra_columns = sorted(present - declared)
+        if missing_columns:
+            problems.append(
+                f"table '{table.name}' is missing the column(s) {missing_columns}"
+            )
+        if extra_columns:
+            problems.append(
+                f"table '{table.name}' has the unexpected column(s) {extra_columns}"
+            )
+
+    if "alembic_version" not in names:
+        problems.append(
+            "the database has no alembic_version table, so it was never migrated"
+        )
+
+    if problems:
         raise RuntimeError(
-            f"The database schema is not up to date: missing table(s) {missing}. "
-            "Run `alembic upgrade head` in the backend/ directory first."
+            "The database schema does not match the migrations: "
+            + "; ".join(problems)
+            + ". Run `alembic upgrade head` in the backend/ directory first. "
+            "If the database is already at the latest revision, the schema "
+            "itself has drifted: `alembic check` shows the difference."
         )
 
 

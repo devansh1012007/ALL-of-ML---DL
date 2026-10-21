@@ -12,7 +12,7 @@ python-multipart
 
 python-dotenv==1.0.1      # Loads environment variables from a .env file (useful for local testing)
 
-alembic
+alembic>=1.9
 pandas
 # Pinned: the "penalty" parameter of LogisticRegression is deprecated in
 # scikit-learn 1.8 and removed in 1.10, "probability" of SVC is removed in 1.11.

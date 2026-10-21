@@ -11,7 +11,7 @@ from alembic import context
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.models import Base
-from app.database import DATABASE_URL
+from app.settings import DATABASE_URL
 target_metadata = Base.metadata
 
 # this is the Alembic Config object, which provides
