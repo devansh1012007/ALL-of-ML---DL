@@ -2,12 +2,12 @@
 
 They lock in the contracts of the API:
 
-* the API stays usable without authentication: a request without an
-  ``Authorization`` header falls back to the shared anonymous user;
-* a request with an **invalid** credential is rejected with 401 and must not
-  create an anonymous user on the side;
-* a registration cannot choose its own role and a duplicate registration is a
-  conflict (409), not a server error, and it must not break the session;
+* every ML endpoint requires a valid token: a request without an
+  ``Authorization`` header is rejected with 401;
+* a request with an **invalid** credential is rejected with 401 as well;
+* a registration cannot choose its own role, a duplicate registration is a
+  conflict (409) not a server error, and it must not break the session;
+* the credential policy is enforced and the reserved names are refused;
 * the run history exposes the mode and the environment of a run next to the
   fields it always exposed;
 * an auto-search on a regression dataset picks the better candidate instead of
@@ -55,6 +55,23 @@ def client():
         yield test_client
 
 
+@pytest.fixture(scope="module")
+def auth(client):
+    """The headers of a registered, logged-in user.
+
+    Every ML endpoint requires a token, so the tests that talk to them need
+    one. The user is registered once for the module.
+    """
+    username = "test_user"
+    client.post(
+        "/api/v1/register", json={"username": username, "password": "secret123"}
+    )
+    token = client.post(
+        "/token", data={"username": username, "password": "secret123"}
+    ).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _query(sql, params=()):
     connection = sqlite3.connect(DATABASE_PATH)
     try:
@@ -70,36 +87,35 @@ def _user_rows(username):
     return _query("SELECT id, username, role FROM users WHERE username = ?", (username,))
 
 
-def _anonymous_count():
-    return len(_user_rows("anonymous"))
-
-
 def _token(payload):
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def _valid_token(username="anonymous"):
+def _valid_token(username="test_user"):
     return _token({"sub": username, "exp": datetime.utcnow() + timedelta(hours=1)})
 
 
-def _expired_token(username="anonymous"):
+def _expired_token(username="test_user"):
     return _token({"sub": username, "exp": datetime.utcnow() - timedelta(hours=1)})
 
 
-def _tampered_token(username="anonymous"):
+def _tampered_token(username="test_user"):
     header, payload, signature = _valid_token(username).split(".")
     return f"{header}.{payload}.{'A' * len(signature)}"
 
 
-def test_requests_without_authorization_header_stay_available(client):
-    """No credential means the anonymous fallback, not an error."""
+def test_requests_without_authorization_header_are_rejected(client):
+    """Every ML endpoint needs a token.
+
+    The previous behaviour - falling back to a shared ``anonymous`` account -
+    meant that all the unauthenticated callers shared one history and that the
+    account could be logged into with the password ``anonymous``.
+    """
     models = client.get("/api/v1/ml/models")
     runs = client.get("/api/v1/ml/runs")
 
-    assert models.status_code == 200
-    assert isinstance(models.json(), list)
-    assert runs.status_code == 200
-    assert isinstance(runs.json(), list)
+    assert models.status_code == 401
+    assert runs.status_code == 401
 
 
 @pytest.mark.parametrize(
@@ -113,26 +129,70 @@ def test_requests_without_authorization_header_stay_available(client):
     ],
 )
 def test_malformed_credentials_are_rejected(client, authorization):
-    """A malformed credential is a 401 and must not create an anonymous user."""
-    before = _anonymous_count()
+    """A malformed credential is a 401."""
     response = client.get("/api/v1/ml/models", headers={"Authorization": authorization})
-    after = _anonymous_count()
 
     assert response.status_code == 401
-    assert after == before, "a rejected request must not create an anonymous user"
 
 
 @pytest.mark.parametrize("token_factory", [_expired_token, _tampered_token])
-def test_invalid_tokens_are_rejected(client, token_factory):
-    """An expired or tampered token is a 401 and creates no anonymous user."""
-    before = _anonymous_count()
+def test_invalid_tokens_are_rejected(client, auth, token_factory):
+    """An expired or tampered token is a 401."""
     response = client.get(
         "/api/v1/ml/models", headers={"Authorization": f"Bearer {token_factory()}"}
     )
-    after = _anonymous_count()
 
     assert response.status_code == 401
-    assert after == before, "a rejected request must not create an anonymous user"
+
+
+def test_a_valid_token_is_accepted(client, auth):
+    """The token of a registered user opens the ML endpoints."""
+    response = client.get("/api/v1/ml/models", headers=auth)
+
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+
+def test_the_anonymous_account_cannot_be_used(client):
+    """The shared anonymous account is gone.
+
+    It used to be created on the first token-less request and to be
+    loggable with the password ``anonymous``.
+    """
+    assert _user_rows("anonymous") == []
+
+    login = client.post("/token", data={"username": "anonymous", "password": "anonymous"})
+    assert login.status_code == 400
+
+
+@pytest.mark.parametrize("username", ["anonymous", "admin", "root", "system"])
+def test_the_reserved_usernames_cannot_be_registered(client, username):
+    """A reserved name is refused."""
+    registration = client.post(
+        "/api/v1/register", json={"username": username, "password": "secret123"}
+    )
+
+    assert registration.status_code == 400
+    assert _user_rows(username) == []
+
+
+def test_a_short_password_is_refused(client):
+    """The credential policy is enforced."""
+    registration = client.post(
+        "/api/v1/register", json={"username": "short_password", "password": "short"}
+    )
+
+    assert registration.status_code == 400
+    assert _user_rows("short_password") == []
+
+
+def test_the_login_is_rate_limited(client):
+    """A client that tries too many passwords is stopped."""
+    for _ in range(20):
+        client.post("/token", data={"username": "guessed", "password": "guessed"})
+
+    response = client.post("/token", data={"username": "guessed", "password": "guessed"})
+    assert response.status_code == 429, response.text
 
 
 def test_token_of_a_deleted_user_is_rejected(client):
@@ -197,10 +257,13 @@ def test_registration_never_stores_a_client_supplied_role(client):
     assert admin_listing.status_code == 403
 
 
-def test_run_history_exposes_the_mode_and_the_environment(client, classification_dataset):
+def test_run_history_exposes_the_mode_and_the_environment(
+    client, auth, classification_dataset
+):
     """The run history exposes the mode and env_id next to the old fields."""
     response = client.post(
         "/api/v1/ml/train",
+        headers=auth,
         json={
             "model_name": "Logistic_Regression",
             "dataset_name": str(classification_dataset),
@@ -217,7 +280,7 @@ def test_run_history_exposes_the_mode_and_the_environment(client, classification
     # The environment of a run is stored with the run.
     _query("UPDATE training_runs SET env_id = ? WHERE id = ?", ("CartPole-v1", run_id))
 
-    listing = client.get("/api/v1/ml/runs")
+    listing = client.get("/api/v1/ml/runs", headers=auth)
     assert listing.status_code == 200
     runs = listing.json()
     run = next(item for item in runs if item["id"] == run_id)
@@ -227,7 +290,7 @@ def test_run_history_exposes_the_mode_and_the_environment(client, classification
     assert run["mode"] == "manual"
     assert run["env_id"] == "CartPole-v1"
 
-    detail = client.get(f"/api/v1/ml/runs/{run_id}")
+    detail = client.get(f"/api/v1/ml/runs/{run_id}", headers=auth)
     assert detail.status_code == 200
     detail_run = detail.json()
     assert PRE_EXISTING_DETAIL_KEYS <= set(detail_run)
@@ -238,7 +301,7 @@ def test_run_history_exposes_the_mode_and_the_environment(client, classification
 
 
 def test_auto_search_picks_the_better_candidate_on_a_regression_dataset(
-    client, regression_dataset
+    client, auth, regression_dataset
 ):
     """A regression run must be ranked on a metric it really reports.
 
@@ -247,6 +310,7 @@ def test_auto_search_picks_the_better_candidate_on_a_regression_dataset(
     """
     response = client.post(
         "/api/v1/ml/train",
+        headers=auth,
         json={
             "model_name": "MLR",
             "dataset_name": str(regression_dataset),

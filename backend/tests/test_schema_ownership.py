@@ -340,7 +340,15 @@ def test_the_app_refuses_to_start_against_an_unmigrated_database(
 
 
 def test_the_app_starts_against_the_migrated_database():
-    """The lifespan runs the schema check and lets a migrated database through."""
+    """The lifespan runs the schema check and lets a migrated database through.
+
+    The endpoint that is called here needs a token, so the request answers 401
+    - what matters is that the application started at all, because the schema
+    check runs in the lifespan.
+    """
     with TestClient(app) as client:
         response = client.get("/api/v1/ml/models")
-        assert response.status_code == 200
+        assert response.status_code == 401, (
+            "the application did not start: the schema check should have "
+            "refused a migrated database"
+        )

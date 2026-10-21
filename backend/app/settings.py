@@ -7,6 +7,11 @@ connection).
 """
 
 import os
+from pathlib import Path
+
+# The root of the repository. The application and the migrations resolve their
+# paths against it, so the two cannot disagree about where the data lives.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # The URL of the database. It is read once, at import time, because the engine
 # is built from it. ``DATABASE_URL`` always wins; the fallback is the local

@@ -222,6 +222,8 @@ const AuthView = ({ mode, setMode }) => {
     } catch (err) {
       setError(err.status === 409
         ? 'Username already taken. Please choose a different username.'
+        : err.status === 429
+        ? 'Too many attempts. Please wait a minute and try again.'
         : err.message);
     } finally {
       setLoading(false);
@@ -271,12 +273,16 @@ const AuthView = ({ mode, setMode }) => {
               <input
                 type="password"
                 required
+                minLength={mode === 'register' ? 8 : undefined}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full pl-10 pr-4 py-2 bg-zinc-950 border border-zinc-800 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-white"
                 placeholder="••••••••"
               />
             </div>
+            {mode === 'register' && (
+              <p className="mt-1 text-xs text-zinc-500">At least 8 characters.</p>
+            )}
           </div>
           <button
             type="submit"

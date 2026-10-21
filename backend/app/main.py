@@ -1,5 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, status
 import logging
+import os
+import time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -15,7 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .base import Base
 from .database import get_db, engine
 from .models import User, TrainingRun
-from .auth import ALGORITHM, SECRET_KEY, verify_pass, create_token, hash_pass
+from .auth import (
+    ALGORITHM,
+    SECRET_KEY,
+    create_token,
+    dummy_password_hash,
+    hash_pass,
+    validate_credentials,
+    verify_pass,
+)
 from .model_training import list_available_models, list_local_datasets, list_model_categories, suggest_hyperparameters, train_model, TRAINING_MODES, TRAINING_PRESETS
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -123,56 +134,144 @@ logging.basicConfig(
 )
 logger = logging.getLogger("PrimeTradeAPI")
 
+# --- CORS -------------------------------------------------------------------
+# The browser SPA is served by Vite (frontend/vite.config.js -> port 3000) and
+# calls this API cross-origin (3000 -> 8010). The allow-list is therefore
+# explicit: ``allow_origins=["*"]`` together with ``allow_credentials=True`` is
+# rejected by the Fetch standard (a wildcard is not allowed on a credentialed
+# request) and, at runtime, makes the server reflect *any* origin with
+# credentials enabled.
+#
+# CORS_ORIGINS is a comma-separated list of the allowed origins. When it is not
+# set the development origins of the SPA are used, so a misconfigured
+# environment never silently opens the API to every origin. The special value
+# "*" restores the old behaviour and is only valid without credentials.
+DEFAULT_CORS_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
+
+def _cors_origins() -> List[str]:
+    """The origins that are allowed to call the API from a browser."""
+    raw = os.getenv("CORS_ORIGINS", "")
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    if not origins:
+        return list(DEFAULT_CORS_ORIGINS)
+    return origins
+
+
+_CORS_ORIGINS = _cors_origins()
+_CORS_ALLOWS_ANY = "*" in _CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS,
+    # A wildcard origin cannot be combined with credentials: the browser
+    # rejects such a response, and the server would otherwise reflect the
+    # requesting origin with the credentials enabled.
+    allow_credentials=not _CORS_ALLOWS_ANY,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-async def get_active_user(
+# --- rate limiting ----------------------------------------------------------
+# A login endpoint that is not limited can be used to try passwords, and an
+# un-limited registration endpoint can be used to fill the database. The
+# limiter counts the attempts of every client in a sliding window. It lives in
+# the memory of the process, which is enough for the single-process deployment
+# this application runs in; a multi-worker deployment would need a shared
+# store.
+LOGIN_RATE_LIMIT = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
+REGISTER_RATE_LIMIT = int(os.getenv("REGISTER_RATE_LIMIT", "20"))
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+# The attempts per key. A failed login is counted under the address *and* the
+# username: an attacker who guesses one account must not lock out the other
+# users behind the same address. A registration is counted under the address
+# alone, because it is the account count that has to be limited.
+_login_attempts: Dict[str, deque] = defaultdict(deque)
+
+
+def _client_address(request: Request) -> str:
+    """The address of the client that made the request."""
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(key: str, limit: int) -> None:
+    """Raise 429 when the client made too many attempts.
+
+    The window is a sliding one: an attempt that is older than the window is
+    forgotten, so a client that stops trying gets its budget back.
+    """
+    if limit <= 0:
+        return
+    now = time.monotonic()
+    attempts = _login_attempts[key]
+    while attempts and now - attempts[0] > RATE_LIMIT_WINDOW_SECONDS:
+        attempts.popleft()
+    if len(attempts) >= limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many attempts. Please try again in a minute.",
+        )
+
+
+def _record_rate_limit(key: str) -> None:
+    """Count an attempt against the client's budget."""
+    _login_attempts[key].append(time.monotonic())
+
+
+def _forget_rate_limit(key: str) -> None:
+    """Give the client its budget back after a successful attempt."""
+    _login_attempts.pop(key, None)
+
+
+def reset_rate_limits() -> None:
+    """Forget every recorded attempt.
+
+    The test suite uses it so that every test starts with a clean budget.
+    """
+    _login_attempts.clear()
+
+
+async def get_current_user(
     authorization: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ):
-    if authorization is not None:
-        # A credential was supplied, so it has to be valid: an invalid, malformed or
-        # expired token is rejected with 401 instead of being silently downgraded to
-        # the shared anonymous user. That keeps the frontend's 401 -> logout path
-        # working and stops a user's runs from disappearing after token expiry.
-        # The check is `is not None` (not truthiness) on purpose: a present but empty
-        # Authorization header is a broken credential, not a missing one, so it must
-        # be rejected instead of falling through to the anonymous fallback.
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
-        try:
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        except JOSEError:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}) from None
-        username: str = payload.get("sub")
-        if not username:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
-        result = await db.execute(select(User).where(User.username == username))
-        user = result.scalars().first()
-        if user is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
-        return user
+    """The user of the request, or 401.
 
-    # No Authorization header: the API stays usable without authentication by falling
-    # back to a shared anonymous user, which is created on first use.
-    result = await db.execute(select(User).where(User.username == "anonymous"))
+    Every ML endpoint requires a valid token. The previous behaviour - a
+    request without a header fell back to a shared ``anonymous`` account -
+    meant that all the unauthenticated callers shared one history, that the
+    account could be logged into with the password ``anonymous``, and that a
+    dataset uploaded by one of them belonged to all of them.
+    """
+    if authorization is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # A credential was supplied, so it has to be valid: an invalid, malformed
+    # or expired token is rejected with 401. The check is `is not None` (not
+    # truthiness) on purpose: a present but empty Authorization header is a
+    # broken credential, not a missing one.
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JOSEError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}) from None
+    username: str = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    result = await db.execute(select(User).where(User.username == username))
     user = result.scalars().first()
-    if user:
-        return user
-
-    anonymous = User(username="anonymous", hashed_password=hash_pass("anonymous"), role="user")
-    db.add(anonymous)
-    await db.commit()
-    await db.refresh(anonymous)
-    return anonymous
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    return user
 
 class UserCreate(BaseModel):
     username: str
@@ -197,30 +296,24 @@ class TrainRequest(BaseModel):
     sep: Optional[str] = ","
     usecols: Optional[List[str]] = None
 
-async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JOSEError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}) from None
-    username: str = payload.get("sub")
-    if not username:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
-    result = await db.execute(select(User).where(User.username == username))
-    user = result.scalars().first()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
-    return user
-
 async def get_current_admin(current_user: User = Depends(get_current_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return current_user
 
 @app.post("/api/v1/register")
-async def register(user: UserCreate, db=Depends(get_db)):
+async def register(user: UserCreate, request: Request, db=Depends(get_db)):
+    address = _client_address(request)
+    _check_rate_limit(f"register:{address}", REGISTER_RATE_LIMIT)
+    reason = validate_credentials(user.username, user.password)
+    if reason:
+        logger.warning(f"Registration rejected for '{user.username}': {reason}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
     logger.info(f"Registration attempt for new user: '{user.username}'")
     safe_password = user.password[:72]
-    hashed = hash_pass(safe_password)
+    # bcrypt is a CPU-bound hash: running it in the event loop blocks every
+    # other request for the duration of the hash.
+    hashed = await run_in_threadpool(hash_pass, safe_password)
     # The role is always 'user': a client-supplied role is never trusted, promoting
     # an account to admin is a manual database operation.
     new_user = User(username=user.username, hashed_password=hashed, role="user")
@@ -232,18 +325,32 @@ async def register(user: UserCreate, db=Depends(get_db)):
         logger.warning(f"Registration rejected: username '{user.username}' is already taken")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Username '{user.username}' is already taken")
     logger.info(f"Success: User '{user.username}' registered with role 'user'.")
+    _record_rate_limit(f"register:{address}")
     return {"message": "User registered successfully"}
 
 @app.post("/token")
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    # Only a *failed* login counts against the budget: a user who signs in
+    # repeatedly is not an attacker, and locking them out would be a denial of
+    # service they did not deserve.
+    key = f"login:{_client_address(request)}:{form_data.username}"
+    _check_rate_limit(key, LOGIN_RATE_LIMIT)
     logger.info(f"Login attempt for user: '{form_data.username}'")
     result = await db.execute(select(User).where(User.username == form_data.username))
     user = result.scalars().first()
-    if not user or not verify_pass(form_data.password, user.hashed_password):
+    # The password is verified even when the user does not exist, against a
+    # dummy hash: otherwise the answer arrives measurably faster for an
+    # unknown user, which turns the endpoint into an oracle for the existence
+    # of an account.
+    stored_hash = user.hashed_password if user else dummy_password_hash()
+    password_matches = await run_in_threadpool(verify_pass, form_data.password, stored_hash)
+    if not user or not password_matches:
         logger.warning(f"Failed login: Incorrect credentials for '{form_data.username}'")
+        _record_rate_limit(key)
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     logger.info(f"Success: User '{user.username}' logged in successfully.")
     access_token = create_token(data={"sub": user.username, "role": user.role})
+    _forget_rate_limit(key)
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/api/v1/admin/all-users")
@@ -253,15 +360,15 @@ async def get_all_users(admin_user: User = Depends(get_current_admin), db: Async
     return [{"id": u.id, "username": u.username, "role": u.role} for u in users]
 
 @app.get("/api/v1/ml/models")
-async def get_ml_models(current_user: User = Depends(get_active_user)):
+async def get_ml_models(current_user: User = Depends(get_current_user)):
     return list_available_models()
 
 @app.get("/api/v1/ml/model-categories")
-async def get_ml_categories(current_user: User = Depends(get_active_user)):
+async def get_ml_categories(current_user: User = Depends(get_current_user)):
     return {"categories": list_model_categories()}
 
 @app.get("/api/v1/ml/model-details")
-async def get_model_details(model_name: Optional[str] = None, current_user: User = Depends(get_active_user)):
+async def get_model_details(model_name: Optional[str] = None, current_user: User = Depends(get_current_user)):
     """Returns full model metadata including test results for frontend display.
     
     If model_name is provided, returns details for that single model.
@@ -280,7 +387,7 @@ async def get_model_details(model_name: Optional[str] = None, current_user: User
     return {"models": models}
 
 @app.get("/api/v1/ml/training-modes")
-async def get_training_modes(current_user: User = Depends(get_active_user)):
+async def get_training_modes(current_user: User = Depends(get_current_user)):
     """Returns available training modes and their descriptions."""
     modes_desc = {
         "manual": "User-defined hyperparameters - full control over training settings",
@@ -295,7 +402,7 @@ async def get_training_modes(current_user: User = Depends(get_active_user)):
     }
 
 @app.get("/api/v1/ml/training-presets")
-async def get_training_presets(current_user: User = Depends(get_active_user)):
+async def get_training_presets(current_user: User = Depends(get_current_user)):
     """Returns available training presets for quick configuration."""
     presets_info = []
     for preset_name, preset_config in TRAINING_PRESETS.items():
@@ -314,7 +421,7 @@ async def suggest_hyperparameters_endpoint(
     optimize_metric: str = "accuracy",
     dataset_name: Optional[str] = None,
     hf_dataset_url: Optional[str] = None,
-    current_user: User = Depends(get_active_user),
+    current_user: User = Depends(get_current_user),
 ):
     try:
         return {"suggested_hyperparameters": suggest_hyperparameters(model_name, task_type, optimize_metric, dataset_name, hf_dataset_url)}
@@ -322,11 +429,11 @@ async def suggest_hyperparameters_endpoint(
         raise HTTPException(status_code=400, detail=str(exc))
 
 @app.get("/api/v1/ml/datasets")
-async def get_datasets(current_user: User = Depends(get_active_user)):
+async def get_datasets(current_user: User = Depends(get_current_user)):
     return {"datasets": list_local_datasets()}
 
 @app.post("/api/v1/ml/train")
-async def train_model_endpoint(payload: TrainRequest, current_user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def train_model_endpoint(payload: TrainRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     # The requested optimisation metric is passed through untouched: resolving or
     # remapping it here would hide the training internals from the HTTP layer and
     # would silently optimise for a different metric than the one requested.
@@ -385,7 +492,7 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
         raise HTTPException(status_code=400, detail=str(exc))
 
 @app.get("/api/v1/ml/runs")
-async def list_training_runs(current_user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def list_training_runs(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TrainingRun).where(TrainingRun.owner_id == current_user.id).order_by(TrainingRun.created_at.desc()))
     runs = result.scalars().all()
     return [
@@ -408,7 +515,7 @@ async def list_training_runs(current_user: User = Depends(get_active_user), db: 
     ]
 
 @app.get("/api/v1/ml/runs/{run_id}")
-async def get_training_run(run_id: int, current_user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def get_training_run(run_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id))
     run = result.scalars().first()
     if not run:
@@ -432,7 +539,7 @@ async def get_training_run(run_id: int, current_user: User = Depends(get_active_
     }
 
 @app.get("/api/v1/ml/runs/{run_id}/artifact")
-async def download_artifact(run_id: int, current_user: User = Depends(get_active_user), db: AsyncSession = Depends(get_db)):
+async def download_artifact(run_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id))
     run = result.scalars().first()
     if not run or not run.artifact_path:

@@ -13,3 +13,9 @@ __pycache__/
 *.log
 *.bak
 models/
+# The generated development signing key of the JWT (see backend/app/auth.py).
+.secret_key
+# The CSV files of the user, the committed sample datasets excepted.
+data/*.csv
+!data/sample_*.csv
+data/uploads/

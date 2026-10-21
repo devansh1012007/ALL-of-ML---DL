@@ -37,6 +37,11 @@ if REPO_ROOT not in sys.path:
 _TMP_DB_DIR = tempfile.mkdtemp(prefix="all-of-ml-tests-")
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{os.path.join(_TMP_DB_DIR, 'test.db')}"
 
+# The signing key of the tokens. The application generates a random key in
+# ``<repo>/.secret_key`` when none is set, which would write into the
+# repository during the test run. The tests bring their own key instead.
+os.environ["SECRET_KEY"] = "test-signing-key-for-the-backend-test-suite"
+
 
 def _remove_tmp_db_dir():
     shutil.rmtree(_TMP_DB_DIR, ignore_errors=True)
@@ -95,6 +100,21 @@ def isolated_model_dir(tmp_path, monkeypatch):
     models_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(model_training, "MODEL_DIR", models_dir)
     return models_dir
+
+
+@pytest.fixture(autouse=True)
+def clean_rate_limits():
+    """Start every test with an empty rate-limit budget.
+
+    The limiter counts the attempts of a client, and every test client shares
+    the same address, so without this a test that fails a login would spend
+    the budget of the tests that follow it.
+    """
+    from backend.app.main import reset_rate_limits
+
+    reset_rate_limits()
+    yield
+    reset_rate_limits()
 
 
 # --- synthetic datasets ------------------------------------------------------
