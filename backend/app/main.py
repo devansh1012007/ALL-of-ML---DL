@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Header, status
 import logging
+from contextlib import asynccontextmanager
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.encoders import jsonable_encoder
 from jose import JOSEError, jwt
 from pathlib import Path
+import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +19,48 @@ from .model_training import list_available_models, list_local_datasets, list_mod
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
-app = FastAPI(title="PrimeTrade AutoML API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan.
+
+    ``@app.on_event("startup")`` is deprecated: it warns on every import and
+    on every test run. The lifespan handler is the modern replacement and is
+    the single place where the startup work lives (the reaper of the runs that
+    a restart interrupted joins it in the phase that introduces it).
+
+    The schema is owned by the Alembic migrations (``alembic upgrade head``).
+    The application must never create the tables itself, because that hides a
+    migration that was never applied: the app would then run against a schema
+    that no longer matches the migrations. Instead the startup check below
+    fails fast with an actionable message.
+    """
+    await verify_schema()
+    yield
+
+
+async def verify_schema() -> None:
+    """Fail fast when the database schema is behind the migrations.
+
+    Every table the ORM knows about must exist in the database. A missing
+    table means the migrations were not applied (or not applied completely),
+    which is a deployment error and not a runtime condition to work around.
+    """
+    async with engine.connect() as conn:
+        names = await conn.run_sync(
+            lambda sync_conn: sa.inspect(sync_conn).get_table_names()
+        )
+    missing = [
+        table.name for table in Base.metadata.sorted_tables if table.name not in names
+    ]
+    if missing:
+        raise RuntimeError(
+            f"The database schema is not up to date: missing table(s) {missing}. "
+            "Run `alembic upgrade head` in the backend/ directory first."
+        )
+
+
+app = FastAPI(title="PrimeTrade AutoML API", lifespan=lifespan)
 
 # log
 logging.basicConfig(
@@ -122,11 +165,6 @@ async def get_current_admin(current_user: User = Depends(get_current_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return current_user
-
-@app.on_event("startup")
-async def startup_event():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 @app.post("/api/v1/register")
 async def register(user: UserCreate, db=Depends(get_db)):

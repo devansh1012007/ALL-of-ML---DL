@@ -2,15 +2,16 @@ import sys
 import os
 import asyncio
 from logging.config import fileConfig
-from sqlalchemy import pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import pool
 
 from alembic import context
 
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.models import Base
+from app.database import DATABASE_URL
 target_metadata = Base.metadata
 
 # this is the Alembic Config object, which provides
@@ -34,6 +35,18 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def _resolved_db_url() -> str:
+    """The database the migrations run against.
+
+    The URL comes from the ``DATABASE_URL`` environment variable, or - when
+    that is not set - from the application's own default, so Alembic and the
+    application always talk to the same database. The value in ``alembic.ini``
+    is a leftover of the previous "notes" project and must never decide where
+    the schema is created.
+    """
+    return os.getenv("DATABASE_URL") or DATABASE_URL
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -46,7 +59,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = _resolved_db_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -66,21 +79,21 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    """In this scenario we need to create an Engine
-    and associate a connection with the context.
+    """Run the migrations against the configured database.
 
+    The URL is never taken from ``alembic.ini``: it comes from the
+    ``DATABASE_URL`` environment variable, or - when that is not set - from the
+    application's own default, so Alembic and the application always talk to
+    the same database. The stale URL in ``alembic.ini`` (a leftover of the
+    previous "notes" project) must not decide where the schema is created.
     """
 
-    db_url = os.getenv("DATABASE_URL")
-    if db_url:
-        config.set_main_option("sqlalchemy.url", db_url)
-    # ----------------------------------------------
-    
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    db_url = _resolved_db_url()
+    # "%%" is required because ConfigParser treats a bare "%" as interpolation
+    # syntax: a password with a "%" in it would otherwise crash the parser.
+    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+
+    connectable = create_async_engine(db_url, poolclass=pool.NullPool)
 
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

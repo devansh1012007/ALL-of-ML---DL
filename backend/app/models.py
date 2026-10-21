@@ -14,7 +14,8 @@ class User(Base):
 class TrainingRun(Base):
     __tablename__ = "training_runs"
     id = Column(Integer, primary_key=True, index=True)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Indexed because every read of the run history filters on the owner.
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     model_name = Column(String, nullable=False)
     dataset_source = Column(String, nullable=False)
     dataset_tag = Column(String, nullable=False)

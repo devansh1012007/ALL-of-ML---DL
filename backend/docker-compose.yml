@@ -15,7 +15,10 @@ services:
 
   web:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
+    # The schema is owned by the migrations, so they have to run before the
+    # application starts. The command overrides the image CMD, which is why the
+    # migration is repeated here (see the dockerfile).
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload"
     ports:
       - "8010:8010"
     env_file:

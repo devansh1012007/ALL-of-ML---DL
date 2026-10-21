@@ -57,6 +57,29 @@ def _isolated_test_database():
     _remove_tmp_db_dir()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _migrated_test_database():
+    """Create the schema with Alembic -- the same path production uses.
+
+    The application deliberately does not call ``Base.metadata.create_all`` any
+    more: the schema is owned by the migrations, and the app only verifies it
+    at startup. Building the test schema with the migrations therefore also
+    means the suite fails when the migration chain drifts away from
+    ``backend/app/models.py``.
+
+    The migration runs against the throwaway database of the
+    ``DATABASE_URL`` that is set above, so the repository is never touched.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    backend_dir = os.path.join(REPO_ROOT, "backend")
+    config = Config(os.path.join(backend_dir, "alembic.ini"))
+    config.set_main_option("script_location", os.path.join(backend_dir, "migrations"))
+    command.upgrade(config, "head")
+    yield
+
+
 @pytest.fixture(autouse=True)
 def isolated_model_dir(tmp_path, monkeypatch):
     """Redirect the model artifacts into a per-test temporary directory.
