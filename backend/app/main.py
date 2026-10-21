@@ -24,10 +24,22 @@ from .auth import (
     create_token,
     dummy_password_hash,
     hash_pass,
+    is_reserved_username,
     validate_credentials,
     verify_pass,
 )
-from .model_training import list_available_models, list_local_datasets, list_model_categories, suggest_hyperparameters, train_model, TRAINING_MODES, TRAINING_PRESETS
+from .model_training import (
+    DATA_DIR,
+    MODEL_DIR,
+    TRAINING_MODES,
+    TRAINING_PRESETS,
+    list_available_models,
+    list_local_datasets,
+    list_model_categories,
+    suggest_hyperparameters,
+    train_model,
+)
+from .settings import REPO_ROOT
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 
@@ -48,6 +60,10 @@ async def lifespan(app: FastAPI):
     fails fast with an actionable message.
     """
     await verify_schema()
+    # The hash of the dummy password is computed on the first unknown-user
+    # login, which would make that one request twice as slow as the others.
+    # It is computed here instead, while the application starts.
+    await run_in_threadpool(dummy_password_hash)
     yield
 
 
@@ -185,16 +201,37 @@ LOGIN_RATE_LIMIT = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
 REGISTER_RATE_LIMIT = int(os.getenv("REGISTER_RATE_LIMIT", "20"))
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 
-# The attempts per key. A failed login is counted under the address *and* the
-# username: an attacker who guesses one account must not lock out the other
-# users behind the same address. A registration is counted under the address
-# alone, because it is the account count that has to be limited.
+# The maximum number of clients the limiter remembers. Without it, an
+# unauthenticated client could fill the memory of the process by sending
+# requests with a different username every time.
+RATE_LIMIT_MAX_CLIENTS = int(os.getenv("RATE_LIMIT_MAX_CLIENTS", "10000"))
+
+# The attempts per key. A failed login is counted twice: under the address
+# alone, so that one client cannot spray one password over many accounts, and
+# under the address *and* the account, so that one client cannot hammer one
+# account. The account is deliberately not a key of its own: a limit that
+# counts every attempt on an account, wherever it comes from, lets an
+# attacker lock a victim out of their own account.
 _login_attempts: Dict[str, deque] = defaultdict(deque)
 
 
 def _client_address(request: Request) -> str:
     """The address of the client that made the request."""
     return request.client.host if request.client else "unknown"
+
+
+def _prune_attempts(now: float) -> None:
+    """Forget the attempts that fell out of the window.
+
+    The entries of the clients that are not seen any more would otherwise
+    stay in the memory of the process forever.
+    """
+    for key in list(_login_attempts.keys()):
+        attempts = _login_attempts[key]
+        while attempts and now - attempts[0] > RATE_LIMIT_WINDOW_SECONDS:
+            attempts.popleft()
+        if not attempts:
+            del _login_attempts[key]
 
 
 def _check_rate_limit(key: str, limit: int) -> None:
@@ -218,7 +255,17 @@ def _check_rate_limit(key: str, limit: int) -> None:
 
 def _record_rate_limit(key: str) -> None:
     """Count an attempt against the client's budget."""
-    _login_attempts[key].append(time.monotonic())
+    now = time.monotonic()
+    _login_attempts[key].append(now)
+    if len(_login_attempts) > RATE_LIMIT_MAX_CLIENTS:
+        _prune_attempts(now)
+        if len(_login_attempts) > RATE_LIMIT_MAX_CLIENTS:
+            # The window did not free anything: the oldest entry is dropped.
+            oldest = min(
+                _login_attempts,
+                key=lambda name: _login_attempts[name][0] if _login_attempts[name] else now,
+            )
+            _login_attempts.pop(oldest, None)
 
 
 def _forget_rate_limit(key: str) -> None:
@@ -235,7 +282,7 @@ def reset_rate_limits() -> None:
 
 
 async def get_current_user(
-    authorization: Optional[str] = Header(None),
+    token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ):
     """The user of the request, or 401.
@@ -245,21 +292,12 @@ async def get_current_user(
     meant that all the unauthenticated callers shared one history, that the
     account could be logged into with the password ``anonymous``, and that a
     dataset uploaded by one of them belonged to all of them.
-    """
-    if authorization is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication is required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
 
-    # A credential was supplied, so it has to be valid: an invalid, malformed
-    # or expired token is rejected with 401. The check is `is not None` (not
-    # truthiness) on purpose: a present but empty Authorization header is a
-    # broken credential, not a missing one.
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    The dependency is the OAuth2 bearer scheme, so the OpenAPI document
+    describes the endpoints as protected and the Swagger UI offers an
+    "Authorize" button. The scheme answers 401 by itself when the header is
+    missing or malformed.
+    """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JOSEError:
@@ -333,8 +371,20 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     # Only a *failed* login counts against the budget: a user who signs in
     # repeatedly is not an attacker, and locking them out would be a denial of
     # service they did not deserve.
-    key = f"login:{_client_address(request)}:{form_data.username}"
-    _check_rate_limit(key, LOGIN_RATE_LIMIT)
+    address = _client_address(request)
+    account_key = f"login:{address}:{form_data.username.strip().lower()}"
+    address_key = f"login-address:{address}"
+    # The address budget stops one client from spraying one password over
+    # many accounts; the account budget stops one client from hammering one
+    # account. Neither is a budget of the account alone, so a victim can
+    # always log in from another address.
+    _check_rate_limit(address_key, LOGIN_RATE_LIMIT * 3)
+    _check_rate_limit(account_key, LOGIN_RATE_LIMIT)
+    if is_reserved_username(form_data.username):
+        # The reserved names are refused at the login as well as at the
+        # registration: a row with that name may still exist in a database
+        # that predates the removal of the shared account.
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
     logger.info(f"Login attempt for user: '{form_data.username}'")
     result = await db.execute(select(User).where(User.username == form_data.username))
     user = result.scalars().first()
@@ -346,11 +396,12 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     password_matches = await run_in_threadpool(verify_pass, form_data.password, stored_hash)
     if not user or not password_matches:
         logger.warning(f"Failed login: Incorrect credentials for '{form_data.username}'")
-        _record_rate_limit(key)
+        _record_rate_limit(account_key)
+        _record_rate_limit(address_key)
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     logger.info(f"Success: User '{user.username}' logged in successfully.")
     access_token = create_token(data={"sub": user.username, "role": user.role})
-    _forget_rate_limit(key)
+    _forget_rate_limit(account_key)
     return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/api/v1/admin/all-users")
@@ -432,6 +483,20 @@ async def suggest_hyperparameters_endpoint(
 async def get_datasets(current_user: User = Depends(get_current_user)):
     return {"datasets": list_local_datasets()}
 
+def _public_error(exc: Exception) -> str:
+    """The message of a failure that is safe to show to the client.
+
+    The text of an exception carries the internals of the server: the
+    absolute path of a file, the name of a class, the traceback of a library.
+    The client gets the reason of the failure, without the paths.
+    """
+    message = str(exc)
+    for root in (str(REPO_ROOT), str(DATA_DIR), str(MODEL_DIR)):
+        if root and root in message:
+            message = message.replace(root, "<server>")
+    return message
+
+
 @app.post("/api/v1/ml/train")
 async def train_model_endpoint(payload: TrainRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     # The requested optimisation metric is passed through untouched: resolving or
@@ -486,10 +551,10 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
         }
     except Exception as exc:
         training_run.status = "failed"
-        training_run.metrics = {"error": str(exc)}
+        training_run.metrics = {"error": _public_error(exc)}
         await db.commit()
         logger.exception("Model training failed")
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=_public_error(exc))
 
 @app.get("/api/v1/ml/runs")
 async def list_training_runs(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):

@@ -28,14 +28,20 @@ from .settings import REPO_ROOT
 ALGORITHM = "HS256"
 
 # The file the development key is persisted in. It lives in the repository
-# root, next to the application, and is git-ignored.
-SECRET_KEY_FILE = Path(REPO_ROOT) / ".secret_key"
+# root, next to the application, and is git-ignored. The location can be
+# overridden, because in a container the repository root is not necessarily
+# the place that survives a restart.
+SECRET_KEY_FILE = Path(
+    os.getenv("SECRET_KEY_FILE", str(Path(REPO_ROOT) / ".secret_key"))
+)
 
-# The environment that turns the missing key into a hard error.
-_IS_PRODUCTION = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development")).strip().lower() in {
-    "production",
-    "prod",
-}
+# The environment that turns the missing key into a hard error. An empty
+# value counts as "not set": a container that sets APP_ENV="" must not fall
+# back to the development key by accident.
+_IS_PRODUCTION = any(
+    os.getenv(name, "").strip().lower() in {"production", "prod"}
+    for name in ("APP_ENV", "ENVIRONMENT")
+)
 
 # bcrypt only ever looks at the first 72 bytes of a password and raises
 # ValueError for anything longer.
@@ -45,12 +51,20 @@ BCRYPT_MAX_BYTES = 72
 # password is crackable in seconds, and the cost of a long one is a moment of
 # typing.
 MIN_PASSWORD_LENGTH = 8
-MAX_PASSWORD_LENGTH = 72
+MIN_USERNAME_LENGTH = 3
+MAX_USERNAME_LENGTH = 64
 
 # The usernames that are reserved. "anonymous" was the shared account of the
 # token-less fallback, which is removed: an account with that name would
 # otherwise be able to take over the history of every unauthenticated caller.
+# The names are refused at the registration *and* at the login, because a row
+# with that name may still exist in a database that predates the change.
 RESERVED_USERNAMES = frozenset({"anonymous", "admin", "root", "system"})
+
+
+def is_reserved_username(username: str) -> bool:
+    """Whether the name is reserved and must not be used or logged into."""
+    return username.strip().lower() in RESERVED_USERNAMES
 
 
 def _load_secret_key() -> str:
@@ -61,7 +75,7 @@ def _load_secret_key() -> str:
     tokens survive a restart.
     """
     key = os.getenv("SECRET_KEY")
-    if key:
+    if key and key.strip():
         return key
 
     if _IS_PRODUCTION:
@@ -76,8 +90,21 @@ def _load_secret_key() -> str:
             if stored:
                 return stored
         key = secrets.token_urlsafe(48)
-        SECRET_KEY_FILE.write_text(key, encoding="utf-8")
-        SECRET_KEY_FILE.chmod(0o600)
+        # The file is created with the restrictive mode from the start: a key
+        # that is briefly world-readable is a key that is briefly readable by
+        # everybody. O_EXCL makes the creation atomic, so two processes that
+        # start at the same time cannot write two different keys - the loser
+        # of the race reads the winner's key.
+        try:
+            descriptor = os.open(
+                SECRET_KEY_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+            )
+        except FileExistsError:
+            # Another process created the file between the check and the
+            # creation: use its key.
+            return SECRET_KEY_FILE.read_text(encoding="utf-8").strip()
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(key)
         warnings.warn(
             f"SECRET_KEY is not set: a random development key was written to "
             f"{SECRET_KEY_FILE}. Set SECRET_KEY explicitly in any shared or "
@@ -118,7 +145,16 @@ def hash_pass(password: str) -> str:
     return hashed_bytes.decode('utf-8')
 
 def verify_pass(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(_bcrypt_secret(plain), hashed.encode('utf-8'))
+    """Whether the password matches the stored hash.
+
+    A stored value that is not a bcrypt hash (a row that was written by hand,
+    or by an older version of the application) must not crash the login: it
+    simply does not match.
+    """
+    try:
+        return bcrypt.checkpw(_bcrypt_secret(plain), hashed.encode('utf-8'))
+    except (ValueError, TypeError):
+        return False
 
 
 # The hash of a password that nobody knows. It is verified against when the
@@ -155,14 +191,22 @@ def validate_credentials(username: str, password: str) -> Optional[str]:
     """
     if not username or not username.strip():
         return "The username must not be empty."
-    if username.strip().lower() in RESERVED_USERNAMES:
+    if is_reserved_username(username):
         return f"The username '{username}' is reserved."
-    if len(username) > 64:
-        return "The username must not be longer than 64 characters."
+    if len(username.strip()) < MIN_USERNAME_LENGTH:
+        return f"The username must have at least {MIN_USERNAME_LENGTH} characters."
+    if len(username) > MAX_USERNAME_LENGTH:
+        return f"The username must not be longer than {MAX_USERNAME_LENGTH} characters."
     if not password:
         return "The password must not be empty."
     if len(password) < MIN_PASSWORD_LENGTH:
         return f"The password must have at least {MIN_PASSWORD_LENGTH} characters."
-    if len(password) > MAX_PASSWORD_LENGTH:
-        return f"The password must not be longer than {MAX_PASSWORD_LENGTH} characters."
+    # bcrypt hashes at most 72 *bytes*, so a password of multi-byte characters
+    # is silently truncated at that limit: two different passwords would then
+    # be interchangeable. The policy therefore counts bytes, not characters.
+    if len(password.encode("utf-8")) > BCRYPT_MAX_BYTES:
+        return (
+            f"The password must not be longer than {BCRYPT_MAX_BYTES} bytes "
+            f"when encoded as UTF-8."
+        )
     return None

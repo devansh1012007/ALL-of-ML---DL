@@ -58,8 +58,9 @@ Repo-specific anchors for this workflow: backend tests are `python -m pytest bac
 
 Backend (from repo root, venv at repo root):
 - install: `pip install -r backend/requirements.txt`
-- run: `cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload` (port 8010 is what the frontend hardcodes; logs go to `backend/app.log`, relative to CWD)
-- tests: `python -m pytest backend/tests` — **run from the repo root**: test modules import `backend.app.*` and neither `backend/` nor `backend/app/` has `__init__.py`, so the repo root must be on `sys.path`. `backend/tests/conftest.py` puts it there (and pins an isolated sqlite `DATABASE_URL` + a temporary `MODEL_DIR`), so bare `pytest backend/tests` works from the repo root too.
+- run: `cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload` (port 8010 is what the frontend hardcodes; logs go to `app.log`, relative to the CWD)
+- **migrate first**: `cd backend && alembic upgrade head` — the app **verifies** the schema at startup and refuses to start when it is behind. The app never creates tables any more.
+- tests: `python -m pytest backend/tests` — **run from the repo root**: test modules import `backend.app.*` and neither `backend/` nor `backend/app/` has `__init__.py`, so the repo root must be on `sys.path`. `backend/tests/conftest.py` puts it there (and pins an isolated sqlite `DATABASE_URL` + a temporary `MODEL_DIR`), so bare `pytest backend/tests` works from the repo root too. The suite builds its schema with the migrations and runs `alembic check`, so a drift between the migrations and the ORM fails the suite.
 - single test: `python -m pytest backend/tests/test_model_training.py::test_train_model_auto_fine_tune_tabular`
 - migrations: `cd backend && alembic upgrade head` (needs `DATABASE_URL`); new revision: `cd backend && alembic revision --autogenerate -m "..."` (see `backend/commands.txt`, which uses `docker-compose run --rm web ...`)
 
@@ -69,17 +70,17 @@ Frontend:
 
 Docker:
 - The compose file is `backend/docker-compose.yml`, **not** the repo root. `cd backend && docker-compose up --build`.
-- Needs `backend/.env` (gitignored) with `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST_PORT`, `POSTGRES_PORT`, `DATABASE_URL` (in compose, `DATABASE_URL` must point at the `db` service, not localhost).
-- The `web` service's `command:` overrides the Dockerfile `CMD`, so **`alembic upgrade head` does not run automatically in compose** — run it manually.
+- Needs `backend/.env` (gitignored; `backend/.env.example` documents every variable) with `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST_PORT`, `POSTGRES_PORT`, `DATABASE_URL` (in compose, `DATABASE_URL` must point at the `db` service, not localhost).
+- The `web` service's `command:` runs `alembic upgrade head` before the server, and the `db` service has a healthcheck, so the migrations do not race the start of Postgres.
 
 ## Environment gotchas
 
-- `DATABASE_URL` must be set before the app is importable. The default in `backend/app/database.py` is `sqlite+aiosqlite:///./backend.db`; `aiosqlite` **is** in `requirements.txt` now, so the sqlite fallback works out of the box (it creates `./backend.db` in the CWD). Use `postgresql+asyncpg://user:pass@host:5432/db` for anything real.
+- `DATABASE_URL` must be set before the app is importable. The default in `backend/app/settings.py` is `sqlite+aiosqlite:///./backend.db`; `aiosqlite` **is** in `requirements.txt` now, so the sqlite fallback works out of the box (it creates `./backend.db` in the CWD). Use `postgresql+asyncpg://user:pass@host:5432/db` for anything real.
 - `python-dotenv` is in `requirements.txt` but nothing calls `load_dotenv` — export env vars yourself (or rely on compose `env_file`).
 - Still missing from `requirements.txt`: `google-generativeai` (`llm_fine_tune` mode), `umap` / `hdbscan` (catalog models `UMAP`/`HDBSCAN` raise "not installed" at train time), `gymnasium` / `stable-baselines3` / `torch` are declared but huge. Optional imports in `model_training.py` are guarded, so the module still imports.
 - `scikit-learn` is pinned to `<1.10` because the catalog uses `LogisticRegression(penalty="l2")` (removed in 1.10) and `SVC(probability=True)` (removed in 1.11). Relax the pin only after removing those params.
 - `openai` is in `requirements.txt` but unused by the code; `llm_fine_tune` uses **Google Gemini** (`GOOGLE_API_KEY`, optional `GOOGLE_MODEL`) — the backend's mode description says so too.
-- `alembic.ini` has a stale `sqlalchemy.url` (`admin/password123@localhost:5433/notes_db`); `migrations/env.py` overrides it from `DATABASE_URL`.
+- The URL of the database comes from `DATABASE_URL` (or the app's default); `alembic.ini` has no URL of its own, and `migrations/env.py` escapes the `%` of a password.
 - `POST /api/v1/ml/train` trains **synchronously** inside the request (`run_in_threadpool`) and only returns when training finishes.
 
 ## Model catalog (the real extension point)
@@ -102,8 +103,11 @@ Docker:
 
 ## Auth reality
 
-- Most ML endpoints use `get_active_user`: **no** `Authorization` header → an auto-created `anonymous` user (so they work unauthenticated); a header that is present but invalid/expired → **401** (the SPA logs out and shows "Session expired"). Only `GET /api/v1/admin/all-users` requires a real admin token (`get_current_admin`).
-- `SECRET_KEY` is hardcoded as the default in `backend/app/auth.py` but overridable by the `SECRET_KEY` env var. Login is OAuth2 form POST `/token`; registration is JSON POST `/api/v1/register` (a client-supplied `role` is ignored; a duplicate username → 409).
+- **Every ML endpoint requires a token.** `get_current_user` uses the OAuth2 bearer scheme: no `Authorization` header → **401**; a header that is present but invalid/expired → **401** (the SPA logs out and shows "Session expired"). There is **no** anonymous fallback any more: the shared `anonymous` account was removed (it had the password `anonymous` and was the owner of every unauthenticated run). `GET /api/v1/admin/all-users` additionally requires an admin token (`get_current_admin`).
+- `SECRET_KEY` comes from the environment. In production (`APP_ENV=production`) a missing key is a **hard startup error**; in development a random key is generated once into `<repo>/.secret_key` (git-ignored, `SECRET_KEY_FILE` overrides the path). A token signed with the old published default is rejected.
+- Login is OAuth2 form POST `/token`; registration is JSON POST `/api/v1/register` (a client-supplied `role` is ignored; a duplicate username → 409; the reserved names `anonymous`/`admin`/`root`/`system` → 400; a password of at least 8 characters and at most 72 **bytes**).
+- Failed logins are rate limited per address **and** per account, registrations per address (`LOGIN_RATE_LIMIT`, `REGISTER_RATE_LIMIT`). CORS uses an explicit allow-list (`CORS_ORIGINS`, the dev origins of the SPA by default) — `allow_origins=["*"]` is gone.
+- `backend/.env.example` documents every environment variable.
 
 ## Existing docs (read before changing ML code)
 
