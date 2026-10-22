@@ -21,14 +21,21 @@ from backend.app.datasets import (
     DatasetError,
     describe_csv,
     resolve_storage_path,
-    store_upload,
     suggest_label,
+    validate_upload,
+    write_upload,
 )
 from backend.app.main import app
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CSV_CONTENT = "feature_a,feature_b,label\n1,2,0\n3,4,1\n5,6,0\n7,8,1\n"
+
+
+def store_upload(owner_id: int, filename: str, content: bytes):
+    """What the endpoint does: the content is accepted, and then written."""
+    validate_upload(filename, content)
+    return write_upload(owner_id, filename, content)
 
 
 @pytest.fixture(scope="module")
@@ -437,6 +444,71 @@ def test_the_columns_carry_the_type_of_the_values(tmp_path):
     types = {column["name"]: column["dtype"] for column in columns}
     assert types["count"] == "int64"
     assert types["value"] == "float64"
+
+
+def test_a_file_with_too_many_columns_is_refused(client, auth):
+    """A file with a million columns is refused before it is read.
+
+    A file with a lot of columns takes gigabytes of memory to describe - one
+    entry per column - and it is refused when its header is read, before the
+    table of it is built.
+    """
+    from backend.app import datasets as registry
+
+    content = ("c0,c1,c2,c3,c4,c5,c6,c7,c8,c9\n" + "1,2,3,4,5,6,7,8,9,0\n").encode()
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("wide.csv", content, "text/csv")},
+    )
+
+    assert response.status_code == 200, response.text
+
+    # With a limit of five columns, the same file is refused.
+    previous = registry.MAX_UPLOAD_COLUMNS
+    registry.MAX_UPLOAD_COLUMNS = 5
+    try:
+        refused = client.post(
+            "/api/v1/ml/datasets/upload",
+            headers=auth,
+            files={"file": ("wide.csv", content, "text/csv")},
+        )
+    finally:
+        registry.MAX_UPLOAD_COLUMNS = previous
+
+    assert refused.status_code == 400, refused.text
+    assert "columns" in refused.json()["detail"].lower()
+
+
+def test_a_request_with_two_datasets_is_refused(client, auth):
+    """A request carries either a dataset of the registry or a Hugging Face one.
+
+    The plan says exactly one: a request that carries both would silently
+    train on the local one and ignore the other.
+    """
+    listing = client.get("/api/v1/ml/datasets", headers=auth).json()["datasets"]
+    dataset = next(
+        item for item in listing if item["name"] == "sample_customer_churn.csv"
+    )
+
+    response = client.post(
+        "/api/v1/ml/train",
+        headers=auth,
+        json={
+            "model_name": "Logistic_Regression",
+            "dataset_id": dataset["id"],
+            "hf_dataset_url": "https://huggingface.co/datasets/some/one",
+            "label_column": "label",
+            "test_size": 0.2,
+            "random_state": 42,
+            "hyperparameters": {},
+            "mode": "manual",
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert "both" in response.json()["detail"].lower()
 
 
 def test_the_name_of_an_upload_keeps_its_letters():

@@ -30,14 +30,19 @@ usage() {
 
 die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[ $# -ge 1 ] || usage
 [ $# -le 2 ] || usage
+
+case "${1:-}" in
+    -h|--help) usage ;;
+esac
+
+[ $# -ge 1 ] || usage
 
 URL="$1"
 TARGET="${2:-}"
 
 if [ -z "$TARGET" ]; then
-    TARGET="$(basename "${URL%%\?*}")"
+    TARGET="$(basename -- "${URL%%\?*}")"
     [ -n "$TARGET" ] || die "the target cannot be derived from the url"
 fi
 

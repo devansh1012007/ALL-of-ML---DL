@@ -47,6 +47,12 @@ MAX_FILE_NAME_BYTES = int(os.getenv("MAX_FILE_NAME_BYTES", "200"))
 # with the size of the file.
 CSV_CHUNK_ROWS = 10000
 
+# The number of columns a file may have. A file with a million columns takes
+# gigabytes of memory to describe - one entry per column - and a table with a
+# million columns is not a table this application can train on. The file is
+# refused when its header has more columns than this.
+MAX_UPLOAD_COLUMNS = int(os.getenv("MAX_UPLOAD_COLUMNS", "1000"))
+
 # The names a label column usually has. The registry suggests the first one
 # that is in the file.
 LABEL_COLUMN_NAMES = ("label", "target", "y", "class", "outcome", "churn")
@@ -112,13 +118,54 @@ def relative_storage_path(path: Path) -> str:
         ) from exc
 
 
-def _scan_csv(stream) -> Tuple[List[Dict[str, Any]], int]:
+# The number of bytes of the header that are read to count the columns. A
+# header that is longer than this has more columns than the limit anyway.
+HEADER_SCAN_BYTES = 1024 * 1024
+
+# The separators a file may use. The registry reads a comma separated file,
+# but the count of the columns of a file is the same for every separator, and
+# the file is refused before it is parsed.
+CSV_SEPARATORS = (b",", b";", b"\t", b"|")
+
+
+def _count_header_columns(stream) -> int:
+    """The number of columns of a file, counted without parsing it.
+
+    The header is read as bytes and the separators in it are counted.
+    Parsing the file with pandas would cost a lot of memory and a lot of
+    time when it has a lot of columns, and such a file is refused anyway.
+
+    The count is an upper bound: a separator inside a quoted name is counted
+    as well. A file whose header holds a thousand separators inside one
+    quoted name is refused, which is the safe direction.
+    """
+    head = stream.read(HEADER_SCAN_BYTES)
+    line = head.split(b"\n", 1)[0]
+    if b"\n" not in head and len(head) == HEADER_SCAN_BYTES:
+        # The header is longer than what was read: it holds more separators
+        # than the limit allows.
+        return MAX_UPLOAD_COLUMNS + 1
+    return max(line.count(separator) for separator in CSV_SEPARATORS) + 1
+
+
+def _scan_csv(stream, max_rows: Optional[int] = None) -> Tuple[List[Dict[str, Any]], int]:
     """The columns and the number of rows of a CSV file, read in pieces.
 
-    The file is read with the same parser as the training uses, and it is
-    read in pieces: the memory of the process does not grow with the size of
-    the file. The types of the columns are the ones of the first rows.
+    The columns are counted before the file is parsed, and the file is
+    refused when it has more of them than the application accepts: a file
+    with a million columns takes gigabytes of memory to describe, and it is
+    refused before that happens. The rows are then counted in pieces, so that
+    the memory of the process does not grow with the size of the file. The
+    types of the columns are the ones of the first rows.
     """
+    stream.seek(0)
+    columns_count = _count_header_columns(stream)
+    if columns_count > MAX_UPLOAD_COLUMNS:
+        raise DatasetError(
+            f"The file has more than {MAX_UPLOAD_COLUMNS} columns."
+        )
+    stream.seek(0)
+
     columns: List[Dict[str, Any]] = []
     rows = 0
     for chunk in pd.read_csv(stream, chunksize=CSV_CHUNK_ROWS):
@@ -128,6 +175,11 @@ def _scan_csv(stream) -> Tuple[List[Dict[str, Any]], int]:
                 for name, dtype in zip(chunk.columns, chunk.dtypes)
             ]
         rows += len(chunk)
+        if max_rows is not None and rows > max_rows:
+            # The file is refused: there is no need to read the rest of it.
+            raise DatasetError(
+                f"The file has more than {max_rows} rows."
+            )
     return columns, rows
 
 
@@ -193,7 +245,7 @@ def validate_upload(
         raise DatasetError("Only CSV files can be uploaded.")
 
     try:
-        columns, rows = _scan_csv(io.BytesIO(content))
+        columns, rows = _scan_csv(io.BytesIO(content), max_rows=MAX_UPLOAD_ROWS)
     except pd.errors.EmptyDataError as exc:
         raise DatasetError("The uploaded file is empty.") from exc
     except UnicodeDecodeError as exc:
@@ -205,28 +257,13 @@ def validate_upload(
 
     if len(columns) < 2:
         raise DatasetError(
-            "The uploaded file must have a header with at least two columns."
+            "The uploaded file must be a CSV file with a comma as the separator "
+            "and a header of at least two columns."
         )
     if rows == 0:
         raise DatasetError("The uploaded file has a header but no rows.")
-    if rows > MAX_UPLOAD_ROWS:
-        raise DatasetError(
-            f"The uploaded file has more than {MAX_UPLOAD_ROWS} rows."
-        )
 
     return columns, rows, suggest_label(columns)
-
-
-def store_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str]:
-    """Write an uploaded file and return its name and its storage path.
-
-    The file is written under the uploads directory of the user, with a
-    generated name: the name of the client is only used for the display, never
-    for the path. It is written only after the content was accepted, so that a
-    rejected upload does not leave a file behind.
-    """
-    validate_upload(filename, content)
-    return write_upload(owner_id, filename, content)
 
 
 def write_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str]:
@@ -238,7 +275,12 @@ def write_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str
     """
     display_name = sanitize_name(filename)
     directory = uploads_dir() / str(owner_id)
-    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DatasetError(
+            f"The uploads directory of the user could not be created: {exc}"
+        ) from exc
     # The directory has to be inside the datasets root: a symlink that points
     # somewhere else would take the file out of the root.
     relative_storage_path(directory)

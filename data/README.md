@@ -26,8 +26,10 @@ There are two ways:
 
 ## The format
 
-- a CSV file with a header row,
+- a CSV file with a header row, separated by commas,
 - at least two columns and at least one data row,
+- at most 1000 columns and 2000000 rows (`MAX_UPLOAD_COLUMNS` and
+  `MAX_UPLOAD_ROWS` in `backend/app/datasets.py`),
 - **numeric columns only** for now: the trainer does not encode the
   categorical or the textual columns yet, so a file with a column of strings
   fails with an error from the estimator. A column of strings can be mapped

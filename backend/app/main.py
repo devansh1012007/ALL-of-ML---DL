@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.encoders import jsonable_encoder
 from jose import JOSEError, jwt
 from pathlib import Path
@@ -35,9 +35,7 @@ from . import datasets as datasets_registry
 from .datasets import (
     DatasetError,
     dataset_to_dict,
-    describe_csv,
     resolve_storage_path,
-    store_upload,
     unique_dataset_name,
 )
 from .model_training import (
@@ -312,10 +310,19 @@ class UploadSizeLimit:
         limit = int(self.limit())
         headers = Headers(scope=scope)
         length = headers.get("content-length")
-        if length and length.isdigit() and int(length) > limit:
-            await self._refuse(send, limit)
+        if length and length.isdigit():
+            if int(length) > limit:
+                await self._refuse(send, limit)
+                return
+            # The length is known and it fits: the body is passed on as it
+            # arrives, and the framework writes it to its temporary file.
+            # Copying it into the memory of the process would only double
+            # what the request already holds.
+            await self.app(scope, receive, send)
             return
 
+        # The length is unknown: the body is read with a cap, and it is
+        # refused as soon as it is bigger than the cap.
         body = bytearray()
         more = True
         while more:
@@ -348,6 +355,9 @@ class UploadSizeLimit:
                 "status": 413,
                 "headers": [
                     (b"content-type", b"application/json"),
+                    # The body of the request was not read: the connection
+                    # cannot carry another request, so it is closed.
+                    (b"connection", b"close"),
                 ],
             }
         )
@@ -885,7 +895,15 @@ async def _dataset_for_training(
     names a Hugging Face dataset, or the model is a reinforcement learning
     model, which trains in an environment and needs no data.
     """
-    if payload.hf_dataset_url and not payload.dataset_id and not payload.dataset_name:
+    if payload.hf_dataset_url and (payload.dataset_id is not None or payload.dataset_name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A request carries either a dataset of the registry or a "
+                "Hugging Face dataset, not both."
+            ),
+        )
+    if payload.hf_dataset_url:
         return None, None
 
     if payload.dataset_id is not None:
