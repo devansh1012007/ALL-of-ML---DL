@@ -38,6 +38,17 @@ MAX_UPLOAD_ROWS = int(os.getenv("MAX_UPLOAD_ROWS", "2000000"))
 # make it enormous.
 MAX_REPORTED_COLUMNS = int(os.getenv("MAX_REPORTED_COLUMNS", "200"))
 
+# The number of bytes a stored file name may have. A file name is at most 255
+# bytes on the usual file systems, and the stored name is the generated one
+# followed by the name of the client.
+MAX_FILE_NAME_BYTES = int(os.getenv("MAX_FILE_NAME_BYTES", "200"))
+
+# The csv module refuses a field of more than 128 KB by default, while the
+# training reads the file with pandas, which has no such limit. The limit is
+# raised to the size of the biggest file the application accepts, so that a
+# column with a long text is a dataset and not an error.
+csv.field_size_limit(MAX_UPLOAD_BYTES)
+
 # The names a label column usually has. The registry suggests the first one
 # that is in the file.
 LABEL_COLUMN_NAMES = ("label", "target", "y", "class", "outcome", "churn")
@@ -59,7 +70,11 @@ def sanitize_name(name: str) -> str:
     """A file name that is safe to show and to store."""
     cleaned = _UNSAFE_NAME.sub("_", (name or "").strip())
     cleaned = cleaned.strip("._ ") or "dataset"
-    return cleaned[:120]
+    # The name is cut on the bytes and not on the characters: a file name is
+    # at most 255 bytes, and a name of multi-byte characters would exceed it
+    # long before it reaches 255 characters.
+    encoded = cleaned.encode("utf-8")[:MAX_FILE_NAME_BYTES]
+    return encoded.decode("utf-8", errors="ignore") or "dataset"
 
 
 def resolve_storage_path(storage_path: str) -> Path:
@@ -157,8 +172,13 @@ def _count_rows(path: Path) -> int:
             next(reader)  # the header
         except StopIteration:
             return 0
-        for _ in reader:
-            rows += 1
+        try:
+            for _ in reader:
+                rows += 1
+        except csv.Error as exc:
+            raise DatasetError(
+                f"The dataset '{path.name}' could not be read as a CSV file: {exc}"
+            ) from exc
     return rows
 
 
@@ -196,12 +216,17 @@ def validate_upload(filename: str, content: bytes) -> None:
         )
 
     rows = 0
-    for _ in reader:
-        rows += 1
-        if rows > MAX_UPLOAD_ROWS:
-            raise DatasetError(
-                f"The uploaded file has more than {MAX_UPLOAD_ROWS} rows."
-            )
+    try:
+        for _ in reader:
+            rows += 1
+            if rows > MAX_UPLOAD_ROWS:
+                raise DatasetError(
+                    f"The uploaded file has more than {MAX_UPLOAD_ROWS} rows."
+                )
+    except csv.Error as exc:
+        raise DatasetError(
+            f"The uploaded file could not be read as a CSV file: {exc}"
+        ) from exc
     if rows == 0:
         raise DatasetError("The uploaded file has a header but no rows.")
 

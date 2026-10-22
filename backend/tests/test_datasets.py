@@ -272,6 +272,27 @@ def test_an_upload_is_stored_with_a_generated_name():
     assert resolve_storage_path(storage_path).exists()
 
 
+def test_two_uploads_of_the_same_file_get_different_paths():
+    """The stored name is generated, so two uploads never share a file.
+
+    The name of the client is only the display name: if it were part of the
+    path, the second upload of the same file would overwrite the first one.
+    """
+    first_name, first_path = store_upload(42, "same.csv", CSV_CONTENT.encode())
+    second_name, second_path = store_upload(42, "same.csv", CSV_CONTENT.encode())
+
+    assert first_name == second_name == "same.csv"
+    assert first_path != second_path
+    # The generated part comes first, so the file name of the client is only
+    # the tail of the stored name.
+    assert first_path.rsplit("/", 1)[-1].startswith(
+        first_path.rsplit("/", 1)[-1].split("_", 1)[0]
+    )
+    assert len(first_path.rsplit("/", 1)[-1].split("_", 1)[0]) == 32
+    assert resolve_storage_path(first_path).exists()
+    assert resolve_storage_path(second_path).exists()
+
+
 def test_the_dataset_of_the_owner_is_returned_by_its_id(client, auth):
     """The detail of a dataset carries its columns and its label."""
     uploaded = client.post(
@@ -423,3 +444,92 @@ def test_the_name_of_an_upload_keeps_its_letters():
     name, _ = store_upload(43, "üñíçø∂é.csv", CSV_CONTENT.encode())
 
     assert name == "üñíçø∂é.csv"
+
+
+def test_a_name_of_multi_byte_characters_stays_a_valid_file_name():
+    """A long name of multi-byte characters is a file name, not an error.
+
+    A file name is at most 255 bytes, and the characters of every script
+    take more than one byte: the name is cut on the bytes.
+    """
+    name, storage_path = store_upload(44, "é" * 300 + ".csv", CSV_CONTENT.encode())
+
+    assert name
+    assert len(name.encode("utf-8")) <= 200
+    # The file was written: the name fits the file system.
+    assert resolve_storage_path(storage_path).exists()
+
+
+def test_a_field_that_is_too_long_is_refused_with_a_message(client, auth):
+    """A file the csv parser cannot read is a 400, not a crash of the server.
+
+    The limit of the parser of the standard library is lowered here, because
+    the application raises it to the size of the biggest file it accepts: a
+    column with a long text is a dataset, and a file that the parser refuses
+    is an error the client has to see.
+    """
+    import csv
+
+    previous = csv.field_size_limit()
+    csv.field_size_limit(1024)
+    try:
+        content = ("a,b,label\n" + "x" * 200_000 + ",2,0\n").encode()
+        response = client.post(
+            "/api/v1/ml/datasets/upload",
+            headers=auth,
+            files={"file": ("wide.csv", content, "text/csv")},
+        )
+    finally:
+        csv.field_size_limit(previous)
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]
+
+
+def test_a_malformed_file_in_the_data_directory_does_not_stop_the_startup():
+    """One broken file in data/ must not keep the server from starting.
+
+    The data directory belongs to the user: a file that the application
+    cannot read is skipped with a warning, and the other datasets stay
+    usable.
+    """
+    import csv
+
+    root = Path(os.environ["DATASETS_ROOT"])
+    broken = root / "data" / "broken.csv"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    # A field that is too long for the csv parser of the standard library.
+    broken.write_text("a,b,label\n" + "x" * 500_000 + ",2,0\n")
+
+    previous = csv.field_size_limit()
+    csv.field_size_limit(1024)
+    try:
+        # The startup of the application registers the datasets of the
+        # directory: it has to come up with the broken file there.
+        with TestClient(app) as started:
+            # The application answers: it did not stop at the broken file.
+            assert started.get("/openapi.json").status_code == 200
+    finally:
+        csv.field_size_limit(previous)
+        broken.unlink()
+
+
+def test_an_oversized_upload_is_refused_before_the_body_is_read(client, auth, monkeypatch):
+    """The body of an upload that is too big is never read.
+
+    The framework writes the file part of a request to a temporary file
+    before the endpoint runs, so a limit that is only checked in the endpoint
+    does not bound the disk of the server.
+    """
+    from backend.app import datasets as registry
+
+    monkeypatch.setattr(registry, "MAX_UPLOAD_BYTES", 1024)
+    content = ("a,b,label\n" + "\n".join(f"{i},2,0" for i in range(5000))).encode()
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("big.csv", content, "text/csv")},
+    )
+
+    assert response.status_code == 413, response.text

@@ -186,7 +186,7 @@ numbers; the "test ID" refers to section H.
 | | |
 |---|---|
 | What | (a) a CSV upload endpoint; (b) the built-in `data/*.csv` files are seeded as rows at startup; (c) one listing endpoint that returns the columns, the row count and a suggested label column; (d) a training request references a dataset **by id**, never by a client-supplied path. |
-| How | New `backend/app/datasets.py` with the `Dataset` ORM model; `POST /api/v1/ml/datasets/upload` (CSV only, size and row limits) storing the file under `DATASETS_ROOT/uploads/<uuid>_<name>.csv`; `GET /api/v1/ml/datasets` and `GET /api/v1/ml/datasets/{id}/schema`; `POST /api/v1/ml/train` takes `dataset_id` **or** `hf_dataset_url`, exactly one; `resolve_dataset_path()` becomes root-relative and rejects absolute paths and `..`; `DATASETS_ROOT` (default: the repository root) holds `data/` for the built-ins and `uploads/` for user files. `train_model()` keeps its signature and receives the resolved relative path. |
+| How | New `backend/app/datasets.py` with the `Dataset` ORM model; `POST /api/v1/ml/datasets/upload` (CSV only, size and row limits) storing the file under `DATASETS_ROOT/uploads/<uuid>_<name>.csv`; `GET /api/v1/ml/datasets` and `GET /api/v1/ml/datasets/{id}` (the row carries the columns, so the schema endpoint of the plan was merged into the detail endpoint); `POST /api/v1/ml/train` takes `dataset_id` **or** `hf_dataset_url`, exactly one; `resolve_dataset_path()` becomes root-relative and rejects absolute paths and `..`; `DATASETS_ROOT` (default: the repository root) holds `data/` for the built-ins and `uploads/` for user files. `train_model()` keeps its signature and receives the resolved relative path. |
 | Why | The dropdown is empty on a fresh clone and the only data source is the server's `data/` directory (`main.py:236-238`); `dataset_name` accepts absolute paths, which I turned into a successful training run on `/tmp/outside.csv`. A registry also gives every upload an owner, which the shared anonymous bucket made impossible. |
 | Depends on | W1-2, W1-3 · **Test** T04 · **Risk** medium (the dataset-name semantics of `train_model` change, so `backend/tests` moves to relative paths under a patched root — a documented deviation from `FOLLOWUP_PLAN.md` invariant 10 with the same intent as its S5) · **Revert** revert the commit |
 
@@ -239,7 +239,7 @@ numbers; the "test ID" refers to section H.
 | `backend/app/models.py` | modify | W1-4 | the `datasets` table |
 | `backend/app/datasets.py` | new | W1-4 | the registry, the upload, the schema inspection |
 | `backend/migrations/versions/c4a9e2b17d3f_*.py` | new | W1-2 | creates `training_runs`, drops `notes` |
-| `backend/migrations/versions/<new>_*_datasets.py` | new | W1-4 | creates `datasets` (lands with the ORM model and the endpoints) |
+| `backend/migrations/versions/<new>_*_datasets.py` | new | W1-4 | creates `datasets` (lands with the ORM model and the endpoints); a second revision makes the name of a dataset unique per owner |
 | `backend/migrations/env.py` | modify | W1-2 | the URL, the `%` escaping, the engine |
 | `backend/alembic.ini` | modify | W1-2 | the stale DSN |
 | `backend/docker-compose.yml` | modify | W1-2 | the migrations must run |
@@ -370,6 +370,24 @@ routing test and someone "fixes" it by deleting assertions -> the expectation ta
   convenience" (it is a working credential for a shared bucket); storing the dataset bytes in the
   database (a full-table scan per read on Postgres); a client-supplied dataset path with a filter
   (the filter is the vulnerability).
+- W1-4, round 1 (2026-10-22): the registry shipped with the review of the phase. The review
+  found that the contract had broken the Hugging Face mode and the reinforcement learning models
+  (every request had to carry a dataset), that the upload left the client with the label column
+  of the previous dataset, that the body was read into the memory before the limit was checked,
+  that the limit on the rows was never read, that a refused upload left its file on the disk, and
+  that the upload had no rate limit. All fixed, with a test for each.
+- W1-4, round 2 (2026-10-22): the second review found four ways to make the server answer with
+  a 500 (a field the csv parser refuses, a name of multi-byte characters that is too long for
+  the file system, a broken file in `data/` that stopped the startup, and an upload whose body
+  was spooled to the disk before the limit was checked), and that the uniqueness of the name was
+  only checked in the application, so two uploads of the same name that arrived at the same time
+  both got it. The name is unique in the database now, the body of an upload is refused before it
+  is read, and the startup skips a file it cannot read instead of stopping.
+- W1-4, round 2, the suite of the documented installation: the installer installs torch, and with
+  torch the suite showed nine failures that the review had found before: the network of the torch
+  trainer was defined inside the function, so its artifact could not be loaded back, and the test
+  of the vision models used empty class directories. Both are fixed, so the numbers of this
+  repository are the numbers of a fresh clone.
 
 ## N. Approval record
 

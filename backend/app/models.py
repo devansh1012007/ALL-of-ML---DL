@@ -27,8 +27,11 @@ class Dataset(Base):
     __table_args__ = (
         # The path of a dataset is unique: it is what identifies the file.
         Index("ix_datasets_storage_path", "storage_path", unique=True),
-        # The listing is always "the datasets of this owner, by name".
-        Index("ix_datasets_owner_id_name", "owner_id", "name"),
+        # A name is unique inside an owner, and the listing is always "the
+        # datasets of this owner, by name": the same index serves both. The
+        # datasets of the repository have no owner, and their names are the
+        # names of their files.
+        Index("uq_datasets_owner_id_name", "owner_id", "name", unique=True),
     )
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

@@ -2,12 +2,13 @@ from fastapi import FastAPI, Depends, File, HTTPException, Header, Request, Uplo
 import logging
 import os
 import time
+import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.encoders import jsonable_encoder
 from jose import JOSEError, jwt
 from pathlib import Path
@@ -28,8 +29,8 @@ from .auth import (
     validate_credentials,
     verify_pass,
 )
+from . import datasets as datasets_registry
 from .datasets import (
-    MAX_UPLOAD_BYTES,
     DatasetError,
     dataset_to_dict,
     describe_csv,
@@ -94,15 +95,23 @@ async def seed_builtin_datasets() -> None:
                 # skipped: the startup must not fail because of it.
                 logger.warning("The built-in dataset %s is skipped: %s", path.name, exc)
                 continue
-            existing = (
-                await session.execute(
-                    select(Dataset).where(Dataset.storage_path == storage_path)
-                )
-            ).scalars().first()
             try:
+                existing = (
+                    await session.execute(
+                        select(Dataset).where(Dataset.storage_path == storage_path)
+                    )
+                ).scalars().first()
                 columns, rows, label = registry.describe_csv(path)
             except registry.DatasetError as exc:
                 logger.warning("The built-in dataset %s is skipped: %s", path.name, exc)
+                continue
+            except Exception as exc:  # pragma: no cover - the safety net
+                # A file that the application cannot describe must never stop
+                # the startup: the server has to come up, and the other
+                # datasets have to be usable.
+                logger.warning(
+                    "The built-in dataset %s is skipped: %s", path.name, exc
+                )
                 continue
             if existing is None:
                 session.add(
@@ -118,7 +127,9 @@ async def seed_builtin_datasets() -> None:
                     )
                 )
             else:
-                existing.name = path.name
+                # The name of an existing row is not overwritten: a symlink
+                # that points at another file of the directory would take the
+                # name of the dataset it points at.
                 existing.size_bytes = path.stat().st_size
                 existing.row_count = rows
                 existing.columns = columns
@@ -272,6 +283,37 @@ app.add_middleware(
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# --- the size of an upload ---------------------------------------------------
+# The body of an upload is parsed by the framework before the endpoint runs:
+# the file part is written to a temporary file of the operating system as it
+# arrives. A limit that is only checked inside the endpoint therefore bounds
+# the memory of the process, but not the disk of the server: a single request
+# could write an arbitrary amount of it. The length of the body is refused
+# here, before the body is read at all.
+UPLOAD_PATH = "/api/v1/ml/datasets/upload"
+# The body of a multipart request is a little bigger than the file it carries:
+# the boundary and the headers of the part are part of it.
+UPLOAD_BODY_OVERHEAD_BYTES = 8 * 1024
+
+
+@app.middleware("http")
+async def refuse_an_oversized_upload(request: Request, call_next):
+    """Refuse an upload whose body is too big, before it is read."""
+    if request.url.path == UPLOAD_PATH:
+        length = request.headers.get("content-length")
+        if length and length.isdigit():
+            if int(length) > datasets_registry.MAX_UPLOAD_BYTES + UPLOAD_BODY_OVERHEAD_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"The upload is {int(length)} bytes, which is more than "
+                            f"the limit of {datasets_registry.MAX_UPLOAD_BYTES} bytes."
+                        )
+                    },
+                )
+    return await call_next(request)
 
 # --- rate limiting ----------------------------------------------------------
 # A login endpoint that is not limited can be used to try passwords, and an
@@ -611,6 +653,22 @@ async def get_dataset(
     return dataset_to_dict(dataset)
 
 
+def _remove_stored_upload(storage_path: str) -> None:
+    """Remove the file of an upload that could not be registered.
+
+    A file that no row points at is a file that nobody can reach: it would
+    stay on the disk of the server until somebody deletes it by hand.
+    """
+    try:
+        path = resolve_storage_path(storage_path)
+    except DatasetError:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        logger.warning("The file of the upload %s could not be removed", storage_path)
+
+
 @app.post("/api/v1/ml/datasets/upload")
 async def upload_dataset(
     request: Request,
@@ -631,7 +689,7 @@ async def upload_dataset(
     # The body is read with a limit: reading it completely first would let a
     # single request fill the memory of the process, whatever the size limit
     # says afterwards.
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    content = await file.read(datasets_registry.MAX_UPLOAD_BYTES + 1)
     try:
         name, storage_path = store_upload(current_user.id, file.filename or "", content)
         path = resolve_storage_path(storage_path)
@@ -659,7 +717,39 @@ async def upload_dataset(
         label_column=label,
     )
     db.add(dataset)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two uploads of the same name arrived at the same time and the
+        # database refused the second one. The name is the only thing that
+        # collided: the file of this upload is fine, so it is registered with
+        # the next free name.
+        await db.rollback()
+        taken = await db.execute(
+            select(Dataset.name).where(
+                (Dataset.owner_id == current_user.id) | (Dataset.owner_id.is_(None))
+            )
+        )
+        name = unique_dataset_name(
+            f"{name} ({uuid.uuid4().hex[:8]})", [row[0] for row in taken.all()]
+        )
+        dataset.name = name
+        db.add(dataset)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            _remove_stored_upload(storage_path)
+            raise HTTPException(
+                status_code=400,
+                detail="The dataset could not be registered, please try again.",
+            ) from None
+    except Exception:
+        await db.rollback()
+        # The row was not written: the file of the upload would stay on the
+        # disk with nothing pointing at it.
+        _remove_stored_upload(storage_path)
+        raise
     await db.refresh(dataset)
     logger.info(
         "User '%s' uploaded the dataset '%s' (%s rows)",

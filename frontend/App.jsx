@@ -757,18 +757,22 @@ const NewJob = ({ navigate }) => {
   // The dataset is passed in when it is not in the list yet: after an upload
   // the list is updated in the same event handler, so the closure still holds
   // the old one and the lookup would find nothing.
+  // The payload is updated with the functional form, so that a change the
+  // user made while the upload was running is not rolled back.
   const selectDataset = (datasetId, knownDataset) => {
     const id = datasetId === '' || datasetId === null ? null : Number(datasetId);
-    const dataset = knownDataset || datasets.find(d => d.id === id);
-    const columns = dataset ? (dataset.columns || []).map(column => column.name) : [];
-    setPayload({
-      ...payload,
-      dataset_id: id,
-      // The registry suggests the label column; it is only used when the
-      // suggestion is one of the columns of the file.
-      label_column: dataset && dataset.label_column && columns.includes(dataset.label_column)
-        ? dataset.label_column
-        : (columns.includes(payload.label_column) ? payload.label_column : (columns[0] || payload.label_column)),
+    setPayload(previous => {
+      const dataset = knownDataset || datasets.find(d => d.id === id);
+      const columns = dataset ? (dataset.columns || []).map(column => column.name) : [];
+      return {
+        ...previous,
+        dataset_id: id,
+        // The registry suggests the label column; it is only used when the
+        // suggestion is one of the columns of the file.
+        label_column: dataset && dataset.label_column && columns.includes(dataset.label_column)
+          ? dataset.label_column
+          : (columns.includes(previous.label_column) ? previous.label_column : (columns[0] || previous.label_column)),
+      };
     });
   };
 
