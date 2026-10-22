@@ -135,7 +135,7 @@ Limitations / notes:
 
 2) Vision models (images)
 
-- Image trainers expect a folder with structure `root/class_name/*.jpg` and rely on `torchvision.datasets.ImageFolder` in `_train_resnet_image_model()`.
+- Image trainers expect a folder with structure `root/class_name/*.jpg` and rely on `torchvision.datasets.ImageFolder` in `_train_resnet_image_model()`. Such a folder is a dataset of the registry whose `source` is `folder`: the directories of `data/` are registered with that source at the startup by `seed_builtin_datasets()`, and the training request refers to the folder by its `dataset_id`. Only the directories of `data/` are registered that way, because an upload is always a CSV file.
 - For a new custom vision model:
   - Add catalog entry with category `vision` and sensible `params` (`epochs`, `batch_size`, `learning_rate`, `model_name`)
   - Add a new trainer like `_train_myvision_model(dataset_path, hyperparameters)` using the pattern in `_train_resnet_image_model()`.
@@ -216,10 +216,11 @@ Function limitations (detailed)
 - Parameter validation is minimal — invalid param names will raise exceptions from the estimator constructors. The only keys that are removed before the constructor call are the training-loop keys listed in `_TRAINER_OWNED_PARAMS` (`test_size`, which is passed to `train_test_split()` separately) and the branch-specific keys of `_BRANCH_SPECIFIC_PARAMS` (`probability`, `random_state`) on the `SVR` branch of `SVM`.
 - Forced constructor values (`probability` for `SVC`, `eval_metric` for `XGBClassifier`, `verbose` for the CatBoost estimators) are merged into the kwargs dict instead of being passed as a separate keyword, so a client-supplied value for them no longer collides with the forced one.
 
-4) Data helpers (`_prepare_dataset`, `load_huggingface_dataset`, `list_local_datasets`)
+4) Data helpers (`_prepare_dataset`, `load_huggingface_dataset`, the dataset registry)
 - CSV loading assumes the label column exists; missing columns raise errors. Ensure datasets are preprocessed to include labeled columns.
 - Hugging Face loading converts to a temporary CSV and expects modest dataset sizes; for large datasets consider using streaming or HF dataset streaming APIs.
-- `list_local_datasets()` lists the CSV files **and** the directories of `data/`: the directories are image datasets (one subdirectory per class) and are needed by the vision models. Pointing a tabular model at a directory fails with an explicit error in `_prepare_dataset()`. Hidden files and hidden directories (a name starting with `.`) are skipped.
+- A dataset is a row of the `datasets` table (`backend/app/models.py`), not a path the client sends. The client refers to it by `dataset_id`; `dataset_name` is a lookup in the same registry, never a path. The server resolves the row to a path **relative** to the datasets root (`DATASETS_ROOT`, the repository root by default) with `resolve_storage_path()` (`backend/app/datasets.py`), which refuses an absolute path, a `..` and a symlink that points out of the root. A client therefore cannot make the server read a file outside of the root.
+- The registry holds three kinds of rows: `builtin` (a CSV file of `data/`, registered at the startup by `seed_builtin_datasets()` in `backend/app/main.py`), `upload` (a CSV file the user sent, stored under `uploads/<user id>/` with a generated name) and `folder` (a directory of `data/`, the layout the vision models expect: one subdirectory per class). The listing returns the rows of the caller and the built-in ones; the columns of a row are capped by `MAX_REPORTED_COLUMNS`.
 
 5) Category-specific trainers
 - Transformers trainer uses the Hugging Face `Trainer` and assumes the dataset fits in memory or is handled by the `datasets` library. It does not implement advanced features like LoRA or quantized fine-tuning by default.

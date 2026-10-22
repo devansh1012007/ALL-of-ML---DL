@@ -29,11 +29,13 @@ from .auth import (
     verify_pass,
 )
 from .datasets import (
+    MAX_UPLOAD_BYTES,
     DatasetError,
     dataset_to_dict,
     describe_csv,
     resolve_storage_path,
     store_upload,
+    unique_dataset_name,
 )
 from .model_training import (
     MODEL_DIR,
@@ -280,6 +282,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 # store.
 LOGIN_RATE_LIMIT = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
 REGISTER_RATE_LIMIT = int(os.getenv("REGISTER_RATE_LIMIT", "20"))
+UPLOAD_RATE_LIMIT = int(os.getenv("UPLOAD_RATE_LIMIT", "20"))
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 # The maximum number of clients the limiter remembers. Without it, an
@@ -597,8 +600,20 @@ async def get_datasets(current_user: User = Depends(get_current_user), db: Async
     return {"datasets": [dataset_to_dict(dataset) for dataset in datasets]}
 
 
+@app.get("/api/v1/ml/datasets/{dataset_id}")
+async def get_dataset(
+    dataset_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """One dataset, with its columns and the label column that is suggested."""
+    dataset = await _dataset_for_user(dataset_id, current_user, db)
+    return dataset_to_dict(dataset)
+
+
 @app.post("/api/v1/ml/datasets/upload")
 async def upload_dataset(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -609,13 +624,29 @@ async def upload_dataset(
     generated name, and it is registered as a row: a training request refers
     to it by its id.
     """
-    content = await file.read()
+    _check_rate_limit(
+        f"upload:{_client_address(request)}", UPLOAD_RATE_LIMIT
+    )
+    _record_rate_limit(f"upload:{_client_address(request)}")
+    # The body is read with a limit: reading it completely first would let a
+    # single request fill the memory of the process, whatever the size limit
+    # says afterwards.
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
     try:
         name, storage_path = store_upload(current_user.id, file.filename or "", content)
         path = resolve_storage_path(storage_path)
         columns, rows, label = describe_csv(path)
     except DatasetError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    # The name of a dataset has to be unambiguous for the display: a built-in
+    # dataset and an upload may have the same name.
+    taken = await db.execute(
+        select(Dataset.name).where(
+            (Dataset.owner_id == current_user.id) | (Dataset.owner_id.is_(None))
+        )
+    )
+    name = unique_dataset_name(name, [row[0] for row in taken.all()])
 
     dataset = Dataset(
         owner_id=current_user.id,
@@ -661,13 +692,20 @@ async def _dataset_for_user(
 
 async def _dataset_for_training(
     payload: TrainRequest, current_user: User, db: AsyncSession
-) -> Tuple[Dataset, str]:
+) -> Tuple[Optional[Dataset], Optional[str]]:
     """The dataset of a training request, and the path the trainer reads.
 
     The path comes from the registry, never from the client. A request that
     carries a name instead of an id is resolved through the registry as well,
     so there is exactly one way from a request to a file.
+
+    ``(None, None)`` means that the request has no local dataset: either it
+    names a Hugging Face dataset, or the model is a reinforcement learning
+    model, which trains in an environment and needs no data.
     """
+    if payload.hf_dataset_url and not payload.dataset_id and not payload.dataset_name:
+        return None, None
+
     if payload.dataset_id is not None:
         dataset = await _dataset_for_user(payload.dataset_id, current_user, db)
     elif payload.dataset_name:
@@ -675,7 +713,7 @@ async def _dataset_for_training(
             select(Dataset).where(
                 Dataset.name == payload.dataset_name,
                 (Dataset.owner_id == current_user.id) | (Dataset.owner_id.is_(None)),
-            )
+            ).order_by(Dataset.owner_id.is_(None), Dataset.id)
         )
         dataset = result.scalars().first()
         if dataset is None:
@@ -704,18 +742,41 @@ async def _dataset_for_training(
     return dataset, dataset.storage_path
 
 
+def _needs_a_dataset(model_name: str) -> bool:
+    """Whether the model of a request trains on a dataset.
+
+    A reinforcement learning model trains in an environment (the ``env_id`` of
+    the request), so it needs no data.
+    """
+    from .model_training import get_model_entry
+
+    return get_model_entry(model_name).get("category") != "reinforcement-learning"
+
+
 @app.post("/api/v1/ml/train")
 async def train_model_endpoint(payload: TrainRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     # The requested optimisation metric is passed through untouched: resolving or
     # remapping it here would hide the training internals from the HTTP layer and
     # would silently optimise for a different metric than the one requested.
-    dataset, storage_path = await _dataset_for_training(payload, current_user, db)
+    if _needs_a_dataset(payload.model_name):
+        dataset, storage_path = await _dataset_for_training(payload, current_user, db)
+    else:
+        # A reinforcement learning model trains in an environment, so it needs
+        # no data.
+        dataset, storage_path = None, None
+
+    if dataset is not None:
+        dataset_source, dataset_tag = "local", dataset.name
+    elif payload.hf_dataset_url:
+        dataset_source, dataset_tag = "huggingface", payload.hf_dataset_url
+    else:
+        dataset_source, dataset_tag = "rl", payload.env_id or "unknown"
 
     training_run = TrainingRun(
         owner_id=current_user.id,
         model_name=payload.model_name,
-        dataset_source="local",
-        dataset_tag=dataset.name,
+        dataset_source=dataset_source,
+        dataset_tag=dataset_tag,
         hf_dataset_url=payload.hf_dataset_url,
         hyperparameters=payload.hyperparameters or {},
         mode=payload.mode,
@@ -749,7 +810,9 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
         training_run.metrics = metrics
         training_run.artifact_path = artifact_path
         training_run.dataset_source = dataset_source
-        training_run.dataset_tag = dataset_tag
+        # The tag of a local dataset is its name: the path the registry
+        # resolved it to is an internal detail of the server.
+        training_run.dataset_tag = dataset.name if dataset is not None else dataset_tag
         training_run.status = "completed"
         await db.commit()
         return {

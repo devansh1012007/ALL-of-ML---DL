@@ -22,8 +22,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.svm import SVC, SVR
 
-from .settings import builtin_datasets_dir
-
 try:
     from hmmlearn import hmm
 except ImportError:
@@ -877,30 +875,6 @@ def list_model_categories() -> List[str]:
     return sorted({entry.get("category", "custom") for entry in MODEL_CATALOG.values()})
 
 
-def list_local_datasets() -> List[str]:
-    """List the selectable local datasets: CSV files plus image dataset folders.
-
-    Vision models need a directory with one subdirectory per class, so
-    directories are listed as well. A tabular model pointed at a folder fails
-    with a clear message in _prepare_dataset(). Hidden files and hidden
-    directories are skipped.
-    """
-    directory = builtin_datasets_dir()
-    if not directory.exists():
-        return []
-    names = {
-        path.name
-        for path in directory.glob("*.csv")
-        if path.is_file() and not path.name.startswith(".")
-    }
-    names.update(
-        path.name
-        for path in directory.iterdir()
-        if path.is_dir() and not path.name.startswith(".")
-    )
-    return sorted(names)
-
-
 def parse_hugging_face_reference(value: str) -> str:
     if value.startswith("https://huggingface.co/datasets/"):
         return value.split("https://huggingface.co/datasets/", 1)[1]
@@ -1339,8 +1313,8 @@ def _prepare_dataset(
             raise FileNotFoundError(f"Local dataset '{dataset_name}' not found at '{local_path}'.")
         if local_path.is_dir():
             raise ValueError(
-                "Local dataset path points to a folder. For image datasets use a vision-capable model like ResNet50 "
-                "and a folder with class subdirectories, or provide a CSV file path for tabular models."
+                "The dataset is a folder. For image datasets use a vision-capable model like ResNet50 "
+                "and a dataset whose source is 'folder', or pick a CSV dataset for the tabular models."
             )
         try:
             df = pd.read_csv(local_path, sep=sep, usecols=usecols)
@@ -1519,8 +1493,8 @@ def train_model(
     if model_def["category"] == "vision":
         if not dataset_name or not is_image_dataset_path(dataset_name):
             raise ValueError(
-                "Vision models require a local image dataset directory path pointing to class subdirectories. "
-                "Provide an absolute path or a path under the data/ folder."
+                "Vision models require a dataset that is a folder with one subdirectory per class. "
+                "Pick one of the datasets of the list whose source is 'folder'."
             )
         
         # The mode's own suggestions for this model. They are merged into the base

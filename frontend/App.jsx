@@ -754,9 +754,12 @@ const NewJob = ({ navigate }) => {
     ? (selectedDataset.columns || []).map(column => column.name)
     : [];
 
-  const selectDataset = (datasetId) => {
-    const id = datasetId === '' ? null : Number(datasetId);
-    const dataset = datasets.find(d => d.id === id);
+  // The dataset is passed in when it is not in the list yet: after an upload
+  // the list is updated in the same event handler, so the closure still holds
+  // the old one and the lookup would find nothing.
+  const selectDataset = (datasetId, knownDataset) => {
+    const id = datasetId === '' || datasetId === null ? null : Number(datasetId);
+    const dataset = knownDataset || datasets.find(d => d.id === id);
     const columns = dataset ? (dataset.columns || []).map(column => column.name) : [];
     setPayload({
       ...payload,
@@ -786,7 +789,8 @@ const NewJob = ({ navigate }) => {
         const without = previous.filter(item => item.id !== dataset.id);
         return [...without, dataset].sort((a, b) => a.name.localeCompare(b.name));
       });
-      selectDataset(dataset.id);
+      // The uploaded dataset is passed in: the list above is not updated yet.
+      selectDataset(dataset.id, dataset);
     } catch (err) {
       setUploadError(err.message || 'The upload failed.');
     } finally {

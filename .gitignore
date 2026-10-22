@@ -13,6 +13,9 @@ __pycache__/
 *.log
 *.bak
 models/
+# The cache of the installer of scripts/install.sh: it makes an interrupted
+# installation resume instead of starting over, and it is not worth keeping.
+.cache/
 # The generated development signing key of the JWT (see backend/app/auth.py).
 .secret_key
 # The CSV files of the user, the committed sample datasets excepted.

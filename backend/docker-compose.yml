@@ -37,9 +37,25 @@ services:
       # container the code lives in /code, which is the mounted volume, so the
       # key survives a restart of the container.
       - SECRET_KEY_FILE=/code/.secret_key
+      # The datasets root is the boundary of what the application can read.
+      # The container only has the backend/ directory at /code, so the built-in
+      # datasets of the repository and the uploads of the users are mounted
+      # inside it: without them the dataset list is empty and the uploads are
+      # lost on every redeploy.
+      - DATASETS_ROOT=/code
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - .:/code
+      # The built-in datasets of the repository (../data is resolved against
+      # the directory of this file, which is the backend/ directory).
+      - ../data:/code/data
+      # The uploads of the users. A named volume keeps them when the container
+      # is replaced; a bind mount keeps them on the disk of the host.
+      - uploads:/code/uploads
     restart: no
+
+volumes:
+  # The uploads of the users: they survive the redeployment of the container.
+  uploads:

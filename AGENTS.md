@@ -43,30 +43,37 @@ This workflow is binding for all work in this repo.
 
 **Non-negotiable rule:** Context-gathering subagents must run before every change; an independent review subagent must run after every atomic phase and once again at the end. If subagents or required verification are unavailable, stop and report the blocker instead of pretending the workflow was completed.
 
-Repo-specific anchors for this workflow: backend tests are `python -m pytest backend/tests` from the **repo root** (see Commands); there is no linter, so "run the linter" means run pytest plus a manual dev-server check; the "existing tests" to read are `backend/tests/conftest.py`, `backend/tests/test_main.py`, `backend/tests/test_model_training.py`, `backend/tests/test_catalog_params.py` and `backend/tests/test_auth_and_runs.py` (the last two were added by the bug-fix round; they pin the catalog/param/routing and auth contracts).
+Repo-specific anchors for this workflow: backend tests are `.venv/bin/python -m pytest backend/tests` from the **repo root** (see Commands); there is no linter, so "run the linter" means run pytest plus a manual dev-server check; the "existing tests" to read are `backend/tests/conftest.py`, `backend/tests/test_main.py`, `backend/tests/test_model_training.py`, `backend/tests/test_catalog_params.py` (the catalog/param/routing contract), `backend/tests/test_auth_and_runs.py` (the auth contract) and `backend/tests/test_datasets.py` (the dataset registry contract).
 
 ## Layout / entrypoints
 
 - `backend/app/main.py` — FastAPI app (`uvicorn app.main:app`), all HTTP routes, request models.
 - `backend/app/model_training.py` (~1.7k lines) — the ML core: `MODEL_CATALOG`, `ALIASES`, `TRAINING_MODES`, `TRAINING_PRESETS`, `train_model()`, `build_model()`, per-category trainers.
-- `backend/app/models.py` — ORM (`users`, `training_runs`); `backend/app/database.py` — engine/session; `backend/app/auth.py` — bcrypt + JWT.
+- `backend/app/models.py` — ORM (`users`, `datasets`, `training_runs`); `backend/app/database.py` — engine/session; `backend/app/auth.py` — bcrypt + JWT.
+- `backend/app/datasets.py` — the dataset registry: `resolve_storage_path()`, `store_upload()`, `describe_csv()`, `suggest_label()`, the upload limits. `backend/app/settings.py` — `DATABASE_URL`, `datasets_root()`, `builtin_datasets_dir()`, `uploads_dir()`.
 - `backend/migrations/` — Alembic; `backend/tests/` — pytest.
 - `frontend/App.jsx` (~1.4k lines) — the whole SPA. `frontend/main.jsx` is the entry; **there is no `src/` dir** — `index.html`, `main.jsx`, `App.jsx`, `styles.css` all sit at the `frontend/` root.
-- `data/` — local CSV datasets are read from here at runtime. Only `data/README.md` is committed, so a fresh clone has **zero datasets**; the local-dataset dropdown will be empty until you add a CSV.
+- `data/` — the CSV files that ship with the repository. They are registered as rows of the `datasets` table at the startup (`seed_builtin_datasets()` in `backend/app/main.py`), so a fresh clone already has two datasets (`sample_customer_churn.csv`, `sample_house_prices.csv`).
+- `scripts/install.sh`, `scripts/download.sh` — the installer of the repository.
+- A dataset is a **row of the `datasets` table**, not a path: the client sends `dataset_id` (or a `dataset_name`, which is a lookup in the same registry), and the server resolves the row to a path **relative** to the datasets root (`DATASETS_ROOT`, the repository root by default). `resolve_storage_path()` (`backend/app/datasets.py`) refuses an absolute path, a `..` and a symlink that points out of the root. The root holds `data/` (the built-in datasets) and `uploads/` (the files the users upload, under `uploads/<user id>/` with a generated name).
 
 ## Commands
 
 Backend (from repo root, venv at repo root):
-- install: `pip install -r backend/requirements.txt`
+- install: `scripts/install.sh` — it creates the virtual environment `.venv` (python 3.12) at the repository root and installs the backend and the frontend dependencies. It needs `uv` (https://docs.astral.sh/uv/getting-started/installation/) for the python side and `npm` for the frontend. The flags are `--backend` (the python dependencies only), `--frontend` (the node dependencies only), `--optional` (`google-generativeai`, `umap-learn`, `hdbscan`), `--dev` (`pytest`, `pytest-asyncio`, `httpx`, `ruff`) and `--cpu` (the small build of torch; it only has an effect together with `--backend`). Without a flag it installs the backend and the frontend. A download that fails is retried, and the cache of the installer lives in `.cache/` of the repository, so an interrupted installation resumes instead of starting over.
 - run: `cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload` (port 8010 is what the frontend hardcodes; logs go to `app.log`, relative to the CWD)
 - **migrate first**: `cd backend && alembic upgrade head` — the app **verifies** the schema at startup and refuses to start when it is behind. The app never creates tables any more.
-- tests: `python -m pytest backend/tests` — **run from the repo root**: test modules import `backend.app.*` and neither `backend/` nor `backend/app/` has `__init__.py`, so the repo root must be on `sys.path`. `backend/tests/conftest.py` puts it there (and pins an isolated sqlite `DATABASE_URL` + a temporary `MODEL_DIR`), so bare `pytest backend/tests` works from the repo root too. The suite builds its schema with the migrations and runs `alembic check`, so a drift between the migrations and the ORM fails the suite.
-- single test: `python -m pytest backend/tests/test_model_training.py::test_train_model_auto_fine_tune_tabular`
+- tests: `.venv/bin/python -m pytest backend/tests` — **run from the repo root**: test modules import `backend.app.*` and neither `backend/` nor `backend/app/` has `__init__.py`, so the repo root must be on `sys.path`. `backend/tests/conftest.py` puts it there (and pins an isolated sqlite `DATABASE_URL`, a temporary `DATASETS_ROOT` and a temporary `MODEL_DIR`), so bare `pytest backend/tests` works from the repo root too. The suite builds its schema with the migrations and runs `alembic check`, so a drift between the migrations and the ORM fails the suite.
+- single test: `.venv/bin/python -m pytest backend/tests/test_model_training.py::test_train_model_auto_fine_tune_tabular`
 - migrations: `cd backend && alembic upgrade head` (needs `DATABASE_URL`); new revision: `cd backend && alembic revision --autogenerate -m "..."` (see `backend/commands.txt`, which uses `docker-compose run --rm web ...`)
 
 Frontend:
-- `cd frontend && npm install && npm run dev` → **http://localhost:3000** (`frontend/vite.config.js` sets `server.port: 3000`; the root `readme.md` says 5173 — it is wrong).
+- install: `scripts/install.sh --frontend` — it runs `npm install` in `frontend/` with the cache of the repository.
+- `cd frontend && npm run dev` → **http://localhost:3000** (`frontend/vite.config.js` sets `server.port: 3000`; the root `readme.md` says 5173 — it is wrong).
 - `npm run build` → `frontend/dist/`
+
+Scripts:
+- `scripts/download.sh <url> [target]` — downloads a file and continues where it stopped (`curl --continue-at -`), retrying a transfer that breaks.
 
 Docker:
 - The compose file is `backend/docker-compose.yml`, **not** the repo root. `cd backend && docker-compose up --build`.
@@ -76,8 +83,10 @@ Docker:
 ## Environment gotchas
 
 - `DATABASE_URL` must be set before the app is importable. The default in `backend/app/settings.py` is `sqlite+aiosqlite:///./backend.db`; `aiosqlite` **is** in `requirements.txt` now, so the sqlite fallback works out of the box (it creates `./backend.db` in the CWD). Use `postgresql+asyncpg://user:pass@host:5432/db` for anything real.
+- `DATASETS_ROOT` is the directory every dataset is read from; the default is the repository root (`backend/app/settings.py`). `data/` (the datasets that ship with the repository) and `uploads/` (the files the users upload) are resolved against it, and the path of a dataset is relative to it. It is read on **every call** (`datasets_root()`), so a change does not need a restart. An empty value is not the default: the root becomes the current directory of the process.
+- The upload limits are read **at import time**, so a change needs a restart: `MAX_UPLOAD_BYTES` (50 MiB), `MAX_UPLOAD_ROWS` (2000000) and `MAX_REPORTED_COLUMNS` (200) in `backend/app/datasets.py`, and `UPLOAD_RATE_LIMIT` (20 uploads per minute and per client address) in `backend/app/main.py`. The request body is read with the limit in force, so an oversized file is refused instead of filling the memory of the process.
 - `python-dotenv` is in `requirements.txt` but nothing calls `load_dotenv` — export env vars yourself (or rely on compose `env_file`).
-- Still missing from `requirements.txt`: `google-generativeai` (`llm_fine_tune` mode), `umap` / `hdbscan` (catalog models `UMAP`/`HDBSCAN` raise "not installed" at train time), `gymnasium` / `stable-baselines3` / `torch` are declared but huge. Optional imports in `model_training.py` are guarded, so the module still imports.
+- Still missing from `requirements.txt`: `google-generativeai` (`llm_fine_tune` mode), `umap` / `hdbscan` (catalog models `UMAP`/`HDBSCAN` raise "not installed" at train time), `gymnasium` / `stable-baselines3` / `torch` are declared but huge. `scripts/install.sh --optional` installs the first three. Optional imports in `model_training.py` are guarded, so the module still imports.
 - `scikit-learn` is pinned to `<1.10` because the catalog uses `LogisticRegression(penalty="l2")` (removed in 1.10) and `SVC(probability=True)` (removed in 1.11). Relax the pin only after removing those params.
 - `openai` is in `requirements.txt` but unused by the code; `llm_fine_tune` uses **Google Gemini** (`GOOGLE_API_KEY`, optional `GOOGLE_MODEL`) — the backend's mode description says so too.
 - The URL of the database comes from `DATABASE_URL` (or the app's default); `alembic.ini` has no URL of its own, and `migrations/env.py` escapes the `%` of a password.
@@ -87,7 +96,7 @@ Docker:
 
 - `MODEL_CATALOG` (`backend/app/model_training.py:137`) is the source of truth (38 entries). `ALIASES` maps alternate spellings to canonical keys. `list_available_models()` scans `ROOT/{ML_models,DL_models,Encoder_Decoder}` — those dirs were **deleted** in commit `d4b397c` — so it always falls back to the catalog.
 - Adding a model: catalog entry (`category`, `description`, `params`, `optimization`, `test_results`) + optional `ALIASES` entry + a `build_model()` branch (sklearn-like) or a category trainer routed from `train_model()`.
-- `category` selects the code path in `train_model()`: `reinforcement-learning` → `_train_rl_model` (requires `env_id`), `vision` → `_train_resnet_image_model` (requires a local dir with class subfolders, not a CSV), `clustering` → `_train_clustering`, `nlp` → `_train_transformer_text_classifier`, `timeseries`/`graph`/`autoencoder` → `_train_torch_regression_or_classification` (a plain MLP — the "time-series"/GNN/autoencoder models are not real implementations), everything else → the sklearn tabular flow.
+- `category` selects the code path in `train_model()`: `reinforcement-learning` → `_train_rl_model` (requires `env_id`), `vision` → `_train_resnet_image_model` (requires a dataset of the registry whose source is `folder`: a directory with class subfolders, not a CSV), `clustering` → `_train_clustering`, `nlp` → `_train_transformer_text_classifier`, `timeseries`/`graph`/`autoencoder` → `_train_torch_regression_or_classification` (a plain MLP — the "time-series"/GNN/autoencoder models are not real implementations), everything else → the sklearn tabular flow.
 - Category strings are inconsistent: `"time-series"` (XGBoost/LightGBM/CatBoost — these train as **tabular** models) vs `"timeseries"` (LSTM/RNN/SSM/TCN → the torch MLP branch). `HMM_timeseries` was moved to `category: "clustering"` so it reaches the trainer that implements it.
 - Catalog `params` are splatted into the estimator constructor (`build_model()`), so they must only contain keys that estimator accepts. Trainer-owned keys (notably `test_size`) are stripped centrally in `train_model()` and in `build_model()`/`_train_clustering()`; an **unknown/typo'd** key still raises `TypeError` on purpose — do not add a blanket signature filter.
 - The preset is applied **once**, to the merged base: final params = `{**preset(catalog + mode_suggestions), **preset(client_values)}`. The client's explicit values still win, and a preset is effective in every mode (even with an empty `hyperparameters` dict). `metrics["model_parameters"]` reports the effective set for the tabular flow (the other trainers don't emit it).
@@ -98,8 +107,9 @@ Docker:
 - Single-file SPA, no router, no react-router: navigation is `navigate(view, params)` state in `MainApp` (`frontend/App.jsx`). Views live in `frontend/App.jsx` (`AuthView`, `ModelsCatalog`, `RunsDashboard`, `RunDetails`, `NewJob`).
 - The API base is hardcoded: `const API_BASE = 'http://localhost:8010'` at `frontend/App.jsx:8`. There is no Vite proxy and no env var — change it there.
 - Token is kept in `localStorage` under `prime_token`; `apiFetch` in `AuthProvider` adds the `Authorization` header and auto-logs-out on 401.
+- The dataset of a training job is picked in a dropdown (`GET /api/v1/ml/datasets`) and sent as `dataset_id`; the file input of the form uploads a CSV (`POST /api/v1/ml/datasets/upload`) and the label column is chosen from the columns of the selected dataset.
 - `frontend/tailwind.config.js` `content` lists only `./index.html`, `./App.jsx`, `./main.jsx` — add any new file there or its Tailwind classes won't be generated.
-- CORS is wide open (`allow_origins=["*"]`) in `backend/app/main.py`.
+- CORS is an explicit allow-list (`CORS_ORIGINS`) in `backend/app/main.py`, not `allow_origins=["*"]`.
 
 ## Auth reality
 
@@ -107,10 +117,12 @@ Docker:
 - `SECRET_KEY` comes from the environment. In production (`APP_ENV=production`) a missing key is a **hard startup error**; in development a random key is generated once into `<repo>/.secret_key` (git-ignored, `SECRET_KEY_FILE` overrides the path). A token signed with the old published default is rejected.
 - Login is OAuth2 form POST `/token`; registration is JSON POST `/api/v1/register` (a client-supplied `role` is ignored; a duplicate username → 409; the reserved names `anonymous`/`admin`/`root`/`system` → 400; a password of at least 8 characters and at most 72 **bytes**).
 - Failed logins are rate limited per address **and** per account, registrations per address (`LOGIN_RATE_LIMIT`, `REGISTER_RATE_LIMIT`). CORS uses an explicit allow-list (`CORS_ORIGINS`, the dev origins of the SPA by default) — `allow_origins=["*"]` is gone.
-- `backend/.env.example` documents every environment variable.
+- `backend/.env.example` documents every environment variable, except `RATE_LIMIT_MAX_CLIENTS`, which the rate limiter reads with the default of 10000.
 
 ## Existing docs (read before changing ML code)
 
 - `backend/app/README.md` — detailed "how to add a model" guide. Mostly accurate; trust `model_training.py` over it where they disagree.
-- `readme.md` — partially stale: frontend port 5173, compose at repo root, models under `ML_models/`/`DL_models/`, and it ends with a stray "If you'd like, I can also commit a docker-compose.yml…" paragraph.
+- `data/README.md` — the datasets that ship with the repository, the two ways to add one and the format a CSV has to have.
+- `readme.md` — partially stale: frontend port 5173, compose at repo root, models under `ML_models/`/`DL_models/`, the dataset is still described as a file of `data/` the client picks (it is a row of the registry now), and it ends with a stray "If you'd like, I can also commit a docker-compose.yml…" paragraph.
 - `TODO.MD` — single open item: auto fine-tuning with and without the LLM.
+- `AUDIT.md`, `FIX_PLAN.md`, `FOLLOWUP_PLAN.md`, `WEEK1_PLAN.md` — the plans of the earlier rounds. They describe the state before the change they plan, on purpose: do not read them as a description of the current code.

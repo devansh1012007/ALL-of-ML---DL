@@ -270,3 +270,156 @@ def test_an_upload_is_stored_with_a_generated_name():
     assert storage_path.startswith("uploads/42/")
     assert ".." not in storage_path
     assert resolve_storage_path(storage_path).exists()
+
+
+def test_the_dataset_of_the_owner_is_returned_by_its_id(client, auth):
+    """The detail of a dataset carries its columns and its label."""
+    uploaded = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("detail.csv", CSV_CONTENT.encode(), "text/csv")},
+    ).json()
+
+    response = client.get(f"/api/v1/ml/datasets/{uploaded['id']}", headers=auth)
+
+    assert response.status_code == 200, response.text
+    dataset = response.json()
+    assert dataset["id"] == uploaded["id"]
+    assert [column["name"] for column in dataset["columns"]] == [
+        "feature_a",
+        "feature_b",
+        "label",
+    ]
+    assert dataset["label_column"] == "label"
+    assert dataset["row_count"] == 4
+
+
+def test_an_upload_with_too_many_rows_is_refused(client, auth, monkeypatch):
+    """The number of rows of an upload is limited."""
+    from backend.app import datasets as datasets_module
+
+    monkeypatch.setattr(datasets_module, "MAX_UPLOAD_ROWS", 2)
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("too_many_rows.csv", CSV_CONTENT.encode(), "text/csv")},
+    )
+
+    assert response.status_code == 400
+    assert "rows" in response.json()["detail"].lower()
+
+
+def test_an_upload_that_is_too_big_is_refused(client, auth, monkeypatch):
+    """The size of an upload is limited."""
+    from backend.app import datasets as datasets_module
+
+    monkeypatch.setattr(datasets_module, "MAX_UPLOAD_BYTES", 10)
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("too_big.csv", CSV_CONTENT.encode(), "text/csv")},
+    )
+
+    assert response.status_code == 400
+    assert "limit" in response.json()["detail"].lower()
+
+
+def test_a_refused_upload_leaves_no_file_behind(client, auth):
+    """A file that was refused is not written to the disk.
+
+    The content is checked before it is written, so a rejected upload does not
+    fill the disk of the server with files nobody can use.
+    """
+    root = Path(os.environ["DATASETS_ROOT"]).resolve()
+    uploads = root / "uploads"
+    before = sorted(path.name for path in uploads.rglob("*")) if uploads.exists() else []
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("broken.csv", b'a,b,label\n"unclosed,2,0\n', "text/csv")},
+    )
+    assert response.status_code == 400
+
+    after = sorted(path.name for path in uploads.rglob("*")) if uploads.exists() else []
+    assert after == before
+
+
+def test_the_name_of_an_upload_is_unique(client, auth):
+    """Two uploads with the same name get two different names.
+
+    The name is what the user sees, so it has to say which file it is.
+    """
+    first = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("same.csv", CSV_CONTENT.encode(), "text/csv")},
+    ).json()
+    second = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("same.csv", CSV_CONTENT.encode(), "text/csv")},
+    ).json()
+
+    assert first["id"] != second["id"]
+    assert first["name"] != second["name"]
+
+
+def test_the_upload_is_rate_limited(client, auth, monkeypatch):
+    """A client cannot fill the disk of the server with uploads."""
+    from backend.app import main as main_module
+
+    monkeypatch.setattr(main_module, "UPLOAD_RATE_LIMIT", 2)
+
+    for _ in range(2):
+        response = client.post(
+            "/api/v1/ml/datasets/upload",
+            headers=auth,
+            files={"file": ("rate.csv", CSV_CONTENT.encode(), "text/csv")},
+        )
+        assert response.status_code == 200, response.text
+
+    refused = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("rate.csv", CSV_CONTENT.encode(), "text/csv")},
+    )
+    assert refused.status_code == 429
+
+
+def test_the_row_count_of_a_file_with_a_quoted_line_break(tmp_path):
+    """The rows are counted the way a CSV reader counts them.
+
+    A value may contain a line break inside quotes: counting the line breaks
+    would report one row too many.
+    """
+    path = Path(os.environ["DATASETS_ROOT"]) / "data" / "quoted.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('a,b,label\n"first\nsecond",2,0\n3,4,1\n')
+
+    columns, rows, label = describe_csv(path)
+
+    assert rows == 2
+    assert label == "label"
+
+
+def test_the_columns_carry_the_type_of_the_values(tmp_path):
+    """The description of a file carries the types the training will see."""
+    path = Path(os.environ["DATASETS_ROOT"]) / "data" / "typed.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("count,value,label\n1,1.5,0\n2,2.5,1\n")
+
+    columns, _, _ = describe_csv(path)
+
+    types = {column["name"]: column["dtype"] for column in columns}
+    assert types["count"] == "int64"
+    assert types["value"] == "float64"
+
+
+def test_the_name_of_an_upload_keeps_its_letters():
+    """The name of a file is shown to the user, so it keeps its letters."""
+    name, _ = store_upload(43, "üñíçø∂é.csv", CSV_CONTENT.encode())
+
+    assert name == "üñíçø∂é.csv"
