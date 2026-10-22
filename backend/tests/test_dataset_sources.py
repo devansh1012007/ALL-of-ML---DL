@@ -30,7 +30,9 @@ def auth(client):
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_a_hugging_face_training_needs_no_local_dataset(client, auth, monkeypatch):
+def test_a_hugging_face_training_needs_no_local_dataset(
+    client, auth, monkeypatch, wait_for_run
+):
     """A request that names a Hugging Face dataset does not need a local one.
 
     Before, every request had to carry a dataset of the registry, so the
@@ -58,15 +60,23 @@ def test_a_hugging_face_training_needs_no_local_dataset(client, auth, monkeypatc
         },
     )
 
-    assert response.status_code == 400
-    detail = response.json()["detail"]
+    # The request is accepted: the training runs in the background, and its
+    # failure is written in the run.
+    assert response.status_code == 200, response.text
+    assert response.json()["metrics"] is None
+
+    run = wait_for_run(client, auth, response.json()["run_id"])
+    assert run["status"] == "failed", run
+    detail = run["metrics"]["error"]
     # The request reached the Hugging Face branch instead of being refused for
     # a missing dataset.
     assert "the hugging face dataset" in detail
     assert "dataset_id" not in detail
 
 
-def test_a_reinforcement_learning_training_needs_no_dataset(client, auth, monkeypatch):
+def test_a_reinforcement_learning_training_needs_no_dataset(
+    client, auth, monkeypatch, wait_for_run
+):
     """A reinforcement learning model trains in an environment, not on a file."""
     from backend.app import model_training
 
@@ -91,10 +101,12 @@ def test_a_reinforcement_learning_training_needs_no_dataset(client, auth, monkey
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["metrics"]["mean_reward"] == 12.5
+    run = wait_for_run(client, auth, response.json()["run_id"])
+    assert run["status"] == "completed", run
+    assert run["metrics"]["mean_reward"] == 12.5
 
 
-def test_the_run_of_a_local_dataset_records_its_name(client, auth):
+def test_the_run_of_a_local_dataset_records_its_name(client, auth, wait_for_run):
     """The run history shows the name of the dataset, not the path of the server.
 
     The path the registry resolved the row to is an internal detail: it holds
@@ -120,7 +132,7 @@ def test_the_run_of_a_local_dataset_records_its_name(client, auth):
     )
     assert response.status_code == 200, response.text
 
-    runs = client.get("/api/v1/ml/runs", headers=auth).json()
-    run = next(item for item in runs if item["id"] == response.json()["run_id"])
+    run = wait_for_run(client, auth, response.json()["run_id"])
+    assert run["status"] == "completed", run
     assert run["dataset_tag"] == "sample_customer_churn.csv"
     assert "uploads/" not in run["dataset_tag"]

@@ -194,8 +194,8 @@ numbers; the "test ID" refers to section H.
 
 | | |
 |---|---|
-| What | `POST /train` creates the row, answers `200` with `{run_id, status: "running", artifact_path: null, metrics: null}` and trains in the background; the row is the error channel; a restart reaps the rows that were left `running`; the frontend polls the run. |
-| How | `BackgroundTasks.add_task(_execute_training, run_id, payload)`; the worker writes the outcome with its **own** `AsyncSessionLocal()` session, never the request-scoped one; any exception writes `status="failed", metrics={"error": ...}`; the lifespan reaper fails the `running` rows at startup; `RunDetails` polls every two seconds with a chained `setTimeout` while the status is `running`; `write_artifact()` gets a unique name (microseconds) because two runs in the same second currently overwrite each other (`model_training.py:1308`). |
+| What | `POST /train` creates the row, answers `200` with `{run_id, status: "queued", artifact_path: null, metrics: null}` and trains in the background; the row is the error channel; a restart reaps the rows that were left `queued` or `running`; the frontend polls the run. |
+| How | `BackgroundTasks.add_task(_execute_training, run_id, payload)`; the row is created `queued` and the worker sets it `running` when it takes it (the plan said `running` at the moment of the answer: a row that is `running` while nothing trains yet is a claim the server cannot keep, and the four states `queued`/`running`/`completed`/`failed` are the ones the frontend shows); the worker writes the outcome with its **own** `AsyncSessionLocal()` session, never the request-scoped one; any exception writes `status="failed", metrics={"error": ...}`; the lifespan reaper fails the `running` rows at startup; `RunDetails` polls every two seconds with a chained `setTimeout` while the status is `running`; `write_artifact()` gets a unique name (microseconds) because two runs in the same second currently overwrite each other (`model_training.py:1308`). |
 | Why | The request blocks for the whole training (`main.py:263`); a cancelled request leaves the row `running` forever (`main.py:292`). |
 | Depends on | W1-1, W1-2, W1-4 · **Test** T05 · **Risk** medium (contract change) · **Revert** revert the commit |
 
@@ -286,7 +286,7 @@ numbers; the "test ID" refers to section H.
 | T02 | integration | the schema comes from the migrations | the migrated tables equal the ORM metadata; the app refuses to start on an unmigrated database with a message naming `alembic upgrade head` | W1-2 | new |
 | T03 | integration | the auth posture | no header -> 401; `anonymous` cannot be registered nor logged in; production without `SECRET_KEY` refuses to start; a foreign origin gets no CORS header | W1-3 | new + the inverted pinned test |
 | T04 | integration | the dataset registry | an upload is stored, listed and trainable; a non-CSV and an oversized file are rejected; `..` and absolute paths are rejected; user B cannot train user A's dataset | W1-4 | new |
-| T05 | integration | the async lifecycle | the response returns immediately with a `run_id`; the row reaches `completed`; a failing run reaches `failed` with the error; the reaper fails a stale `running` row; two runs in the same second get different artifact names | W1-5 | new + two rewritten pinned tests |
+| T05 | integration | the async lifecycle | the response returns immediately with a `run_id`; the row reaches `completed`; a failing run reaches `failed` with the error; the reaper fails a stale `queued`/`running` row; two runs in the same second get different artifact names | W1-5 | new + four rewritten pinned tests |
 | T06 | integration | the honest catalog | every entry declares `implemented`; no entry advertises a metric its trainer cannot produce; a placeholder fails fast and writes no artifact; the silhouette is reported and the DBSCAN noise is excluded; `auto_search` ranks clustering candidates; the autoencoder artifact loads back | W1-6 | new + the routing expectation table |
 | T07 | integration | the search | `auto_tune` reports `best_params` that the estimator accepts; a client-pinned parameter is not overridden; `auto_fine_tune` stays in its neighborhood; `llm_fine_tune` without a key answers an actionable 400 | W1-7 | new |
 | T14 | build | `npm run build` | green | the frontend | existing |
@@ -383,6 +383,18 @@ routing test and someone "fixes" it by deleting assertions -> the expectation ta
   only checked in the application, so two uploads of the same name that arrived at the same time
   both got it. The name is unique in the database now, the body of an upload is refused before it
   is read, and the startup skips a file it cannot read instead of stopping.
+- W1-5 (2026-10-22): the training does not run inside the request any more. The request creates
+  the row, answers with the id of the run and queues the training in the background; the worker
+  has its own session, writes `running` when it takes the run and `completed`/`failed` at the
+  end; a failure is written in the run, because the request was answered long ago and the run is
+  the only channel the client has left; the lifespan fails the runs that a restart interrupted,
+  so a run cannot stay in a state that never changes; the artifact of a run has a name of its
+  own (microseconds and a random suffix), because two runs that start in the same second wrote
+  over each other's artifact; the details view of the frontend polls the run every two seconds
+  and stops when the run is finished. Four tests that pinned the synchronous contract were
+  rewritten (the result is read from the run) and seven tests of the asynchronous lifecycle were
+  added. The plan said the row is created `running`; it is created `queued` and the worker sets
+  it `running` - the state of the row has to be the state of the work.
 - W1-4, round 2, the suite of the documented installation: the installer installs torch, and with
   torch the suite showed nine failures that the review had found before: the network of the torch
   trainer was defined inside the function, so its artifact could not be loaded back, and the test

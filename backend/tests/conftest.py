@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
@@ -123,6 +124,32 @@ def clean_rate_limits():
     reset_rate_limits()
     yield
     reset_rate_limits()
+
+
+@pytest.fixture
+def wait_for_run():
+    """Wait until a run is finished, and return it.
+
+    The training runs in the background: the answer of the request carries the
+    id of the run, and the result is read from the run itself. A test that
+    wants the result waits for the run to reach a state it does not leave.
+    """
+
+    def wait(client, headers, run_id, timeout=60.0):
+        deadline = time.monotonic() + timeout
+        while True:
+            response = client.get(f"/api/v1/ml/runs/{run_id}", headers=headers)
+            assert response.status_code == 200, response.text
+            run = response.json()
+            if run["status"] in ("completed", "failed"):
+                return run
+            if time.monotonic() > deadline:
+                raise AssertionError(
+                    f"the run {run_id} was still {run['status']} after {timeout}s"
+                )
+            time.sleep(0.05)
+
+    return wait
 
 
 # --- synthetic datasets ------------------------------------------------------

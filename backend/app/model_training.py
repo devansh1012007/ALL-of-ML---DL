@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import uuid
 import random
 import tempfile
 from datetime import datetime
@@ -1319,7 +1320,12 @@ def _train_torch_regression_or_classification(
 
 
 def write_artifact(model_name: str, model: Any) -> str:
-    artifact_name = f"{model_name}_{int(datetime.utcnow().timestamp())}.joblib"
+    # The name has to be unique: two runs that start in the same second would
+    # write over each other's artifact otherwise.
+    artifact_name = (
+        f"{model_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}_"
+        f"{uuid.uuid4().hex[:8]}.joblib"
+    )
     artifact_path = MODEL_DIR / artifact_name
     joblib.dump(model, artifact_path)
     return str(artifact_path)

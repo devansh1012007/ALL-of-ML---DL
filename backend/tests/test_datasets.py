@@ -255,7 +255,7 @@ def test_the_built_in_datasets_are_registered(client, auth):
         assert dataset["label_column"] in [column["name"] for column in dataset["columns"]]
 
 
-def test_the_built_in_datasets_can_be_trained_on(client, auth):
+def test_the_built_in_datasets_can_be_trained_on(client, auth, wait_for_run):
     """A fresh clone can train a model without any setup."""
     listing = client.get("/api/v1/ml/datasets", headers=auth).json()["datasets"]
     dataset = next(
@@ -277,7 +277,9 @@ def test_the_built_in_datasets_can_be_trained_on(client, auth):
     )
 
     assert response.status_code == 200, response.text
-    metrics = response.json()["metrics"]
+    run = wait_for_run(client, auth, response.json()["run_id"])
+    assert run["status"] == "completed", run
+    metrics = run["metrics"]
     assert metrics["accuracy"] > 0.5
     assert metrics["task_type"] == "classification"
 

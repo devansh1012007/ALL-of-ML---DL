@@ -6,6 +6,9 @@ import {
 
 // --- CONFIGURATION ---
 const API_BASE = 'http://localhost:8010';
+// How often a run that is still going is read again. The training runs in the
+// background, so the metrics of a run appear when a poll sees them.
+const RUN_POLL_INTERVAL_MS = 2000;
 
 // --- UTILITIES ---
 // JWT segments are base64url encoded ("-" / "_" instead of "+" / "/"), so they must be
@@ -463,6 +466,8 @@ const RunsDashboard = ({ navigate }) => {
       case 'completed': return <CheckCircle className="w-4 h-4 text-emerald-500" />;
       case 'failed': return <XCircle className="w-4 h-4 text-red-500" />;
       case 'running': return <Activity className="w-4 h-4 text-blue-500 animate-pulse" />;
+      // A queued run waits for the worker, it has not started yet.
+      case 'queued': return <Clock className="w-4 h-4 text-zinc-500" />;
       default: return <Clock className="w-4 h-4 text-zinc-500" />;
     }
   };
@@ -546,12 +551,34 @@ const RunDetails = ({ runId, navigate }) => {
 
   useEffect(() => {
     let active = true;
+    let timer = null;
     setRun(null);
     setError(null);
-    apiFetch(`/api/v1/ml/runs/${runId}`)
-      .then(data => { if (active) setRun(data); })
-      .catch(err => { if (active) setError(err); });
-    return () => { active = false; };
+
+    // The training runs in the background: the run is read again until it is
+    // finished, so the metrics appear without a reload of the page. The next
+    // read is scheduled when the previous one is done, so a slow answer cannot
+    // pile up.
+    const fetchRun = () => {
+      apiFetch(`/api/v1/ml/runs/${runId}`)
+        .then(data => {
+          if (!active) return;
+          setRun(data);
+          // A run that is neither completed nor failed is still going.
+          const finished = data.status === 'completed' || data.status === 'failed';
+          if (!finished) {
+            timer = setTimeout(fetchRun, RUN_POLL_INTERVAL_MS);
+          }
+        })
+        .catch(err => { if (active) setError(err); });
+    };
+
+    fetchRun();
+    // The timer of a pending read is cleared, so no poll survives the view.
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
   }, [apiFetch, runId]);
 
   const handleDownload = async () => {
@@ -1002,6 +1029,9 @@ const NewJob = ({ navigate }) => {
       submitPayload.test_size = parseFloat(submitPayload.test_size);
       submitPayload.random_state = parseInt(submitPayload.random_state, 10);
       
+      // The training runs in the background: the answer carries the id of the
+      // run and nothing else. The metrics are written in the run itself, so
+      // the details view is the place to watch them.
       const result = await apiFetch('/api/v1/ml/train', {
         method: 'POST',
         body: JSON.stringify(submitPayload)
@@ -1429,7 +1459,7 @@ const NewJob = ({ navigate }) => {
             className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-md font-medium transition-colors disabled:opacity-50"
           >
             {submitting ? (
-               <><Activity className="w-5 h-5 animate-spin" /><span>Initializing Run...</span></>
+               <><Activity className="w-5 h-5 animate-spin" /><span>Queueing Run...</span></>
             ) : (
                <><Play className="w-5 h-5" /><span>Execute Training</span></>
             )}

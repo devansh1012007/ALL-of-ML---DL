@@ -321,7 +321,7 @@ def test_run_history_exposes_the_mode_and_the_environment(
 
 
 def test_auto_search_picks_the_better_candidate_on_a_regression_dataset(
-    client, auth, regression_dataset
+    client, auth, regression_dataset, wait_for_run
 ):
     """A regression run must be ranked on a metric it really reports.
 
@@ -346,7 +346,10 @@ def test_auto_search_picks_the_better_candidate_on_a_regression_dataset(
     )
 
     assert response.status_code == 200, response.text
-    metrics = response.json()["metrics"]
+    # The training runs in the background: the result is read from the run.
+    run = wait_for_run(client, auth, response.json()["run_id"])
+    assert run["status"] == "completed", run
+    metrics = run["metrics"]
     assert metrics["best_candidate"] == "MLR"
     assert metrics["task_type"] == "regression"
     assert metrics["r2"] > 0.9

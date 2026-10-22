@@ -1,4 +1,14 @@
-from fastapi import FastAPI, Depends, File, HTTPException, Header, Request, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Header,
+    Request,
+    UploadFile,
+    status,
+)
 from starlette.datastructures import Headers
 from starlette.datastructures import UploadFile as StarletteUploadFile
 import json
@@ -39,8 +49,8 @@ from .datasets import (
     resolve_storage_path,
     unique_dataset_name,
 )
+from . import model_training as model_training_module
 from .model_training import (
-    MODEL_DIR,
     TRAINING_MODES,
     TRAINING_PRESETS,
     list_available_models,
@@ -69,6 +79,7 @@ async def lifespan(app: FastAPI):
     fails fast with an actionable message.
     """
     await verify_schema()
+    await reap_the_interrupted_runs()
     await seed_builtin_datasets()
     # The hash of the dummy password is computed on the first unknown-user
     # login, which would make that one request twice as slow as the others.
@@ -398,6 +409,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# The states of a run. The column is a free string, so a new state needs no
+# migration, but the names live here: the worker, the reaper and the tests
+# have to agree on them.
+STATUS_QUEUED = "queued"
+STATUS_RUNNING = "running"
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
@@ -706,7 +725,11 @@ def _public_error(exc: Exception) -> str:
     The client gets the reason of the failure, without the paths.
     """
     message = str(exc)
-    for root in (str(REPO_ROOT), str(datasets_root()), str(MODEL_DIR)):
+    for root in (
+        str(REPO_ROOT),
+        str(datasets_root()),
+        str(model_training_module.MODEL_DIR),
+    ):
         if root and root in message:
             message = message.replace(root, "<server>")
     return message
@@ -982,7 +1005,18 @@ def _needs_a_dataset(model_name: str) -> bool:
 
 
 @app.post("/api/v1/ml/train")
-async def train_model_endpoint(payload: TrainRequest, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def train_model_endpoint(
+    payload: TrainRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a training and answer immediately.
+
+    The training runs in the background: the request answers with the id of
+    the run, and the client reads the result from the run itself. A training
+    that takes a minute must not hold a request open for a minute.
+    """
     # The requested optimisation metric is passed through untouched: resolving or
     # remapping it here would hide the training internals from the HTTP layer and
     # would silently optimise for a different metric than the one requested.
@@ -1023,11 +1057,64 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
         env_id=payload.env_id,
         optimize_metric=payload.optimize_metric,
         model_candidates=payload.model_candidates,
-        status="running",
+        status=STATUS_QUEUED,
     )
     db.add(training_run)
+    # The row is written before the answer: the client polls it, and a run
+    # that does not exist yet would be a 404.
     await db.commit()
     await db.refresh(training_run)
+
+    background_tasks.add_task(
+        _execute_training,
+        training_run.id,
+        payload,
+        storage_path,
+        dataset.name if dataset is not None else None,
+    )
+
+    return {
+        "run_id": training_run.id,
+        "status": training_run.status,
+        "artifact_path": None,
+        "metrics": None,
+    }
+
+
+async def _execute_training(
+    run_id: int,
+    payload: TrainRequest,
+    storage_path: Optional[str],
+    dataset_name: Optional[str],
+) -> None:
+    """Train a model in the background and write the result in the run.
+
+    The worker has its own session: the session of the request is closed when
+    the answer was sent, and the training outlives the request.
+    """
+    try:
+        await _train_and_write_the_run(run_id, payload, storage_path, dataset_name)
+    except Exception:
+        # The worker must not raise into the server: the request was answered
+        # long ago, and a traceback there would hide the reason of the
+        # failure. A run that stays in a state that never changes is failed by
+        # the reaper at the next start.
+        logger.exception("The worker of the run %s stopped", run_id)
+
+
+async def _train_and_write_the_run(
+    run_id: int,
+    payload: TrainRequest,
+    storage_path: Optional[str],
+    dataset_name: Optional[str],
+) -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(TrainingRun, run_id)
+        if run is None:
+            # The run was removed while it was queued.
+            return
+        run.status = STATUS_RUNNING
+        await session.commit()
 
     try:
         metrics, dataset_source, dataset_tag, artifact_path = await run_in_threadpool(
@@ -1047,26 +1134,81 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
             payload.model_candidates,
             payload.preset,
         )
-        training_run.metrics = metrics
-        training_run.artifact_path = artifact_path
-        training_run.dataset_source = dataset_source
+    except Exception as exc:
+        # The failure is written in the run: the request was answered long
+        # ago, and the run is the only channel the client has left.
+        logger.exception("The training of the run %s failed", run_id)
+        await _finish_run(
+            run_id,
+            status=STATUS_FAILED,
+            metrics={"error": _public_error(exc)},
+        )
+        return
+
+    await _finish_run(
+        run_id,
+        status=STATUS_COMPLETED,
+        metrics=metrics,
+        artifact_path=artifact_path,
+        dataset_source=dataset_source,
         # The tag of a local dataset is its name: the path the registry
         # resolved it to is an internal detail of the server.
-        training_run.dataset_tag = dataset.name if dataset is not None else dataset_tag
-        training_run.status = "completed"
-        await db.commit()
-        return {
-            "run_id": training_run.id,
-            "status": training_run.status,
-            "artifact_path": artifact_path,
-            "metrics": jsonable_encoder(metrics),
-        }
-    except Exception as exc:
-        training_run.status = "failed"
-        training_run.metrics = {"error": _public_error(exc)}
-        await db.commit()
-        logger.exception("Model training failed")
-        raise HTTPException(status_code=400, detail=_public_error(exc))
+        dataset_tag=dataset_name if dataset_name is not None else dataset_tag,
+    )
+
+
+async def _finish_run(
+    run_id: int,
+    status: str,
+    metrics: Optional[Dict[str, Any]] = None,
+    artifact_path: Optional[str] = None,
+    dataset_source: Optional[str] = None,
+    dataset_tag: Optional[str] = None,
+) -> None:
+    """Write the result of a training in its run."""
+    async with AsyncSessionLocal() as session:
+        run = await session.get(TrainingRun, run_id)
+        if run is None:
+            return
+        run.status = status
+        if metrics is not None:
+            run.metrics = metrics
+        if artifact_path is not None:
+            run.artifact_path = artifact_path
+        if dataset_source is not None:
+            run.dataset_source = dataset_source
+        if dataset_tag is not None:
+            run.dataset_tag = dataset_tag
+        await session.commit()
+
+
+async def reap_the_interrupted_runs() -> None:
+    """Fail the runs that a restart interrupted.
+
+    A run that is still queued or running when the process starts was
+    interrupted: the worker that owned it died with the process. The run is
+    failed with a message that says so, instead of staying in a state that
+    never changes.
+    """
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(TrainingRun).where(
+                TrainingRun.status.in_([STATUS_QUEUED, STATUS_RUNNING])
+            )
+        )
+        runs = result.scalars().all()
+        for run in runs:
+            run.status = STATUS_FAILED
+            run.metrics = {
+                "error": (
+                    "The server restarted before the training finished. "
+                    "Please run it again."
+                )
+            }
+        if runs:
+            await session.commit()
+            logger.info("%s interrupted runs were failed", len(runs))
+
 
 @app.get("/api/v1/ml/runs")
 async def list_training_runs(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
