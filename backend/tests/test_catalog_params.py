@@ -17,9 +17,12 @@ Everything here is offline and CPU only: no model, dataset or checkpoint is
 downloaded.
 """
 
+import base64
 import os
 from pathlib import Path
 
+import joblib
+import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
@@ -128,6 +131,14 @@ OFFLINE_TRAINABLE_MODELS = frozenset(
     }
 )
 
+# A 1x1 pixel RGB PNG (69 bytes), embedded as base64 so the suite needs no
+# image library. The vision trainer resizes every image to 224x224, so a single
+# pixel is a valid image for it - what the dataset needs is a *readable* file
+# per class, because ``ImageFolder`` refuses a class without one.
+ONE_PIXEL_RGB_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mP4z8AAAAMBAQD3A0FDAAAAAElFTkSuQmCC"
+)
+
 # Raised by the trainers when a model name is unknown to them.
 UNSUPPORTED_MODEL_MARKERS = (
     "Unsupported model",
@@ -217,11 +228,17 @@ def _image_folder():
 
     The folder lives in the datasets root and is referred to by its path
     relative to it: a dataset is always such a path.
+
+    Every class directory holds a real image file: ``ImageFolder`` refuses a
+    class without a readable image ("Found no valid file for the classes ..."),
+    so an empty directory is not a dataset.
     """
     relative_path = "data/images"
     folder = Path(os.environ["DATASETS_ROOT"]) / relative_path
     for class_name in ("cat", "dog"):
-        (folder / class_name).mkdir(parents=True, exist_ok=True)
+        class_dir = folder / class_name
+        class_dir.mkdir(parents=True, exist_ok=True)
+        (class_dir / f"{class_name}.png").write_bytes(ONE_PIXEL_RGB_PNG)
     return relative_path
 
 
@@ -301,8 +318,14 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
     metrics = None
     error = None
     artifact = None
+    hyperparameters = None
+    if expected_category == "vision":
+        # The catalog asks for the pretrained weights, and downloading them is
+        # not something a unit test does: the suite stays offline, as the
+        # module promises. The trainer itself runs exactly the same way.
+        hyperparameters = {"pretrained": False}
     try:
-        metrics, _source, _tag, artifact = _train(model_name, dataset)
+        metrics, _source, _tag, artifact = _train(model_name, dataset, hyperparameters)
     except Exception as exc:  # noqa: BLE001 - the error is inspected below
         error = exc
 
@@ -322,7 +345,16 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         )
         return
 
-    if model_name in OFFLINE_TRAINABLE_MODELS:
+    if expected_category == "vision":
+        # The vision trainer really ran: it read the images of the folder, one
+        # per class, and it wrote the artifact of the network it trained.
+        assert metrics["task_type"] == "classification"
+        assert metrics["classes"] == 2
+        # Every image of the folder was seen in every epoch.
+        assert metrics["sample_count"] == metrics["epochs"] * 2
+        assert metrics["accuracy"] is not None
+        assert Path(artifact).exists()
+    elif model_name in OFFLINE_TRAINABLE_MODELS:
         if expected_category == "clustering":
             assert metrics["sample_count"] == 60
         elif expected_category == "regression":
@@ -334,6 +366,37 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
             assert metrics["task_type"] == "classification"
             assert metrics["accuracy"] is not None
         assert Path(artifact).exists()
+
+
+def _feature_count(dataset):
+    """The number of feature columns of a CSV dataset (the label excluded)."""
+    frame = pd.read_csv(Path(os.environ["DATASETS_ROOT"]) / dataset)
+    return len([column for column in frame.columns if column != "label"])
+
+
+def test_the_artifact_of_the_torch_trainer_can_be_loaded_back(classification_dataset):
+    """The artifact of the torch trainer has to be loadable and usable.
+
+    The network used to be a class defined *inside* the trainer. Pickle stores a
+    class by reference, so an artifact of a function-local class can never be
+    loaded again: the training "succeeded", the run reported an artifact and the
+    artifact was useless. The test loads the artifact back and runs the loaded
+    network.
+    """
+    if model_training.torch is None:
+        pytest.skip("torch is not installed")
+
+    _metrics, _source, _tag, artifact = _train("LSTM", classification_dataset)
+    assert Path(artifact).exists()
+
+    loaded = joblib.load(artifact)
+    assert isinstance(loaded, model_training.SimpleNet), (
+        f"the artifact holds a {type(loaded).__name__}, but the module level "
+        "SimpleNet is expected"
+    )
+    # The loaded network has to be usable: a forward pass on a batch of rows.
+    outputs = loaded(model_training.torch.zeros(2, _feature_count(classification_dataset)))
+    assert tuple(outputs.shape) == (2, 1)
 
 
 @pytest.mark.parametrize("task_type", ["classification", "regression"])

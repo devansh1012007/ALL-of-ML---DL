@@ -1252,6 +1252,40 @@ def _train_transformer_text_classifier(
     return {"train_loss": float(final_loss) if final_loss is not None else None, "labels": unique_labels}, model
 
 
+if nn is not None:
+
+    class SimpleNet(nn.Module):
+        """The small multilayer perceptron of the torch trainer.
+
+        The class lives at the module level on purpose: ``write_artifact()``
+        pickles the trained model with joblib, and pickle stores a class *by
+        reference*. A class that is defined inside a function cannot be found
+        again, so the artifact of every model of the torch trainer could not be
+        loaded back - the training succeeded and the artifact was useless.
+
+        The dimensions are arguments of the constructor because they are only
+        known when the training starts: the input dimension comes from the
+        data, the output dimension from the label and the width from the
+        hyperparameters.
+        """
+
+        def __init__(self, input_dim: int, output_dim: int, hidden_size: int = 64):
+            super().__init__()
+            self.network = nn.Sequential(
+                nn.Linear(input_dim, hidden_size),
+                nn.ReLU(),
+                nn.Linear(hidden_size, output_dim),
+            )
+
+        def forward(self, x):
+            return self.network(x)
+
+else:
+    # torch is an optional dependency: the module has to import without it, and
+    # the trainer refuses to run with a clear message when it is missing.
+    SimpleNet = None
+
+
 def _train_torch_regression_or_classification(
     model_name: str,
     dataset: pd.DataFrame,
@@ -1267,17 +1301,8 @@ def _train_torch_regression_or_classification(
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=hyperparameters.get("test_size", 0.2), random_state=int(hyperparameters.get("random_state", 42)))
     input_dim = X_train.shape[1]
     output_dim = 1 if len(y_train.shape) == 1 else y_train.shape[1]
-    class SimpleNet(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.network = nn.Sequential(
-                nn.Linear(input_dim, int(hyperparameters.get("hidden_size", 64))),
-                nn.ReLU(),
-                nn.Linear(int(hyperparameters.get("hidden_size", 64)), output_dim),
-            )
-        def forward(self, x):
-            return self.network(x)
-    model = SimpleNet()
+    hidden_size = int(hyperparameters.get("hidden_size", 64))
+    model = SimpleNet(input_dim, output_dim, hidden_size)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=float(hyperparameters.get("learning_rate", 1e-3)))
     X_train_t = torch.from_numpy(X_train)
