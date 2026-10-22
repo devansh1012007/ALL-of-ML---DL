@@ -26,6 +26,7 @@ permission:
     ".venv/bin/python *": allow
     ".venv/bin/pytest *": allow
     ".venv/bin/alembic *": allow
+    "../.venv/bin/python -m alembic *": allow
     "npm *": allow
     "cd *": allow
   edit: deny
@@ -42,9 +43,15 @@ Run them from the repository root, unless the command says otherwise:
 - the test suite: `.venv/bin/python -m pytest backend/tests`
 - a single test: `.venv/bin/python -m pytest backend/tests/test_datasets.py::test_name`
 - the frontend build: `cd frontend && npm run build`
-- the migrations: `cd backend && alembic upgrade head`, and the drift check
-  `cd backend && alembic check`
-- the offline migration: `cd backend && alembic upgrade head --sql`
+- the migrations: `cd backend && ../.venv/bin/python -m alembic upgrade head`
+- the drift check: `cd backend && ../.venv/bin/python -m alembic check`
+- the offline migration: `cd backend && ../.venv/bin/python -m alembic upgrade head --sql`
+
+The `alembic` executable is not on the PATH of this machine: the virtual
+environment is at the root of the repository, so the migrations are run with
+the interpreter of that virtual environment. The same migrations from the
+repository root are `.venv/bin/alembic -c backend/alembic.ini upgrade head`
+and `.venv/bin/alembic -c backend/alembic.ini check`.
 
 ## How you work
 

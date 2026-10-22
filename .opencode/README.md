@@ -49,6 +49,24 @@ that was not written well.
   real output, and the result. It never changes the code to make a command
   pass.
 
+## The commands of this repository
+
+The agents run them from the repository root, unless the command says
+otherwise. The virtual environment is at the root of the repository, and the
+`alembic` executable is not on the PATH, so the migrations are run with the
+interpreter of that virtual environment.
+
+- the test suite: `.venv/bin/python -m pytest backend/tests`
+- a single test: `.venv/bin/python -m pytest backend/tests/test_datasets.py::test_name`
+- the frontend build: `cd frontend && npm run build`
+- the migrations: `cd backend && ../.venv/bin/python -m alembic upgrade head`
+- the drift check: `cd backend && ../.venv/bin/python -m alembic check`
+
+The test modules import `backend.app.*`, and neither `backend/` nor
+`backend/app/` has an `__init__.py`: the repository root has to be on the
+`sys.path`, which `backend/tests/conftest.py` takes care of. That is why the
+suite is run from the root and not from `backend/`.
+
 ## The rules that the agents share
 
 1. `AGENTS.md` comes first: the layout, the commands and the conventions of

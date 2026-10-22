@@ -10,9 +10,9 @@
 #   scripts/install.sh                 # the backend and the frontend
 #   scripts/install.sh --backend       # only the python dependencies
 #   scripts/install.sh --frontend      # only the node dependencies
-#   scripts/install.sh --optional      # the optional python dependencies
-#   scripts/install.sh --dev           # the development dependencies
-#   scripts/install.sh --cpu           # the cpu build of torch
+#   scripts/install.sh --optional      # the optional python dependencies (implies --backend)
+#   scripts/install.sh --dev           # the development dependencies (implies --backend)
+#   scripts/install.sh --cpu           # the cpu build of torch (implies --backend)
 #
 # The environment variables:
 #   UV_HTTP_RETRIES      the retries of a single request       (default 20)
@@ -23,6 +23,10 @@
 # The cpu build of torch is a few hundred megabytes, the cuda build is
 # several gigabytes and is of no use without a gpu: --cpu installs the small
 # one, which is enough to train the models of the catalog of this repository.
+#
+# The flags --optional, --dev and --cpu only change the python side, so they
+# install the backend as well. A flag that installs nothing would print that
+# the dependencies are installed when it installed none.
 #
 set -euo pipefail
 
@@ -81,6 +85,13 @@ done
 if [ "$DO_BACKEND" -eq 0 ] && [ "$DO_FRONTEND" -eq 0 ] && [ "$DO_OPTIONAL" -eq 0 ] && [ "$DO_DEV" -eq 0 ] && [ "$DO_CPU" -eq 0 ]; then
     DO_BACKEND=1
     DO_FRONTEND=1
+fi
+
+# The flags that only change the python side install the backend as well:
+# without the backend they would install nothing and still say that the
+# dependencies are installed.
+if [ "$DO_OPTIONAL" -eq 1 ] || [ "$DO_DEV" -eq 1 ] || [ "$DO_CPU" -eq 1 ]; then
+    DO_BACKEND=1
 fi
 
 mkdir -p "$CACHE_DIR"

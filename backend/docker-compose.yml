@@ -22,7 +22,15 @@ services:
     restart: no
 
   web:
-    build: .
+    build:
+      # The dockerfile of this directory is named "dockerfile", not
+      # "Dockerfile". The name is given, so the build does not depend on the
+      # docker version: the recent ones find the lower case name on their
+      # own, the older ones only look for the capitalised one and fail with
+      # "failed to read dockerfile: open Dockerfile: no such file or
+      # directory".
+      context: .
+      dockerfile: dockerfile
     # The schema is owned by the migrations, so they have to run before the
     # application starts. The command overrides the image CMD, which is why the
     # migration is repeated here (see the dockerfile).

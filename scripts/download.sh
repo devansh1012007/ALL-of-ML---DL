@@ -28,6 +28,8 @@ usage() {
     exit 0
 }
 
+die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
 [ $# -ge 1 ] || usage
 [ $# -le 2 ] || usage
 

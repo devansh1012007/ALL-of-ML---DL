@@ -25,6 +25,7 @@ permission:
     "pytest *": allow
     ".venv/bin/python *": allow
     ".venv/bin/pytest *": allow
+    "../.venv/bin/python -m alembic *": allow
     "npm *": allow
     "cd *": allow
     "mkdir *": allow
@@ -65,7 +66,11 @@ phase, and only that phase.
    and the build of the frontend when the frontend changed:
    `cd frontend && npm run build`
 5. Run the migrations when the schema changed:
-   `cd backend && alembic upgrade head` and `alembic check` for the drift.
+   `cd backend && ../.venv/bin/python -m alembic upgrade head` and
+   `cd backend && ../.venv/bin/python -m alembic check` for the drift. The
+   `alembic` executable is not on the PATH: the virtual environment is at the
+   root of the repository, so the migrations are run with the interpreter of
+   that virtual environment.
 6. Commit on the branch you were given, with a message that says why the
    change was needed, not only what it does. Stage only the files of the phase.
 

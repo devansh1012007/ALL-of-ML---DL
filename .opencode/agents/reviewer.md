@@ -25,6 +25,7 @@ permission:
     "pytest *": allow
     ".venv/bin/python *": allow
     ".venv/bin/pytest *": allow
+    "../.venv/bin/python -m alembic *": allow
     "npm *": allow
     "cd *": allow
   edit: deny
@@ -51,6 +52,14 @@ verify the change. Read `AGENTS.md` for the conventions of the repository, and
    For a contract change, find the client that was not updated.
 3. Run the tests, the linter and the build yourself, and report the actual
    output. Never report a result you did not see.
+   From the repository root:
+   - the test suite: `.venv/bin/python -m pytest backend/tests`
+   - the frontend build: `cd frontend && npm run build`
+   - the migrations: `cd backend && ../.venv/bin/python -m alembic upgrade head`
+   - the drift check: `cd backend && ../.venv/bin/python -m alembic check`
+   The `alembic` executable is not on the PATH: the virtual environment is at
+   the root of the repository, so the migrations are run with the interpreter
+   of that virtual environment.
 4. Audit the tests: would they fail without the fix? Do they pass for the wrong
    reason? Is the thing under test mocked away? Is an edge case missing?
 5. Look for what is left over: the dead code, the stale documentation, the

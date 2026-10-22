@@ -25,6 +25,7 @@ permission:
     "head *": allow
     "tail *": allow
     "wc *": allow
+    ".venv/bin/python *": allow
   edit: deny
   webfetch: allow
 ---
