@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -37,6 +38,12 @@ if REPO_ROOT not in sys.path:
 _TMP_DB_DIR = tempfile.mkdtemp(prefix="all-of-ml-tests-")
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{os.path.join(_TMP_DB_DIR, 'test.db')}"
 
+# The datasets of the test run live in a temporary directory: a dataset is a
+# path relative to this root, and the suite must not read the datasets of the
+# repository nor write an upload into it.
+_TMP_DATASETS_DIR = tempfile.mkdtemp(prefix="all-of-ml-datasets-")
+os.environ["DATASETS_ROOT"] = _TMP_DATASETS_DIR
+
 # The signing key of the tokens. The application generates a random key in
 # ``<repo>/.secret_key`` when none is set, which would write into the
 # repository during the test run. The tests bring their own key instead.
@@ -45,6 +52,7 @@ os.environ["SECRET_KEY"] = "test-signing-key-for-the-backend-test-suite"
 
 def _remove_tmp_db_dir():
     shutil.rmtree(_TMP_DB_DIR, ignore_errors=True)
+    shutil.rmtree(_TMP_DATASETS_DIR, ignore_errors=True)
 
 
 # The directory has to exist before the first ``backend.app`` import (the database
@@ -130,6 +138,26 @@ CLASSIFICATION_SEED = 20240520
 REGRESSION_SEED = 20240521
 
 
+def datasets_root_dir():
+    """The directory the datasets of the test run live in.
+
+    The application reads its datasets from the root of the ``DATASETS_ROOT``
+    environment variable, and a dataset is a path *relative* to it. The tests
+    point that variable at a temporary directory, so the suite never reads
+    the datasets of the repository and never writes an upload into it.
+
+    The sample datasets of the repository are copied into that directory, so
+    the startup registers them the way it does in a real installation.
+    """
+    root = Path(os.environ["DATASETS_ROOT"])
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    for sample in sorted((Path(REPO_ROOT) / "data").glob("sample_*.csv")):
+        target = root / "data" / sample.name
+        if not target.exists():
+            shutil.copyfile(sample, target)
+    return root
+
+
 def _classification_frame(n_rows: int = DATASET_ROWS) -> pd.DataFrame:
     """Two tight, well separated clusters: learnable and dense enough for DBSCAN."""
     rng = np.random.RandomState(CLASSIFICATION_SEED)
@@ -155,17 +183,32 @@ def _regression_frame(n_rows: int = DATASET_ROWS) -> pd.DataFrame:
     return frame
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _datasets_root():
+    """Prepare the datasets directory before anything starts the application.
+
+    The application registers the datasets of the root when it starts, so the
+    directory has to exist before the first client is created.
+    """
+    datasets_root_dir()
+    yield
+
+
 @pytest.fixture(scope="session")
 def classification_dataset(tmp_path_factory):
-    """Path of the deterministic two-class dataset."""
-    path = tmp_path_factory.mktemp("datasets") / "classification.csv"
+    """The storage path of the deterministic two-class dataset."""
+    root = datasets_root_dir()
+    path = root / "data" / "classification.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
     _classification_frame().to_csv(path, index=False)
-    return path
+    return "data/classification.csv"
 
 
 @pytest.fixture(scope="session")
 def regression_dataset(tmp_path_factory):
-    """Path of the deterministic regression dataset (continuous label)."""
-    path = tmp_path_factory.mktemp("datasets") / "regression.csv"
+    """The storage path of the deterministic regression dataset (continuous label)."""
+    root = datasets_root_dir()
+    path = root / "data" / "regression.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
     _regression_frame().to_csv(path, index=False)
-    return path
+    return "data/regression.csv"

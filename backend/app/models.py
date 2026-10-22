@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, JSON, Text
+from sqlalchemy import Column, Index, Integer, String, ForeignKey, DateTime, JSON, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .base import Base
@@ -10,6 +10,43 @@ class User(Base):
     hashed_password = Column(String)
     role = Column(String, default="user")
     training_runs = relationship("TrainingRun", back_populates="owner", cascade="all, delete-orphan")
+
+class Dataset(Base):
+    """A dataset the application can train on.
+
+    A dataset is a row, not a path: the client refers to it by its id, and
+    only the server turns a row into a path. The path itself is relative to
+    the datasets root, so a dataset can never point outside of it.
+
+    ``owner_id`` is NULL for the datasets that ship with the repository: they
+    belong to everybody. An uploaded dataset belongs to the user who uploaded
+    it.
+    """
+
+    __tablename__ = "datasets"
+    __table_args__ = (
+        # The path of a dataset is unique: it is what identifies the file.
+        Index("ix_datasets_storage_path", "storage_path", unique=True),
+        # The listing is always "the datasets of this owner, by name".
+        Index("ix_datasets_owner_id_name", "owner_id", "name"),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    name = Column(String, nullable=False)
+    # The path of the file, relative to the datasets root.
+    storage_path = Column(String, nullable=False)
+    # "builtin" (a file of the repository), "upload" (a file of a user) or
+    # "folder" (a directory of class subfolders, for the vision models).
+    source = Column(String, nullable=False, default="upload")
+    size_bytes = Column(Integer, nullable=True)
+    row_count = Column(Integer, nullable=True)
+    # The columns of the file: a list of {"name": ..., "dtype": ...}.
+    columns = Column(JSON, nullable=True)
+    # The label column the registry suggests for this dataset.
+    label_column = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    owner = relationship("User")
+
 
 class TrainingRun(Base):
     __tablename__ = "training_runs"

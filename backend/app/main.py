@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, Request, status
+from fastapi import FastAPI, Depends, File, HTTPException, Header, Request, UploadFile, status
 import logging
 import os
 import time
@@ -16,8 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .base import Base
-from .database import get_db, engine
-from .models import User, TrainingRun
+from .database import get_db, engine, AsyncSessionLocal
+from .models import Dataset, User, TrainingRun
 from .auth import (
     ALGORITHM,
     SECRET_KEY,
@@ -28,20 +28,25 @@ from .auth import (
     validate_credentials,
     verify_pass,
 )
+from .datasets import (
+    DatasetError,
+    dataset_to_dict,
+    describe_csv,
+    resolve_storage_path,
+    store_upload,
+)
 from .model_training import (
-    DATA_DIR,
     MODEL_DIR,
     TRAINING_MODES,
     TRAINING_PRESETS,
     list_available_models,
-    list_local_datasets,
     list_model_categories,
     suggest_hyperparameters,
     train_model,
 )
-from .settings import REPO_ROOT
+from .settings import REPO_ROOT, datasets_root
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 
 @asynccontextmanager
@@ -60,11 +65,87 @@ async def lifespan(app: FastAPI):
     fails fast with an actionable message.
     """
     await verify_schema()
+    await seed_builtin_datasets()
     # The hash of the dummy password is computed on the first unknown-user
     # login, which would make that one request twice as slow as the others.
     # It is computed here instead, while the application starts.
     await run_in_threadpool(dummy_password_hash)
     yield
+
+
+async def seed_builtin_datasets() -> None:
+    """Register the datasets that ship with the repository.
+
+    The CSV files of ``data/`` are rows of the registry, so that the frontend
+    sees one list of datasets - the built-in ones and the uploaded ones - and
+    a training request never carries a path.
+    """
+    from . import datasets as registry
+
+    async with AsyncSessionLocal() as session:
+        for path in registry.builtin_files():
+            try:
+                storage_path = registry.relative_storage_path(path)
+            except registry.DatasetError as exc:
+                # A file of the data directory that is not a dataset of this
+                # application (a symlink that points somewhere else) is
+                # skipped: the startup must not fail because of it.
+                logger.warning("The built-in dataset %s is skipped: %s", path.name, exc)
+                continue
+            existing = (
+                await session.execute(
+                    select(Dataset).where(Dataset.storage_path == storage_path)
+                )
+            ).scalars().first()
+            try:
+                columns, rows, label = registry.describe_csv(path)
+            except registry.DatasetError as exc:
+                logger.warning("The built-in dataset %s is skipped: %s", path.name, exc)
+                continue
+            if existing is None:
+                session.add(
+                    Dataset(
+                        owner_id=None,
+                        name=path.name,
+                        storage_path=storage_path,
+                        source="builtin",
+                        size_bytes=path.stat().st_size,
+                        row_count=rows,
+                        columns=columns,
+                        label_column=label,
+                    )
+                )
+            else:
+                existing.name = path.name
+                existing.size_bytes = path.stat().st_size
+                existing.row_count = rows
+                existing.columns = columns
+                existing.label_column = label
+        for path in registry.builtin_folders():
+            try:
+                storage_path = registry.relative_storage_path(path)
+            except registry.DatasetError as exc:
+                logger.warning("The built-in dataset %s is skipped: %s", path.name, exc)
+                continue
+            existing = (
+                await session.execute(
+                    select(Dataset).where(Dataset.storage_path == storage_path)
+                )
+            ).scalars().first()
+            if existing is None:
+                session.add(
+                    Dataset(
+                        owner_id=None,
+                        name=path.name,
+                        storage_path=storage_path,
+                        source="folder",
+                        size_bytes=None,
+                        row_count=None,
+                        columns=[],
+                        label_column=None,
+                    )
+                )
+        await session.commit()
 
 
 async def verify_schema() -> None:
@@ -320,6 +401,13 @@ class UserCreate(BaseModel):
 
 class TrainRequest(BaseModel):
     model_name: str
+    # The dataset of the training, as a row of the registry. The client never
+    # sends a path: the server resolves the row to a file inside the datasets
+    # root, which is what makes it impossible to read a file outside of it.
+    dataset_id: Optional[int] = None
+    # The name of a dataset. It is resolved through the registry as well, so
+    # it cannot be used to reach a file either; it exists for the clients that
+    # do not know the ids yet.
     dataset_name: Optional[str] = None
     hf_dataset_url: Optional[str] = None
     label_column: str = "label"
@@ -479,10 +567,6 @@ async def suggest_hyperparameters_endpoint(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-@app.get("/api/v1/ml/datasets")
-async def get_datasets(current_user: User = Depends(get_current_user)):
-    return {"datasets": list_local_datasets()}
-
 def _public_error(exc: Exception) -> str:
     """The message of a failure that is safe to show to the client.
 
@@ -491,10 +575,133 @@ def _public_error(exc: Exception) -> str:
     The client gets the reason of the failure, without the paths.
     """
     message = str(exc)
-    for root in (str(REPO_ROOT), str(DATA_DIR), str(MODEL_DIR)):
+    for root in (str(REPO_ROOT), str(datasets_root()), str(MODEL_DIR)):
         if root and root in message:
             message = message.replace(root, "<server>")
     return message
+
+
+@app.get("/api/v1/ml/datasets")
+async def get_datasets(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """The datasets the caller can train on.
+
+    The built-in ones belong to everybody, the uploaded ones to the user who
+    uploaded them. A dataset is a row, so the client never sees a path.
+    """
+    result = await db.execute(
+        select(Dataset).where(
+            (Dataset.owner_id == current_user.id) | (Dataset.owner_id.is_(None))
+        ).order_by(Dataset.name)
+    )
+    datasets = result.scalars().all()
+    return {"datasets": [dataset_to_dict(dataset) for dataset in datasets]}
+
+
+@app.post("/api/v1/ml/datasets/upload")
+async def upload_dataset(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store a CSV file as a dataset of the caller.
+
+    The file is written under the uploads directory of the user with a
+    generated name, and it is registered as a row: a training request refers
+    to it by its id.
+    """
+    content = await file.read()
+    try:
+        name, storage_path = store_upload(current_user.id, file.filename or "", content)
+        path = resolve_storage_path(storage_path)
+        columns, rows, label = describe_csv(path)
+    except DatasetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    dataset = Dataset(
+        owner_id=current_user.id,
+        name=name,
+        storage_path=storage_path,
+        source="upload",
+        size_bytes=len(content),
+        row_count=rows,
+        columns=columns,
+        label_column=label,
+    )
+    db.add(dataset)
+    await db.commit()
+    await db.refresh(dataset)
+    logger.info(
+        "User '%s' uploaded the dataset '%s' (%s rows)",
+        current_user.username,
+        name,
+        rows,
+    )
+    return dataset_to_dict(dataset)
+
+
+async def _dataset_for_user(
+    dataset_id: int, current_user: User, db: AsyncSession
+) -> Dataset:
+    """The dataset with that id, if the caller may use it.
+
+    A dataset that belongs to another user is not found: the answer must not
+    tell a caller that an id exists but is not theirs.
+    """
+    result = await db.execute(
+        select(Dataset).where(
+            Dataset.id == dataset_id,
+            (Dataset.owner_id == current_user.id) | (Dataset.owner_id.is_(None)),
+        )
+    )
+    dataset = result.scalars().first()
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return dataset
+
+
+async def _dataset_for_training(
+    payload: TrainRequest, current_user: User, db: AsyncSession
+) -> Tuple[Dataset, str]:
+    """The dataset of a training request, and the path the trainer reads.
+
+    The path comes from the registry, never from the client. A request that
+    carries a name instead of an id is resolved through the registry as well,
+    so there is exactly one way from a request to a file.
+    """
+    if payload.dataset_id is not None:
+        dataset = await _dataset_for_user(payload.dataset_id, current_user, db)
+    elif payload.dataset_name:
+        result = await db.execute(
+            select(Dataset).where(
+                Dataset.name == payload.dataset_name,
+                (Dataset.owner_id == current_user.id) | (Dataset.owner_id.is_(None)),
+            )
+        )
+        dataset = result.scalars().first()
+        if dataset is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"There is no dataset named '{payload.dataset_name}'. "
+                    f"Use the id of a dataset of the list."
+                ),
+            )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Either dataset_id or hf_dataset_url must be provided.",
+        )
+
+    try:
+        path = resolve_storage_path(dataset.storage_path)
+    except DatasetError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"The file of the dataset '{dataset.name}' is missing on the server.",
+        )
+    return dataset, dataset.storage_path
 
 
 @app.post("/api/v1/ml/train")
@@ -502,11 +709,13 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
     # The requested optimisation metric is passed through untouched: resolving or
     # remapping it here would hide the training internals from the HTTP layer and
     # would silently optimise for a different metric than the one requested.
+    dataset, storage_path = await _dataset_for_training(payload, current_user, db)
+
     training_run = TrainingRun(
         owner_id=current_user.id,
         model_name=payload.model_name,
-        dataset_source="local" if payload.dataset_name else "huggingface",
-        dataset_tag=payload.dataset_name or payload.hf_dataset_url or "unknown",
+        dataset_source="local",
+        dataset_tag=dataset.name,
         hf_dataset_url=payload.hf_dataset_url,
         hyperparameters=payload.hyperparameters or {},
         mode=payload.mode,
@@ -523,7 +732,7 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
         metrics, dataset_source, dataset_tag, artifact_path = await run_in_threadpool(
             train_model,
             payload.model_name,
-            payload.dataset_name,
+            storage_path,
             payload.hf_dataset_url,
             payload.label_column,
             payload.test_size,

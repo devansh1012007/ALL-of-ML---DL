@@ -17,6 +17,7 @@ Everything here is offline and CPU only: no model, dataset or checkpoint is
 downloaded.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -211,12 +212,17 @@ def recorded_trainers(monkeypatch):
     return calls
 
 
-def _image_folder(tmp_path):
-    """A folder with class subdirectories, as the vision models expect."""
-    folder = tmp_path / "images"
+def _image_folder():
+    """A folder with class subdirectories, as the vision models expect.
+
+    The folder lives in the datasets root and is referred to by its path
+    relative to it: a dataset is always such a path.
+    """
+    relative_path = "data/images"
+    folder = Path(os.environ["DATASETS_ROOT"]) / relative_path
     for class_name in ("cat", "dog"):
         (folder / class_name).mkdir(parents=True, exist_ok=True)
-    return folder
+    return relative_path
 
 
 def _train(
@@ -230,7 +236,7 @@ def _train(
 ):
     return train_model(
         model_name,
-        str(dataset),
+        dataset,
         None,
         "label",
         0.2,
@@ -284,7 +290,7 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
     monkeypatch.chdir(tmp_path)
 
     if expected_category == "vision":
-        dataset = _image_folder(tmp_path)
+        dataset = _image_folder()
     elif expected_category == "regression":
         # MLR is a regressor: it needs a continuous label, a classification label
         # would be scored with a classification metric.

@@ -46,7 +46,28 @@ def test_get_datasets(client, auth):
     assert "datasets" in payload
 
 
-def test_train_invalid_dataset(client, auth):
+def test_train_without_a_dataset_is_rejected(client, auth):
+    """A training request needs a dataset.
+
+    The dataset is a row of the registry, and the client never sends a path:
+    a request without a dataset is a request that cannot be executed.
+    """
+    payload = {
+        "model_name": "Logistic_Regression",
+        "label_column": "label",
+        "test_size": 0.2,
+        "random_state": 42,
+        "hyperparameters": {},
+        "mode": "manual",
+    }
+    response = client.post("/api/v1/ml/train", headers=auth, json=payload)
+
+    assert response.status_code == 400
+    assert "dataset" in response.json()["detail"].lower()
+
+
+def test_train_with_an_unknown_dataset_is_rejected(client, auth):
+    """A dataset that does not exist is a 404, not a failed training."""
     payload = {
         "model_name": "Logistic_Regression",
         "dataset_name": "missing_dataset.csv",
@@ -57,5 +78,6 @@ def test_train_invalid_dataset(client, auth):
         "mode": "manual",
     }
     response = client.post("/api/v1/ml/train", headers=auth, json=payload)
-    assert response.status_code == 400
-    assert "not found" in response.json()["detail"].lower() or "could not parse" in response.json()["detail"].lower()
+
+    assert response.status_code == 404
+    assert "missing_dataset.csv" in response.json()["detail"]

@@ -19,3 +19,5 @@ models/
 data/*.csv
 !data/sample_*.csv
 data/uploads/
+# The datasets that are uploaded to the application.
+uploads/

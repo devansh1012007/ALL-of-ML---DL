@@ -257,16 +257,36 @@ def test_registration_never_stores_a_client_supplied_role(client):
     assert admin_listing.status_code == 403
 
 
+def _upload_dataset(client, auth, storage_path):
+    """Upload a dataset and return its row.
+
+    The datasets of the test run live in the temporary datasets root, and a
+    training request refers to a dataset by its id, so the test uploads the
+    file first - the same way a user would.
+    """
+    from pathlib import Path
+
+    content = (Path(os.environ["DATASETS_ROOT"]) / storage_path).read_bytes()
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": (Path(storage_path).name, content, "text/csv")},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def test_run_history_exposes_the_mode_and_the_environment(
     client, auth, classification_dataset
 ):
     """The run history exposes the mode and env_id next to the old fields."""
+    dataset = _upload_dataset(client, auth, classification_dataset)
     response = client.post(
         "/api/v1/ml/train",
         headers=auth,
         json={
             "model_name": "Logistic_Regression",
-            "dataset_name": str(classification_dataset),
+            "dataset_id": dataset["id"],
             "label_column": "label",
             "test_size": 0.2,
             "random_state": 42,
@@ -308,12 +328,13 @@ def test_auto_search_picks_the_better_candidate_on_a_regression_dataset(
     The candidates are ordered so that the *first* one is the worse model: with
     the accuracy fallback every candidate scores 0 and the first one wins.
     """
+    dataset = _upload_dataset(client, auth, regression_dataset)
     response = client.post(
         "/api/v1/ml/train",
         headers=auth,
         json={
             "model_name": "MLR",
-            "dataset_name": str(regression_dataset),
+            "dataset_id": dataset["id"],
             "label_column": "label",
             "test_size": 0.2,
             "random_state": 42,

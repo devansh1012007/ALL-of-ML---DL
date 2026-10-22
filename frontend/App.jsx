@@ -96,6 +96,18 @@ const FALLBACK_MODELS = [
 // compares; the remaining categories have no like-for-like candidates.
 const COMPARABLE_MODEL_CATEGORIES = ['classification', 'regression', 'time-series'];
 
+// The label of a dataset in the select of the new-job form: the name, and a
+// hint of where it comes from, so that the datasets of the repository and the
+// uploaded ones can be told apart.
+const datasetOptionLabel = (dataset) => {
+  if (!dataset) return '';
+  const parts = [dataset.name];
+  if (dataset.source === 'builtin') parts.push('(built-in)');
+  else if (dataset.source === 'upload') parts.push('(yours)');
+  else parts.push('(folder)');
+  return parts.join(' ');
+};
+
 // --- AUTH CONTEXT ---
 const AuthContext = createContext(null);
 
@@ -134,6 +146,12 @@ const AuthProvider = ({ children }) => {
     if (isFormData) {
       delete headers['Content-Type']; // Let browser set it with boundary if it was FormData, but for URLSearchParams it's fine.
       headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    }
+    // A file upload is sent as FormData: the browser has to set the content
+    // type itself, because only it knows the boundary of the parts.
+    const isMultipart = typeof FormData !== 'undefined' && options.body instanceof FormData;
+    if (isMultipart) {
+      delete headers['Content-Type'];
     }
 
     const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -710,7 +728,7 @@ const NewJob = ({ navigate }) => {
   const [sourceType, setSourceType] = useState('local');
   const [payload, setPayload] = useState({
     model_name: '',
-    dataset_name: '',
+    dataset_id: null,
     hf_dataset_url: '',
     label_column: 'label',
     test_size: 0.2,
@@ -720,9 +738,63 @@ const NewJob = ({ navigate }) => {
     env_id: '',
     hyperparameters: {}
   });
-  
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  // The state of the upload: the file is sent to the server, which registers
+  // it as a dataset of the user.
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const [uploadedDataset, setUploadedDataset] = useState(null);
+
+  // The dataset that is selected in the form, and the columns it has: the
+  // label column is picked from them, so it does not have to be typed.
+  const selectedDataset = datasets.find(d => d.id === payload.dataset_id) || null;
+  const labelColumnOptions = selectedDataset
+    ? (selectedDataset.columns || []).map(column => column.name)
+    : [];
+
+  const selectDataset = (datasetId) => {
+    const id = datasetId === '' ? null : Number(datasetId);
+    const dataset = datasets.find(d => d.id === id);
+    const columns = dataset ? (dataset.columns || []).map(column => column.name) : [];
+    setPayload({
+      ...payload,
+      dataset_id: id,
+      // The registry suggests the label column; it is only used when the
+      // suggestion is one of the columns of the file.
+      label_column: dataset && dataset.label_column && columns.includes(dataset.label_column)
+        ? dataset.label_column
+        : (columns.includes(payload.label_column) ? payload.label_column : (columns[0] || payload.label_column)),
+    });
+  };
+
+  const handleUpload = async (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const dataset = await apiFetch('/api/v1/ml/datasets/upload', {
+        method: 'POST',
+        body: form,
+      });
+      setUploadedDataset(dataset);
+      setDatasets(previous => {
+        const without = previous.filter(item => item.id !== dataset.id);
+        return [...without, dataset].sort((a, b) => a.name.localeCompare(b.name));
+      });
+      selectDataset(dataset.id);
+    } catch (err) {
+      setUploadError(err.message || 'The upload failed.');
+    } finally {
+      setUploading(false);
+      // The input is cleared, so that the same file can be uploaded again.
+      event.target.value = '';
+    }
+  };
 
   useEffect(() => {
     apiFetch('/api/v1/ml/models')
@@ -880,11 +952,11 @@ const NewJob = ({ navigate }) => {
     e.preventDefault();
     setError(null);
 
-    // The backend rejects a run without a data source with a generic 400
-    // ("Either dataset_name or hf_dataset_url must be provided"), so the missing
-    // input is reported here instead of leaving the user with that message.
+    // The backend rejects a run without a data source with a generic 400, so
+    // the missing input is reported here instead of leaving the user with
+    // that message.
     if (sourceType === 'local') {
-      if (!isReinforcementLearning && !payload.dataset_name) {
+      if (!isReinforcementLearning && !payload.dataset_id) {
         setError('Select a dataset before starting the run.');
         return;
       }
@@ -898,16 +970,16 @@ const NewJob = ({ navigate }) => {
     try {
       const submitPayload = { ...payload };
       if (sourceType === 'local') delete submitPayload.hf_dataset_url;
-      if (sourceType === 'hf') delete submitPayload.dataset_name;
+      if (sourceType === 'hf') delete submitPayload.dataset_id;
       submitPayload.hyperparameters = buildHyperparameters();
       // The metric the run is optimized for follows the task of the selected
       // model: a regression model is scored with r2, every other task with
       // accuracy. Without this every run would be recorded as an accuracy run,
       // which is wrong for a regression model.
       submitPayload.optimize_metric = selectedModelDef?.category === 'regression' ? 'r2' : 'accuracy';
-      // Empty strings are not valid values for the backend: an empty dataset name
-      // would be stored as a "huggingface" run and an empty env id as "".
-      if (!submitPayload.dataset_name) delete submitPayload.dataset_name;
+      // Empty values are not valid for the backend: a null dataset id would be
+      // stored as a "huggingface" run and an empty env id as "".
+      if (!submitPayload.dataset_id) delete submitPayload.dataset_id;
       if (!submitPayload.hf_dataset_url) delete submitPayload.hf_dataset_url;
       if (!submitPayload.env_id) delete submitPayload.env_id;
       // auto_search needs the candidate list, otherwise the backend trains the
@@ -997,8 +1069,8 @@ const NewJob = ({ navigate }) => {
                     dataset name to the backend. */}
                 <select
                   required={!isReinforcementLearning}
-                  value={payload.dataset_name}
-                  onChange={(e) => setPayload({...payload, dataset_name: e.target.value})}
+                  value={payload.dataset_id ?? ''}
+                  onChange={(e) => selectDataset(e.target.value)}
                   className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
                 >
                   {datasets.length === 0 && (
@@ -1007,7 +1079,7 @@ const NewJob = ({ navigate }) => {
                   {datasets.length > 0 && (
                     <option value="">-- Select --</option>
                   )}
-                  {datasets.map(d => <option key={d} value={d}>{d}</option>)}
+                  {datasets.map(d => <option key={d.id} value={d.id}>{datasetOptionLabel(d)}</option>)}
                 </select>
                 {datasetsError && (
                   <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 mt-2">
@@ -1016,18 +1088,49 @@ const NewJob = ({ navigate }) => {
                 )}
                 {!datasetsError && datasets.length === 0 && (
                   <p className="text-sm text-zinc-500 italic border border-dashed border-zinc-800 rounded-md px-3 py-2 mt-2">
-                    No local datasets available. Add a CSV file (or an image folder for the vision models) to the server's <span className="font-mono">data/</span> directory.
+                    No datasets available. Upload a CSV file below to start.
                   </p>
                 )}
                 {isReinforcementLearning && (
                   <p className="text-xs text-zinc-500 mt-1">Not required for reinforcement learning models.</p>
                 )}
+                {selectedDataset && selectedDataset.columns && selectedDataset.columns.length > 0 && (
+                  <p className="text-xs text-zinc-500 mt-2">
+                    {selectedDataset.row_count} rows · {selectedDataset.columns.length} columns
+                    {selectedDataset.source === 'builtin' ? ' · shipped with the repository' : ' · uploaded by you'}
+                  </p>
+                )}
+                {!isReinforcementLearning && (
+                  <div className="mt-3">
+                    <label className="block text-xs font-medium text-zinc-500 mb-1">Upload a CSV file</label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        onChange={handleUpload}
+                        disabled={uploading}
+                        className="text-sm text-zinc-400 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-800 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-zinc-200 hover:file:bg-zinc-700 disabled:opacity-50"
+                      />
+                      {uploading && <Activity className="w-4 h-4 animate-spin text-blue-500" />}
+                    </div>
+                    {uploadError && (
+                      <p className="text-sm text-red-200/90 border border-red-700/50 rounded-md px-3 py-2 mt-2">
+                        {uploadError}
+                      </p>
+                    )}
+                    {uploadedDataset && (
+                      <p className="text-sm text-emerald-200/90 border border-emerald-700/50 rounded-md px-3 py-2 mt-2">
+                        Uploaded “{uploadedDataset.name}” — {uploadedDataset.row_count} rows. It is selected below.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-zinc-400 mb-1">Hugging Face URL / Path</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   required
                   placeholder="e.g., databricks/databricks-dolly-15k"
                   value={payload.hf_dataset_url}
@@ -1036,16 +1139,31 @@ const NewJob = ({ navigate }) => {
                 />
               </div>
             )}
-            
+
             <div>
               <label className="block text-sm font-medium text-zinc-400 mb-1">Target / Label Column</label>
-              <input 
-                type="text" 
-                required
-                value={payload.label_column}
-                onChange={(e) => setPayload({...payload, label_column: e.target.value})}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
-              />
+              {labelColumnOptions.length > 0 ? (
+                <select
+                  required
+                  value={payload.label_column}
+                  onChange={(e) => setPayload({...payload, label_column: e.target.value})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                >
+                  {labelColumnOptions.map(name => <option key={name} value={name}>{name}</option>)}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  required
+                  placeholder="label"
+                  value={payload.label_column}
+                  onChange={(e) => setPayload({...payload, label_column: e.target.value})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                />
+              )}
+              {labelColumnOptions.length > 0 && (
+                <p className="text-xs text-zinc-500 mt-1">The columns of the selected dataset.</p>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-4">

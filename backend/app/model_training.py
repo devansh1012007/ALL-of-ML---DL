@@ -22,6 +22,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.svm import SVC, SVR
 
+from .settings import builtin_datasets_dir
+
 try:
     from hmmlearn import hmm
 except ImportError:
@@ -116,7 +118,6 @@ def find_repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 ROOT = find_repo_root()
-DATA_DIR = ROOT / "data"
 MODEL_DIR = ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -879,20 +880,22 @@ def list_model_categories() -> List[str]:
 def list_local_datasets() -> List[str]:
     """List the selectable local datasets: CSV files plus image dataset folders.
 
-    Vision models need a directory with one subdirectory per class, so directories are
-    listed as well. A tabular model pointed at a folder fails with a clear message in
-    _prepare_dataset(). Hidden files and hidden directories are skipped.
+    Vision models need a directory with one subdirectory per class, so
+    directories are listed as well. A tabular model pointed at a folder fails
+    with a clear message in _prepare_dataset(). Hidden files and hidden
+    directories are skipped.
     """
-    if not DATA_DIR.exists():
+    directory = builtin_datasets_dir()
+    if not directory.exists():
         return []
     names = {
         path.name
-        for path in DATA_DIR.glob("*.csv")
+        for path in directory.glob("*.csv")
         if path.is_file() and not path.name.startswith(".")
     }
     names.update(
         path.name
-        for path in DATA_DIR.iterdir()
+        for path in directory.iterdir()
         if path.is_dir() and not path.name.startswith(".")
     )
     return sorted(names)
@@ -980,8 +983,20 @@ def ensure_dict(value: Any, name: str) -> Dict[str, Any]:
 
 
 def resolve_dataset_path(dataset_name: str) -> Path:
-    candidate = Path(dataset_name)
-    return candidate if candidate.is_absolute() else DATA_DIR / dataset_name
+    """The absolute path of a dataset, from its path in the registry.
+
+    The name of a dataset is the path it has *inside the datasets root*, and
+    it always comes from the registry - never from the client. The path is
+    resolved and checked against the root, so a name that climbs out of it
+    with ``..`` or that points at a symlink outside of it is refused.
+
+    This is the boundary of what the application can read: before the
+    registry existed, a client could send an absolute path and make the
+    server read any file it could read.
+    """
+    from .datasets import resolve_storage_path
+
+    return resolve_storage_path(dataset_name)
 
 
 def is_image_dataset_path(dataset_name: str) -> bool:
