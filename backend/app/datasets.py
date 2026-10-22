@@ -15,7 +15,6 @@ Three kinds of datasets exist:
   vision models need.
 """
 
-import csv
 import io
 import os
 import re
@@ -43,11 +42,10 @@ MAX_REPORTED_COLUMNS = int(os.getenv("MAX_REPORTED_COLUMNS", "200"))
 # followed by the name of the client.
 MAX_FILE_NAME_BYTES = int(os.getenv("MAX_FILE_NAME_BYTES", "200"))
 
-# The csv module refuses a field of more than 128 KB by default, while the
-# training reads the file with pandas, which has no such limit. The limit is
-# raised to the size of the biggest file the application accepts, so that a
-# column with a long text is a dataset and not an error.
-csv.field_size_limit(MAX_UPLOAD_BYTES)
+# The number of rows that are read at once when a file is inspected. The
+# file is read in pieces, so that the memory of the process does not grow
+# with the size of the file.
+CSV_CHUNK_ROWS = 10000
 
 # The names a label column usually has. The registry suggests the first one
 # that is in the file.
@@ -74,7 +72,8 @@ def sanitize_name(name: str) -> str:
     # at most 255 bytes, and a name of multi-byte characters would exceed it
     # long before it reaches 255 characters.
     encoded = cleaned.encode("utf-8")[:MAX_FILE_NAME_BYTES]
-    return encoded.decode("utf-8", errors="ignore") or "dataset"
+    cleaned = encoded.decode("utf-8", errors="ignore").rstrip("._ ")
+    return cleaned or "dataset"
 
 
 def resolve_storage_path(storage_path: str) -> Path:
@@ -113,15 +112,36 @@ def relative_storage_path(path: Path) -> str:
         ) from exc
 
 
+def _scan_csv(stream) -> Tuple[List[Dict[str, Any]], int]:
+    """The columns and the number of rows of a CSV file, read in pieces.
+
+    The file is read with the same parser as the training uses, and it is
+    read in pieces: the memory of the process does not grow with the size of
+    the file. The types of the columns are the ones of the first rows.
+    """
+    columns: List[Dict[str, Any]] = []
+    rows = 0
+    for chunk in pd.read_csv(stream, chunksize=CSV_CHUNK_ROWS):
+        if not columns:
+            columns = [
+                {"name": str(name), "dtype": str(dtype)}
+                for name, dtype in zip(chunk.columns, chunk.dtypes)
+            ]
+        rows += len(chunk)
+    return columns, rows
+
+
 def describe_csv(path: Path) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
     """The columns, the number of rows and the suggested label of a CSV file.
 
-    The header is read with pandas, so the types are the ones the first rows
-    of the file have. The rows are counted with the CSV parser, so that a file
-    with a quoted line break is counted the way a reader would count it.
+    The file is read with the parser the training uses and in pieces, so that
+    a file of fifty megabytes does not take fifty megabytes of memory. The
+    rows are counted the way the reader counts them: a value may contain a
+    line break inside quotes.
     """
     try:
-        frame = pd.read_csv(path, nrows=100)
+        with path.open("rb") as handle:
+            columns, rows = _scan_csv(handle)
     except pd.errors.EmptyDataError as exc:
         raise DatasetError(f"The dataset '{path.name}' is empty.") from exc
     except (pd.errors.ParserError, UnicodeDecodeError) as exc:
@@ -129,14 +149,8 @@ def describe_csv(path: Path) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
             f"The dataset '{path.name}' could not be parsed as a CSV file: {exc}"
         ) from exc
 
-    columns = [
-        {"name": str(name), "dtype": str(dtype)}
-        for name, dtype in zip(frame.columns, frame.dtypes)
-    ]
     if not columns:
         raise DatasetError(f"The dataset '{path.name}' has no columns.")
-
-    rows = _count_rows(path)
     if rows == 0:
         raise DatasetError(f"The dataset '{path.name}' has a header but no rows.")
 
@@ -158,35 +172,15 @@ def suggest_label(columns: List[Dict[str, Any]]) -> Optional[str]:
     return names[-1] if names else None
 
 
-def _count_rows(path: Path) -> int:
-    """The number of data rows of a CSV file.
-
-    The rows are counted with the CSV parser and not by counting the line
-    breaks: a value may contain a line break inside quotes, and a file whose
-    last line has no line break would be counted one row too few.
-    """
-    rows = 0
-    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
-        reader = csv.reader(handle)
-        try:
-            next(reader)  # the header
-        except StopIteration:
-            return 0
-        try:
-            for _ in reader:
-                rows += 1
-        except csv.Error as exc:
-            raise DatasetError(
-                f"The dataset '{path.name}' could not be read as a CSV file: {exc}"
-            ) from exc
-    return rows
-
-
-def validate_upload(filename: str, content: bytes) -> None:
-    """Whether an uploaded file is a CSV file the application can use.
+def validate_upload(
+    filename: str, content: bytes
+) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
+    """The description of an uploaded file, if the application can use it.
 
     The content is parsed here, before the file is written: a file that the
-    training could not read must not end up on the disk of the server.
+    training could not read must not end up on the disk of the server. The
+    description of the file is the answer, so that the file is not read a
+    second time.
     """
     if not content:
         raise DatasetError("The uploaded file is empty.")
@@ -198,48 +192,29 @@ def validate_upload(filename: str, content: bytes) -> None:
     if not filename.lower().endswith(".csv"):
         raise DatasetError("Only CSV files can be uploaded.")
 
-    # The first line must be a header with at least two columns, and there has
-    # to be at least one data row.
     try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise DatasetError("The uploaded file is not a UTF-8 text file.") from exc
-
-    reader = csv.reader(io.StringIO(text, newline=""))
-    try:
-        header = next(reader)
-    except StopIteration as exc:
-        raise DatasetError("The uploaded file is empty.") from exc
-    if len(header) < 2:
-        raise DatasetError(
-            "The uploaded file must have a header with at least two columns."
-        )
-
-    rows = 0
-    try:
-        for _ in reader:
-            rows += 1
-            if rows > MAX_UPLOAD_ROWS:
-                raise DatasetError(
-                    f"The uploaded file has more than {MAX_UPLOAD_ROWS} rows."
-                )
-    except csv.Error as exc:
-        raise DatasetError(
-            f"The uploaded file could not be read as a CSV file: {exc}"
-        ) from exc
-    if rows == 0:
-        raise DatasetError("The uploaded file has a header but no rows.")
-
-    # The file has to be readable by the training: a file that pandas refuses
-    # is refused here, while it is still in the memory of the request.
-    try:
-        pd.read_csv(io.StringIO(text, newline=""))
+        columns, rows = _scan_csv(io.BytesIO(content))
     except pd.errors.EmptyDataError as exc:
         raise DatasetError("The uploaded file is empty.") from exc
-    except (pd.errors.ParserError, UnicodeDecodeError) as exc:
+    except UnicodeDecodeError as exc:
+        raise DatasetError("The uploaded file is not a UTF-8 text file.") from exc
+    except pd.errors.ParserError as exc:
         raise DatasetError(
             f"The uploaded file could not be parsed as a CSV file: {exc}"
         ) from exc
+
+    if len(columns) < 2:
+        raise DatasetError(
+            "The uploaded file must have a header with at least two columns."
+        )
+    if rows == 0:
+        raise DatasetError("The uploaded file has a header but no rows.")
+    if rows > MAX_UPLOAD_ROWS:
+        raise DatasetError(
+            f"The uploaded file has more than {MAX_UPLOAD_ROWS} rows."
+        )
+
+    return columns, rows, suggest_label(columns)
 
 
 def store_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str]:
@@ -251,15 +226,32 @@ def store_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str
     rejected upload does not leave a file behind.
     """
     validate_upload(filename, content)
+    return write_upload(owner_id, filename, content)
 
+
+def write_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str]:
+    """Write an uploaded file that was accepted already.
+
+    The directory of the user is resolved before the file is written: a
+    directory that is a symlink to somewhere else is not a place where the
+    application may write.
+    """
     display_name = sanitize_name(filename)
     directory = uploads_dir() / str(owner_id)
     directory.mkdir(parents=True, exist_ok=True)
+    # The directory has to be inside the datasets root: a symlink that points
+    # somewhere else would take the file out of the root.
+    relative_storage_path(directory)
     stored_name = f"{uuid.uuid4().hex}_{display_name}"
     path = directory / stored_name
     path.write_bytes(content)
 
-    return display_name, relative_storage_path(path)
+    try:
+        return display_name, relative_storage_path(path)
+    except DatasetError:
+        # The file was written outside of the root: it is removed again.
+        path.unlink(missing_ok=True)
+        raise
 
 
 def unique_dataset_name(name: str, taken: Iterable[str]) -> str:
@@ -293,15 +285,36 @@ def builtin_files() -> List[Path]:
 
 
 def builtin_folders() -> List[Path]:
-    """The directories of the repository that the vision models can use."""
+    """The directories of the repository that the vision models can use.
+
+    A directory is a dataset of the vision models when it holds one
+    subdirectory per class: a directory that holds something else is not
+    registered, because a training on it would fail with an error of the
+    image loader.
+    """
     directory = builtin_datasets_dir()
     if not directory.exists():
         return []
-    return sorted(
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        # The directory cannot be read: there is no dataset in it.
+        return []
+    return [
         path
-        for path in directory.iterdir()
-        if path.is_dir() and not path.name.startswith(".")
-    )
+        for path in entries
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and _holds_class_directories(path)
+    ]
+
+
+def _holds_class_directories(path: Path) -> bool:
+    """Whether a directory holds the subdirectories of an image dataset."""
+    try:
+        return any(child.is_dir() for child in path.iterdir())
+    except OSError:
+        return False
 
 
 def dataset_to_dict(dataset) -> Dict[str, Any]:

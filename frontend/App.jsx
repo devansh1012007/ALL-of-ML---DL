@@ -1128,7 +1128,7 @@ const NewJob = ({ navigate }) => {
                     )}
                     {uploadedDataset && (
                       <p className="text-sm text-emerald-200/90 border border-emerald-700/50 rounded-md px-3 py-2 mt-2">
-                        Uploaded “{uploadedDataset.name}” — {uploadedDataset.row_count} rows. It is selected below.
+                        Uploaded “{uploadedDataset.name}” — {uploadedDataset.row_count} rows. It is selected above.
                       </p>
                     )}
                   </div>

@@ -460,30 +460,41 @@ def test_a_name_of_multi_byte_characters_stays_a_valid_file_name():
     assert resolve_storage_path(storage_path).exists()
 
 
-def test_a_field_that_is_too_long_is_refused_with_a_message(client, auth):
-    """A file the csv parser cannot read is a 400, not a crash of the server.
+def test_a_file_the_training_could_not_read_is_refused_with_a_message(client, auth):
+    """A file the parser refuses is a 400, not a crash of the server.
 
-    The limit of the parser of the standard library is lowered here, because
-    the application raises it to the size of the biggest file it accepts: a
-    column with a long text is a dataset, and a file that the parser refuses
-    is an error the client has to see.
+    The parser of the training is the one that decides: a file it cannot
+    read is not a dataset, and the client has to see why.
     """
-    import csv
+    content = b'a,b,label\n"unclosed,2,0\n'
 
-    previous = csv.field_size_limit()
-    csv.field_size_limit(1024)
-    try:
-        content = ("a,b,label\n" + "x" * 200_000 + ",2,0\n").encode()
-        response = client.post(
-            "/api/v1/ml/datasets/upload",
-            headers=auth,
-            files={"file": ("wide.csv", content, "text/csv")},
-        )
-    finally:
-        csv.field_size_limit(previous)
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("broken.csv", content, "text/csv")},
+    )
 
     assert response.status_code == 400, response.text
     assert response.json()["detail"]
+
+
+def test_a_column_with_a_long_text_is_a_dataset(client, auth):
+    """A long value is not an error.
+
+    The parser of the standard library refuses a field of more than 128 KB,
+    while the training reads the file with pandas, which has no such limit: a
+    column with a long text is a dataset.
+    """
+    content = ("a,b,label\n" + "x" * 200_000 + ",2,0\n").encode()
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("wide.csv", content, "text/csv")},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["row_count"] == 1
 
 
 def test_a_malformed_file_in_the_data_directory_does_not_stop_the_startup():
@@ -493,16 +504,12 @@ def test_a_malformed_file_in_the_data_directory_does_not_stop_the_startup():
     cannot read is skipped with a warning, and the other datasets stay
     usable.
     """
-    import csv
-
     root = Path(os.environ["DATASETS_ROOT"])
     broken = root / "data" / "broken.csv"
     broken.parent.mkdir(parents=True, exist_ok=True)
-    # A field that is too long for the csv parser of the standard library.
-    broken.write_text("a,b,label\n" + "x" * 500_000 + ",2,0\n")
+    # A file that the parser of the training refuses.
+    broken.write_bytes(b'a,b,label\n"unclosed,2,0\n')
 
-    previous = csv.field_size_limit()
-    csv.field_size_limit(1024)
     try:
         # The startup of the application registers the datasets of the
         # directory: it has to come up with the broken file there.
@@ -510,7 +517,6 @@ def test_a_malformed_file_in_the_data_directory_does_not_stop_the_startup():
             # The application answers: it did not stop at the broken file.
             assert started.get("/openapi.json").status_code == 200
     finally:
-        csv.field_size_limit(previous)
         broken.unlink()
 
 
@@ -530,6 +536,36 @@ def test_an_oversized_upload_is_refused_before_the_body_is_read(client, auth, mo
         "/api/v1/ml/datasets/upload",
         headers=auth,
         files={"file": ("big.csv", content, "text/csv")},
+    )
+
+    assert response.status_code == 413, response.text
+
+
+def test_an_upload_without_a_length_is_refused_as_well(client, auth, monkeypatch):
+    """A request that does not announce its length is refused too.
+
+    A client can send the body in pieces, without a Content-Length header.
+    The guard cannot ask the client how big the body is then, so it counts
+    the bytes as they arrive and refuses the request as soon as it is bigger
+    than the limit - before the framework writes it to the disk.
+    """
+    from backend.app import datasets as registry
+
+    monkeypatch.setattr(registry, "MAX_UPLOAD_BYTES", 1024)
+
+    def chunks():
+        yield b"--boundary\r\n"
+        yield b'Content-Disposition: form-data; name="file"; filename="big.csv"\r\n'
+        yield b"Content-Type: text/csv\r\n\r\n"
+        # The body is sent in pieces, so that no length is announced.
+        for _ in range(20):
+            yield b"a,b,label\n" + b"1,2,0\n" * 500
+        yield b"\r\n--boundary--\r\n"
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers={**auth, "Content-Type": "multipart/form-data; boundary=boundary"},
+        content=chunks(),
     )
 
     assert response.status_code == 413, response.text

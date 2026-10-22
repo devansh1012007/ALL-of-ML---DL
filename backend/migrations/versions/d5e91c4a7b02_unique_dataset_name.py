@@ -62,11 +62,13 @@ def _rename_the_duplicates(table) -> None:
 
     The rows of the built-in datasets have no owner, and the rows of the
     uploads have one: a name is only ambiguous inside an owner, so the
-    duplicates are looked for per owner.
+    duplicates are looked for per owner. The rows are renamed in the order of
+    their id, so that the row that had the name keeps it and the result does
+    not depend on the order the database returns the rows in.
     """
     connection = op.get_bind()
     rows = connection.execute(
-        sa.select(table.c.id, table.c.owner_id, table.c.name)
+        sa.select(table.c.id, table.c.owner_id, table.c.name).order_by(table.c.id)
     ).fetchall()
     seen = set()
     for row_id, owner_id, name in rows:
@@ -98,9 +100,25 @@ def upgrade() -> None:
         _rename_the_duplicates(table)
 
     # The index that the previous revision created on the same columns is
-    # replaced: the unique one serves the listing as well.
-    op.drop_index(OLD_INDEX_NAME, table_name="datasets")
+    # replaced: the unique one serves the listing as well. It may be missing
+    # already, when the table was created by something else than the previous
+    # revision, so it is only dropped when it is there.
+    _drop_index_if_it_exists(OLD_INDEX_NAME)
     op.create_index(INDEX_NAME, "datasets", ["owner_id", "name"], unique=True)
+
+
+def _drop_index_if_it_exists(name: str) -> None:
+    """Drop an index, when the database has it.
+
+    The parameter ``if_exists`` of ``op.drop_index`` needs Alembic 1.12, and
+    this repository supports 1.9.
+    """
+    if context.is_offline_mode():
+        op.drop_index(name, table_name="datasets")
+        return
+    inspector = sa.inspect(op.get_bind())
+    if name in {index["name"] for index in inspector.get_indexes("datasets")}:
+        op.drop_index(name, table_name="datasets")
 
 
 def downgrade() -> None:
