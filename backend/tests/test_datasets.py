@@ -11,9 +11,11 @@ that id means. These tests pin that contract:
 * the built-in datasets of the repository are registered at startup.
 """
 
+import io
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -131,6 +133,37 @@ def test_a_file_without_rows_is_refused(client, auth):
     )
 
     assert response.status_code == 400
+
+
+def test_the_file_of_an_upload_that_could_not_be_registered_is_removed(
+    client, auth, monkeypatch
+):
+    """A file that no row points at is removed again.
+
+    The row is written after the file, and a database that refuses the row
+    leaves a file that nobody can reach.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    root = Path(os.environ["DATASETS_ROOT"]).resolve()
+    uploads = root / "uploads"
+    before = set(uploads.rglob("*.csv")) if uploads.exists() else set()
+
+    async def refuse(self, *args, **kwargs):
+        raise IntegrityError("statement", {}, Exception("refused"))
+
+    monkeypatch.setattr(AsyncSession, "commit", refuse)
+
+    response = client.post(
+        "/api/v1/ml/datasets/upload",
+        headers=auth,
+        files={"file": ("refused.csv", CSV_CONTENT.encode(), "text/csv")},
+    )
+
+    assert response.status_code == 400
+    after = set(uploads.rglob("*.csv")) if uploads.exists() else set()
+    assert after == before, f"the file of the refused upload stayed on the disk: {after - before}"
 
 
 def test_a_path_outside_of_the_root_is_refused():
@@ -447,11 +480,11 @@ def test_the_columns_carry_the_type_of_the_values(tmp_path):
 
 
 def test_a_file_with_too_many_columns_is_refused(client, auth):
-    """A file with a million columns is refused before it is read.
+    """A file with a lot of columns is refused before it is parsed.
 
     A file with a lot of columns takes gigabytes of memory to describe - one
-    entry per column - and it is refused when its header is read, before the
-    table of it is built.
+    entry per column - and it is refused when its header is counted, before
+    the table of it is built.
     """
     from backend.app import datasets as registry
 
@@ -479,6 +512,59 @@ def test_a_file_with_too_many_columns_is_refused(client, auth):
 
     assert refused.status_code == 400, refused.text
     assert "columns" in refused.json()["detail"].lower()
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        b"",
+        b"\n",
+        b"\r\n",
+        b"\n\n",
+        b"   \n",
+        b'"a\nb",c,d,label\n',  # a quoted value with a line break in it
+    ],
+    ids=["plain", "a leading newline", "a leading crlf", "two newlines", "a blank line", "a quoted newline"],
+)
+def test_the_count_of_the_columns_agrees_with_the_parser(prefix):
+    """The count of the columns may not be fooled by the header.
+
+    The parser of the training skips the empty lines before the header and
+    reads a quoted value with a line break in it as one value: the count
+    that decides whether the file is refused has to agree with it, or the
+    limit does not hold.
+    """
+    from backend.app.datasets import _count_header_columns
+
+    header = b"a,b,c,label\n1,2,3,0\n"
+    content = prefix + header
+
+    counted = _count_header_columns(io.BytesIO(content))
+    parsed = len(pd.read_csv(io.BytesIO(content), nrows=0).columns)
+
+    assert counted == parsed, f"counted {counted}, the parser sees {parsed}"
+
+
+def test_a_file_with_a_leading_newline_and_many_columns_is_refused(client, auth):
+    """The limit of the columns holds for a file that starts with a newline."""
+    from backend.app import datasets as registry
+
+    columns = ",".join(f"c{index}" for index in range(50))
+    content = ("\n" + columns + "\n" + ",".join("1" for _ in range(50)) + "\n").encode()
+
+    previous = registry.MAX_UPLOAD_COLUMNS
+    registry.MAX_UPLOAD_COLUMNS = 10
+    try:
+        response = client.post(
+            "/api/v1/ml/datasets/upload",
+            headers=auth,
+            files={"file": ("wide.csv", content, "text/csv")},
+        )
+    finally:
+        registry.MAX_UPLOAD_COLUMNS = previous
+
+    assert response.status_code == 400, response.text
+    assert "columns" in response.json()["detail"].lower()
 
 
 def test_a_request_with_two_datasets_is_refused(client, auth):

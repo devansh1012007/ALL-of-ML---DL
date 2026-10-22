@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Index, Integer, String, ForeignKey, DateTime, JSON, Text
+from sqlalchemy import Column, Index, Integer, String, ForeignKey, DateTime, JSON, Text, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from .base import Base
@@ -28,10 +28,18 @@ class Dataset(Base):
         # The path of a dataset is unique: it is what identifies the file.
         Index("ix_datasets_storage_path", "storage_path", unique=True),
         # A name is unique inside an owner, and the listing is always "the
-        # datasets of this owner, by name": the same index serves both. The
-        # datasets of the repository have no owner, and their names are the
-        # names of their files.
+        # datasets of this owner, by name": the same index serves both.
         Index("uq_datasets_owner_id_name", "owner_id", "name", unique=True),
+        # The datasets of the repository have no owner, and a NULL is not a
+        # value that a unique index compares: their names need an index of
+        # their own.
+        Index(
+            "uq_datasets_builtin_name",
+            "name",
+            unique=True,
+            sqlite_where=text("owner_id IS NULL"),
+            postgresql_where=text("owner_id IS NULL"),
+        ),
     )
     id = Column(Integer, primary_key=True, index=True)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

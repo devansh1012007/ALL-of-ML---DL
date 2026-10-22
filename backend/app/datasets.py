@@ -18,6 +18,7 @@ Three kinds of datasets exist:
 import io
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -128,6 +129,29 @@ HEADER_SCAN_BYTES = 1024 * 1024
 CSV_SEPARATORS = (b",", b";", b"\t", b"|")
 
 
+def _end_of_the_header(head: bytes, start: int) -> int:
+    """The end of the header of a file, or -1 when it is not in the window.
+
+    A quoted value may hold a line break, so the end of the header is the
+    first line break that is not inside a quoted value. The parser of the
+    training reads the header the same way.
+    """
+    in_quotes = False
+    index = start
+    while index < len(head):
+        char = head[index : index + 1]
+        if char == b'"':
+            # Two quotes in a row inside a quoted value are an escaped quote.
+            if in_quotes and head[index + 1 : index + 2] == b'"':
+                index += 2
+                continue
+            in_quotes = not in_quotes
+        elif char in (b"\n", b"\r") and not in_quotes:
+            return index
+        index += 1
+    return -1
+
+
 def _count_header_columns(stream) -> int:
     """The number of columns of a file, counted without parsing it.
 
@@ -135,17 +159,42 @@ def _count_header_columns(stream) -> int:
     Parsing the file with pandas would cost a lot of memory and a lot of
     time when it has a lot of columns, and such a file is refused anyway.
 
+    The count has to agree with the parser of the training, or the limit
+    would not hold: the empty lines before the header are skipped, and a
+    quoted value may hold a line break.
+
     The count is an upper bound: a separator inside a quoted name is counted
     as well. A file whose header holds a thousand separators inside one
     quoted name is refused, which is the safe direction.
     """
     head = stream.read(HEADER_SCAN_BYTES)
-    line = head.split(b"\n", 1)[0]
-    if b"\n" not in head and len(head) == HEADER_SCAN_BYTES:
+    if len(head) == HEADER_SCAN_BYTES and b"\n" not in head:
         # The header is longer than what was read: it holds more separators
         # than the limit allows.
         return MAX_UPLOAD_COLUMNS + 1
-    return max(line.count(separator) for separator in CSV_SEPARATORS) + 1
+
+    # The empty lines before the header are skipped, the way the parser
+    # skips them.
+    start = 0
+    while True:
+        end_of_line = head.find(b"\n", start)
+        if end_of_line == -1:
+            if not head[start:].strip():
+                # There is no header at all.
+                return 1
+            break
+        if head[start:end_of_line].strip():
+            break
+        start = end_of_line + 1
+
+    end = _end_of_the_header(head, start)
+    if end == -1:
+        # The header does not end inside the window: it holds more
+        # separators than the limit allows.
+        return MAX_UPLOAD_COLUMNS + 1
+
+    header = head[start:end]
+    return max(header.count(separator) for separator in CSV_SEPARATORS) + 1
 
 
 def _scan_csv(stream, max_rows: Optional[int] = None) -> Tuple[List[Dict[str, Any]], int]:
@@ -224,28 +273,49 @@ def suggest_label(columns: List[Dict[str, Any]]) -> Optional[str]:
     return names[-1] if names else None
 
 
+def _as_stream(source):
+    """The source of a file as a stream that can be read from the start."""
+    if isinstance(source, (bytes, bytearray)):
+        return io.BytesIO(source)
+    source.seek(0)
+    return source
+
+
+def size_of(source) -> int:
+    """The number of bytes of a file, without reading it."""
+    if isinstance(source, (bytes, bytearray)):
+        return len(source)
+    position = source.tell()
+    source.seek(0, os.SEEK_END)
+    size = source.tell()
+    source.seek(position)
+    return size
+
+
 def validate_upload(
-    filename: str, content: bytes
+    filename: str, source
 ) -> Tuple[List[Dict[str, Any]], int, Optional[str]]:
     """The description of an uploaded file, if the application can use it.
 
-    The content is parsed here, before the file is written: a file that the
+    The source is the bytes of the file or a stream that holds them. The
+    content is parsed here, before the file is written: a file that the
     training could not read must not end up on the disk of the server. The
     description of the file is the answer, so that the file is not read a
     second time.
     """
-    if not content:
+    size = size_of(source)
+    if size == 0:
         raise DatasetError("The uploaded file is empty.")
-    if len(content) > MAX_UPLOAD_BYTES:
+    if size > MAX_UPLOAD_BYTES:
         raise DatasetError(
-            f"The uploaded file is {len(content)} bytes, which is more than the "
+            f"The uploaded file is {size} bytes, which is more than the "
             f"limit of {MAX_UPLOAD_BYTES} bytes."
         )
     if not filename.lower().endswith(".csv"):
         raise DatasetError("Only CSV files can be uploaded.")
 
     try:
-        columns, rows = _scan_csv(io.BytesIO(content), max_rows=MAX_UPLOAD_ROWS)
+        columns, rows = _scan_csv(_as_stream(source), max_rows=MAX_UPLOAD_ROWS)
     except pd.errors.EmptyDataError as exc:
         raise DatasetError("The uploaded file is empty.") from exc
     except UnicodeDecodeError as exc:
@@ -266,8 +336,12 @@ def validate_upload(
     return columns, rows, suggest_label(columns)
 
 
-def write_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str]:
+def write_upload(owner_id: int, filename: str, source) -> Tuple[str, str]:
     """Write an uploaded file that was accepted already.
+
+    The source is the bytes of the file or a stream that holds them: a file
+    that is already on the disk is copied, and it is not read into the memory
+    of the process.
 
     The directory of the user is resolved before the file is written: a
     directory that is a symlink to somewhere else is not a place where the
@@ -286,7 +360,19 @@ def write_upload(owner_id: int, filename: str, content: bytes) -> Tuple[str, str
     relative_storage_path(directory)
     stored_name = f"{uuid.uuid4().hex}_{display_name}"
     path = directory / stored_name
-    path.write_bytes(content)
+    try:
+        if isinstance(source, (bytes, bytearray)):
+            path.write_bytes(source)
+        else:
+            source.seek(0)
+            with path.open("wb") as handle:
+                shutil.copyfileobj(source, handle)
+    except OSError:
+        # A file that could not be written completely is not a dataset.
+        path.unlink(missing_ok=True)
+        raise DatasetError(
+            f"The uploaded file could not be written: {path.name}."
+        ) from None
 
     try:
         return display_name, relative_storage_path(path)

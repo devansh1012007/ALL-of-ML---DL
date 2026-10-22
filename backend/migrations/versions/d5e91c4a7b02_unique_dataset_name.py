@@ -31,6 +31,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 INDEX_NAME = "uq_datasets_owner_id_name"
 OLD_INDEX_NAME = "ix_datasets_owner_id_name"
+BUILTIN_INDEX_NAME = "uq_datasets_builtin_name"
 
 
 def _datasets_table():
@@ -105,6 +106,16 @@ def upgrade() -> None:
     # revision, so it is only dropped when it is there.
     _drop_index_if_it_exists(OLD_INDEX_NAME)
     op.create_index(INDEX_NAME, "datasets", ["owner_id", "name"], unique=True)
+    # The datasets of the repository have no owner, and a NULL is not a value
+    # that a unique index compares: their names need an index of their own.
+    op.create_index(
+        BUILTIN_INDEX_NAME,
+        "datasets",
+        ["name"],
+        unique=True,
+        sqlite_where=sa.text("owner_id IS NULL"),
+        postgresql_where=sa.text("owner_id IS NULL"),
+    )
 
 
 def _drop_index_if_it_exists(name: str) -> None:
@@ -122,10 +133,16 @@ def _drop_index_if_it_exists(name: str) -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """Downgrade schema.
+
+    The names that the upgrade renamed are not renamed back: the rows keep
+    the names they have, which are unique, and the name of a dataset is only
+    a label.
+    """
     if _datasets_table() is None:
         return
 
+    op.drop_index(BUILTIN_INDEX_NAME, table_name="datasets")
     op.drop_index(INDEX_NAME, table_name="datasets")
     op.create_index(
         OLD_INDEX_NAME, "datasets", ["owner_id", "name"], unique=False

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, File, HTTPException, Header, Request, UploadFile, status
 from starlette.datastructures import Headers
+from starlette.datastructures import UploadFile as StarletteUploadFile
 import json
 import logging
 import os
@@ -159,7 +160,14 @@ async def seed_builtin_datasets() -> None:
                         label_column=None,
                     )
                 )
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Two workers that start at the same time register the same
+            # built-in dataset. The second one has to survive it: the rows
+            # it wanted are already there.
+            await session.rollback()
+            logger.info("The built-in datasets were registered by another worker")
 
 
 async def verify_schema() -> None:
@@ -750,7 +758,6 @@ def _remove_stored_upload(storage_path: str) -> None:
 @app.post("/api/v1/ml/datasets/upload")
 async def upload_dataset(
     request: Request,
-    file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -759,6 +766,9 @@ async def upload_dataset(
     The file is written under the uploads directory of the user with a
     generated name, and it is registered as a row: a training request refers
     to it by its id.
+
+    The body is read here and not by the framework: a request that is not
+    authenticated has to be refused before its file is written to the disk.
     """
     _check_rate_limit(f"upload:{_client_address(request)}", UPLOAD_RATE_LIMIT)
     _record_rate_limit(f"upload:{_client_address(request)}")
@@ -768,89 +778,91 @@ async def upload_dataset(
     owner_id = current_user.id
     username = current_user.username
 
-    # The body is read with a limit: reading it completely first would let a
-    # single request fill the memory of the process, whatever the size limit
-    # says afterwards.
-    content = await file.read(datasets_registry.MAX_UPLOAD_BYTES + 1)
-    filename = file.filename or ""
-
-    # The file is inspected and written in a thread: a file of fifty megabytes
-    # takes a second to read, and the event loop serves the other requests
-    # while it does.
-    try:
-        columns, rows, label = await run_in_threadpool(
-            datasets_registry.validate_upload, filename, content
-        )
-        name, storage_path = await run_in_threadpool(
-            datasets_registry.write_upload, owner_id, filename, content
-        )
-    except DatasetError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-
-    registered = False
-    try:
-        # The name of a dataset has to be unambiguous for the display: a
-        # built-in dataset and an upload may have the same name.
-        taken = await db.execute(
-            select(Dataset.name).where(
-                (Dataset.owner_id == owner_id) | (Dataset.owner_id.is_(None))
+    async with request.form() as form:
+        upload = form.get("file")
+        if not isinstance(upload, StarletteUploadFile):
+            raise HTTPException(
+                status_code=400, detail="The request has no file."
             )
-        )
-        name = unique_dataset_name(name, [row[0] for row in taken.all()])
+        filename = upload.filename or ""
 
-        dataset = Dataset(
-            owner_id=owner_id,
-            name=name,
-            storage_path=storage_path,
-            source="upload",
-            size_bytes=len(content),
-            row_count=rows,
-            columns=columns,
-            label_column=label,
-        )
-        db.add(dataset)
+        # The file is inspected and written in a thread: a file of fifty
+        # megabytes takes a second to read, and the event loop serves the
+        # other requests while it does. The file of the framework is a file
+        # on the disk, and it is copied instead of being read into the
+        # memory of the process.
         try:
-            await db.commit()
-        except IntegrityError:
-            # Two uploads of the same name arrived at the same time and the
-            # database refused the second one. The name is the only thing that
-            # collided: the file of this upload is fine, so it is registered
-            # with the next free name.
-            await db.rollback()
+            columns, rows, label = await run_in_threadpool(
+                datasets_registry.validate_upload, filename, upload.file
+            )
+            name, storage_path = await run_in_threadpool(
+                datasets_registry.write_upload, owner_id, filename, upload.file
+            )
+        except DatasetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        try:
+            # The name of a dataset has to be unambiguous for the display: a
+            # built-in dataset and an upload may have the same name.
             taken = await db.execute(
                 select(Dataset.name).where(
                     (Dataset.owner_id == owner_id) | (Dataset.owner_id.is_(None))
                 )
             )
-            name = unique_dataset_name(
-                f"{name} ({uuid.uuid4().hex[:8]})", [row[0] for row in taken.all()]
-            )
+            name = unique_dataset_name(name, [row[0] for row in taken.all()])
+
             dataset = Dataset(
                 owner_id=owner_id,
                 name=name,
                 storage_path=storage_path,
                 source="upload",
-                size_bytes=len(content),
+                size_bytes=datasets_registry.size_of(upload.file),
                 row_count=rows,
                 columns=columns,
                 label_column=label,
             )
             db.add(dataset)
-            await db.commit()
-        registered = True
-    except HTTPException:
-        raise
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail="The dataset could not be registered, please try again.",
-        ) from None
-    finally:
-        if not registered:
-            # No row points at the file: it would stay on the disk of the
-            # server until somebody deletes it by hand.
-            _remove_stored_upload(storage_path)
+            try:
+                await db.commit()
+            except IntegrityError:
+                # Two uploads of the same name arrived at the same time and
+                # the database refused the second one. The name is the only
+                # thing that collided: the file of this upload is fine, so
+                # it is registered with the next free name.
+                await db.rollback()
+                taken = await db.execute(
+                    select(Dataset.name).where(
+                        (Dataset.owner_id == owner_id) | (Dataset.owner_id.is_(None))
+                    )
+                )
+                name = unique_dataset_name(
+                    f"{name} ({uuid.uuid4().hex[:8]})", [row[0] for row in taken.all()]
+                )
+                dataset = Dataset(
+                    owner_id=owner_id,
+                    name=name,
+                    storage_path=storage_path,
+                    source="upload",
+                    size_bytes=datasets_registry.size_of(upload.file),
+                    row_count=rows,
+                    columns=columns,
+                    label_column=label,
+                )
+                db.add(dataset)
+                await db.commit()
+        except HTTPException:
+            raise
+        except IntegrityError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="The dataset could not be registered, please try again.",
+            ) from None
+        finally:
+            # The file is removed only when no row points at it. The check is
+            # made in a new session: the session of the request may be
+            # broken, and a row that was written has to keep its file.
+            await _remove_the_file_if_no_dataset_points_at_it(storage_path)
 
     await db.refresh(dataset)
     logger.info(
@@ -860,6 +872,30 @@ async def upload_dataset(
         rows,
     )
     return dataset_to_dict(dataset)
+
+
+async def _remove_the_file_if_no_dataset_points_at_it(storage_path: str) -> None:
+    """Remove the file of an upload that was not registered.
+
+    A file that no row points at is a file that nobody can reach: it would
+    stay on the disk of the server until somebody deletes it by hand. The
+    check is made in a new session, because the session of the request may
+    be in a failed state - and because a row that was written before a
+    cancellation has to keep its file.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            found = await session.execute(
+                select(Dataset.id).where(Dataset.storage_path == storage_path)
+            )
+            if found.scalar() is not None:
+                return
+    except Exception:  # pragma: no cover - the safety net
+        logger.warning(
+            "The file of the upload %s could not be checked", storage_path
+        )
+        return
+    _remove_stored_upload(storage_path)
 
 
 async def _dataset_for_user(
@@ -895,14 +931,6 @@ async def _dataset_for_training(
     names a Hugging Face dataset, or the model is a reinforcement learning
     model, which trains in an environment and needs no data.
     """
-    if payload.hf_dataset_url and (payload.dataset_id is not None or payload.dataset_name):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "A request carries either a dataset of the registry or a "
-                "Hugging Face dataset, not both."
-            ),
-        )
     if payload.hf_dataset_url:
         return None, None
 
@@ -958,6 +986,18 @@ async def train_model_endpoint(payload: TrainRequest, current_user: User = Depen
     # The requested optimisation metric is passed through untouched: resolving or
     # remapping it here would hide the training internals from the HTTP layer and
     # would silently optimise for a different metric than the one requested.
+    if payload.hf_dataset_url and (
+        payload.dataset_id is not None or payload.dataset_name
+    ):
+        # A request carries either a dataset of the registry or a Hugging Face
+        # dataset, not both: one of them would be ignored silently.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A request carries either a dataset of the registry or a "
+                "Hugging Face dataset, not both."
+            ),
+        )
     if _needs_a_dataset(payload.model_name):
         dataset, storage_path = await _dataset_for_training(payload, current_user, db)
     else:

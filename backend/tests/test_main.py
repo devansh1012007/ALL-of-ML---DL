@@ -70,7 +70,7 @@ def test_train_with_an_unknown_dataset_is_rejected(client, auth):
     """A dataset that does not exist is a 404, not a failed training."""
     payload = {
         "model_name": "Logistic_Regression",
-        "dataset_name": "missing_dataset.csv",
+        "dataset_name": "missing_dataset",
         "label_column": "label",
         "test_size": 0.2,
         "random_state": 42,
@@ -80,4 +80,32 @@ def test_train_with_an_unknown_dataset_is_rejected(client, auth):
     response = client.post("/api/v1/ml/train", headers=auth, json=payload)
 
     assert response.status_code == 404
-    assert "missing_dataset.csv" in response.json()["detail"]
+    assert "missing_dataset" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["/etc/passwd", "../../etc/passwd", "data/../../etc/passwd", "uploads/1/x.csv"],
+)
+def test_train_with_a_path_is_rejected(client, auth, name):
+    """A name that looks like a path is a name that does not exist.
+
+    The client never sends a path: the name is a lookup in the registry, and
+    the registry holds no path that leaves the datasets root.
+    """
+    response = client.post(
+        "/api/v1/ml/train",
+        headers=auth,
+        json={
+            "model_name": "Logistic_Regression",
+            "dataset_name": name,
+            "label_column": "label",
+            "test_size": 0.2,
+            "random_state": 42,
+            "hyperparameters": {},
+            "mode": "manual",
+        },
+    )
+
+    assert response.status_code == 404, response.text
+    assert name in response.json()["detail"]
