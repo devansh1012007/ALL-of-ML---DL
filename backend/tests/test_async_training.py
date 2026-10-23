@@ -209,13 +209,27 @@ def test_a_run_that_a_restart_interrupted_is_failed_at_the_next_start(client, au
     import asyncio
 
     from backend.app.main import reap_the_interrupted_runs
-    from backend.app.models import TrainingRun
+    from backend.app.models import TrainingRun, User
     from backend.app.database import AsyncSessionLocal
+    from sqlalchemy import select
 
-    async def leave_a_run_running():
+    # Register a user through the API so the owner_id is real and independent
+    # of the order in which the tests run.
+    client.post("/api/v1/register", json={"username": "reaper_user", "password": "secret123"})
+    reaper_token = client.post(
+        "/token", data={"username": "reaper_user", "password": "secret123"}
+    ).json()["access_token"]
+    reaper_auth = {"Authorization": f"Bearer {reaper_token}"}
+
+    async def owner_id_for(username: str) -> int:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(User).where(User.username == username))
+            return result.scalar_one().id
+
+    async def leave_a_run_running(owner_id: int):
         async with AsyncSessionLocal() as session:
             run = TrainingRun(
-                owner_id=1,
+                owner_id=owner_id,
                 model_name="Logistic_Regression",
                 dataset_source="local",
                 dataset_tag="sample_customer_churn.csv",
@@ -227,11 +241,12 @@ def test_a_run_that_a_restart_interrupted_is_failed_at_the_next_start(client, au
             await session.commit()
             return run.id
 
-    run_id = asyncio.run(leave_a_run_running())
+    owner_id = asyncio.run(owner_id_for("reaper_user"))
+    run_id = asyncio.run(leave_a_run_running(owner_id))
 
     asyncio.run(reap_the_interrupted_runs())
 
-    response = client.get(f"/api/v1/ml/runs/{run_id}", headers=auth)
+    response = client.get(f"/api/v1/ml/runs/{run_id}", headers=reaper_auth)
     assert response.status_code == 200, response.text
     run = response.json()
     assert run["status"] == "failed", run
