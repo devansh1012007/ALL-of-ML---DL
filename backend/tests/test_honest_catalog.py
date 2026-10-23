@@ -173,6 +173,40 @@ def test_clustering_reports_silhouette_and_noise_count():
     assert metrics_db["silhouette"] is None
 
 
+def test_clustering_silhouette_is_computed_when_some_points_are_noise():
+    """DBSCAN that leaves some points as noise still reports a silhouette.
+
+    The silhouette matrix is filtered to the non-noise points, so a shape
+    mismatch between X and the labels can never silence the score.
+    Regression test for the mixed noise case.
+    """
+    X = pd.DataFrame(
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.1, 0.0],
+                [0.0, 0.1],
+                [10.0, 10.0],
+                [10.1, 10.0],
+                [10.0, 10.1],
+                [5.0, 5.0],
+                [5.1, 5.2],
+                [4.9, 5.1],
+                [100.0, 100.0],
+            ],
+            dtype=float,
+        ),
+        columns=["f0", "f1"],
+    )
+
+    metrics, _model = model_training._train_clustering(
+        "DBSCAN", X, {"eps": 0.8, "min_samples": 2}
+    )
+    assert metrics["noise_count"] > 0
+    assert metrics["silhouette"] is not None
+    assert metrics["cluster_count"] >= 2
+
+
 def test_auto_search_ranks_clustering_candidates(
     classification_dataset, isolated_model_dir
 ):

@@ -1207,7 +1207,10 @@ def _train_clustering(model_name: str, X: pd.DataFrame, params: Dict[str, Any]) 
     non_noise = labels_arr[labels_arr != -1]
     if len(np.unique(non_noise)) >= 2 and len(non_noise) >= 2:
         try:
-            silhouette = float(silhouette_score(X, non_noise))
+            # silhouette_score compares samples that share the same feature
+            # matrix: X is filtered to the non-noise points, exactly like
+            # non_noise, so a run with noise points still gets a silhouette.
+            silhouette = float(silhouette_score(X[labels_arr != -1], non_noise))
         except Exception:
             silhouette = None
 
