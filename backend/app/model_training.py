@@ -18,7 +18,7 @@ from sklearn.manifold import TSNE
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.mixture import GaussianMixture
-from sklearn.metrics import accuracy_score, mean_squared_error, r2_score
+from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, silhouette_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.svm import SVC, SVR
@@ -140,6 +140,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "K-Means clustering on tabular data.",
         "params": {"n_clusters": 8, "random_state": 42},
         "optimization": ["n_clusters"],
+        "implemented": True,
         "test_results": {
             "expected_silhouette": (0.40, 0.80),
             "best_for": ["customer_segmentation", "data_exploration", "large_scale_clustering"],
@@ -155,6 +156,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "HMM-based time-series modeling.",
         "params": {"n_components": 4, "covariance_type": "diag", "n_iter": 100},
         "optimization": ["n_components"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.65, 0.85),
             "best_for": ["sequence_prediction", "behavior_analysis", "signal_detection"],
@@ -167,6 +169,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Gaussian mixture modeling for clustering.",
         "params": {"n_components": 3, "covariance_type": "full", "random_state": 42},
         "optimization": ["n_components"],
+        "implemented": True,
         "test_results": {
             "expected_silhouette": (0.35, 0.75),
             "best_for": ["probabilistic_clustering", "mixture_modeling"],
@@ -179,6 +182,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Agglomerative hierarchical clustering.",
         "params": {"n_clusters": 4, "linkage": "ward"},
         "optimization": ["n_clusters"],
+        "implemented": True,
         "test_results": {
             "expected_silhouette": (0.30, 0.70),
             "best_for": ["dendrogram_analysis", "small_to_medium_datasets"],
@@ -191,6 +195,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Principal Component Analysis for dimensionality reduction (often used before clustering).",
         "params": {"n_components": 2, "svd_solver": "auto", "random_state": 42},
         "optimization": ["n_components"],
+        "implemented": True,
         "test_results": {
             "expected_explained_variance": (0.5, 0.95),
             "best_for": ["dimensionality_reduction", "visualization", "preprocessing"],
@@ -203,6 +208,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "t-distributed Stochastic Neighbor Embedding for visualization and embedding.",
         "params": {"n_components": 2, "perplexity": 30.0, "learning_rate": 200.0, "random_state": 42},
         "optimization": ["n_components", "perplexity"],
+        "implemented": True,
         "test_results": {
             "expected_quality": (0.4, 0.9),
             "best_for": ["visualization", "small_datasets", "embedding"],
@@ -215,6 +221,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "UMAP for fast dimensionality reduction and visualization.",
         "params": {"n_components": 2, "n_neighbors": 15, "min_dist": 0.1, "random_state": 42},
         "optimization": ["n_components", "n_neighbors"],
+        "implemented": True,
         "test_results": {
             "expected_quality": (0.45, 0.92),
             "best_for": ["visualization", "embedding", "preprocessing"],
@@ -227,6 +234,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Density-based clustering using DBSCAN.",
         "params": {"eps": 0.5, "min_samples": 5, "metric": "euclidean"},
         "optimization": ["eps", "min_samples"],
+        "implemented": True,
         "test_results": {
             "expected_silhouette": (0.2, 0.75),
             "best_for": ["noise_detection", "arbitrary_shape_clusters", "spatial_data"],
@@ -239,6 +247,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Hierarchical density-based clustering (HDBSCAN).",
         "params": {"min_cluster_size": 5, "min_samples": None},
         "optimization": ["min_cluster_size", "min_samples"],
+        "implemented": True,
         "test_results": {
             "expected_quality": (0.3, 0.9),
             "best_for": ["robust_density_clustering", "variable_density"],
@@ -258,6 +267,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "n_jobs": -1,
         },
         "optimization": ["n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.75, 0.95),
             "best_for": ["tabular_classification", "feature_importance", "mixed_feature_types"],
@@ -276,6 +286,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "random_state": 42,
         },
         "optimization": ["C", "penalty"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.70, 0.90),
             "best_for": ["linear_separable_data", "probability_calibration", "interpretability"],
@@ -288,6 +299,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Multiple Linear Regression for numeric prediction.",
         "params": {"fit_intercept": True},
         "optimization": ["fit_intercept"],
+        "implemented": True,
         "test_results": {
             "expected_r2": (0.60, 0.95),
             "best_for": ["linear_regression", "coefficient_analysis", "small_datasets"],
@@ -306,6 +318,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "n_jobs": -1,
         },
         "optimization": ["n_neighbors", "p"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.65, 0.90),
             "best_for": ["non_linear_boundaries", "small_to_medium_datasets"],
@@ -326,6 +339,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "tol": 1e-3,
         },
         "optimization": ["C", "kernel", "gamma"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.75, 0.95),
             "best_for": ["high_dimensional_data", "binary_classification", "kernel_methods"],
@@ -346,6 +360,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "random_state": 42,
         },
         "optimization": ["n_estimators", "learning_rate", "max_depth"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.80, 0.95),
             "best_for": ["time_series_forecasting", "gradient_boosting", "feature_interactions"],
@@ -366,6 +381,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "random_state": 42,
         },
         "optimization": ["n_estimators", "learning_rate", "num_leaves"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.80, 0.96),
             "best_for": ["fast_training", "large_datasets", "memory_efficiency"],
@@ -385,6 +401,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "random_state": 42,
         },
         "optimization": ["iterations", "learning_rate", "depth"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.78, 0.94),
             "best_for": ["categorical_features", "robustness", "automatic_feature_interaction"],
@@ -404,6 +421,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "training_steps": 10000,
         },
         "optimization": ["learning_rate", "n_steps"],
+        "implemented": True,
         "test_results": {
             "expected_reward": (100, 500),
             "best_for": ["continuous_control", "policy_optimization", "sample_efficiency"],
@@ -422,6 +440,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "training_steps": 10000,
         },
         "optimization": ["learning_rate", "buffer_size"],
+        "implemented": True,
         "test_results": {
             "expected_reward": (50, 300),
             "best_for": ["discrete_actions", "experience_replay", "exploration"],
@@ -439,7 +458,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "training_steps": 10000,
         },
         "optimization": ["learning_rate", "discount_factor"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_reward": (30, 200),
             "best_for": ["tabular_environments", "simple_mdp", "convergence_guarantee"],
             "typical_training_time_sec": 10,
@@ -458,7 +478,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "dropout_rate": 0.1,
         },
         "optimization": ["latent_dim", "learning_rate"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_reconstruction_mse": (0.01, 0.1),
             "best_for": ["dimensionality_reduction", "anomaly_detection", "feature_extraction"],
             "typical_training_time_sec": 12,
@@ -470,6 +491,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Encoder-decoder text modeling using BERT2BERT.",
         "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "bert-base-uncased"},
         "optimization": ["learning_rate"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.82, 0.96),
             "best_for": ["seq2seq_tasks", "text_generation", "multilingual_support"],
@@ -482,6 +504,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Self-attention transformer for sequence tasks.",
         "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "distilbert-base-uncased"},
         "optimization": ["learning_rate"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.85, 0.95),
             "best_for": ["text_classification", "attention_mechanisms", "efficient_models"],
@@ -494,6 +517,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Sequence-to-sequence training for text generation.",
         "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "t5-small"},
         "optimization": ["learning_rate"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.80, 0.92),
             "best_for": ["translation", "summarization", "paraphrase_generation"],
@@ -506,6 +530,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "UL2-based language fine-tuning.",
         "params": {"epochs": 1, "batch_size": 4, "learning_rate": 2e-5, "model_name": "google/ul2"},
         "optimization": ["learning_rate"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.83, 0.93),
             "best_for": ["unified_text_tasks", "multitask_learning", "versatile_models"],
@@ -523,7 +548,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "weight_decay": 0.0,
         },
         "optimization": ["learning_rate"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.75, 0.92),
             "best_for": ["graph_classification", "node_embedding", "knowledge_graphs"],
             "typical_training_time_sec": 20,
@@ -542,6 +568,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "bert-base-uncased",
         },
         "optimization": ["learning_rate", "weight_decay"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.88, 0.96),
             "best_for": ["text_classification", "sentiment_analysis", "nli_tasks"],
@@ -561,6 +588,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "distilbert-base-uncased",
         },
         "optimization": ["learning_rate", "weight_decay"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.85, 0.94),
             "best_for": ["lightweight_models", "mobile_deployment", "fast_inference"],
@@ -580,6 +608,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "distilgpt2",
         },
         "optimization": ["learning_rate", "weight_decay"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.82, 0.92),
             "best_for": ["text_generation", "language_modeling", "autoregressive_tasks"],
@@ -599,6 +628,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "meta-llama/Llama-2-7b",
         },
         "optimization": ["learning_rate", "weight_decay"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.87, 0.97),
             "best_for": ["instruction_following", "dialogue", "code_generation"],
@@ -617,7 +647,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "dropout": 0.0,
         },
         "optimization": ["hidden_size", "learning_rate"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.70, 0.90),
             "best_for": ["time_series", "sequence_modeling", "long_dependencies"],
             "typical_training_time_sec": 18,
@@ -636,6 +667,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "sentence-transformers/all-MiniLM-L6-v2",
         },
         "optimization": ["learning_rate", "weight_decay"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.82, 0.93),
             "best_for": ["semantic_similarity", "embedding_tasks", "fast_models"],
@@ -658,6 +690,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "resnet18",
         },
         "optimization": ["learning_rate", "weight_decay", "optimizer"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.85, 0.97),
             "best_for": ["image_classification", "transfer_learning", "object_recognition"],
@@ -680,6 +713,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "resnet50",
         },
         "optimization": ["learning_rate", "weight_decay", "optimizer"],
+        "implemented": True,
         "test_results": {
             "expected_accuracy": (0.87, 0.98),
             "best_for": ["high_resolution_images", "fine_grained_classification", "production_systems"],
@@ -692,7 +726,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "RNN for sequential and time-series prediction.",
         "params": {"epochs": 5, "batch_size": 32, "learning_rate": 1e-3, "hidden_size": 64},
         "optimization": ["hidden_size", "learning_rate"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.65, 0.85),
             "best_for": ["sequential_data", "basic_recurrence", "educational_purposes"],
             "typical_training_time_sec": 15,
@@ -704,7 +739,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "State-space model inspired sequence modeling.",
         "params": {"epochs": 5, "batch_size": 32, "learning_rate": 1e-3, "hidden_size": 64},
         "optimization": ["hidden_size"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.72, 0.88),
             "best_for": ["structured_state_modeling", "efficient_sequences", "long_range"],
             "typical_training_time_sec": 16,
@@ -716,7 +752,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Temporal convolutional network for sequences.",
         "params": {"epochs": 5, "batch_size": 32, "learning_rate": 1e-3, "num_channels": 16},
         "optimization": ["num_channels", "learning_rate"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.75, 0.90),
             "best_for": ["temporal_patterns", "parallel_processing", "long_sequences"],
             "typical_training_time_sec": 17,
@@ -728,7 +765,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "description": "Vision Transformer for image classification.",
         "params": {"epochs": 3, "batch_size": 16, "learning_rate": 1e-4, "model_name": "google/vit-base-patch16-224"},
         "optimization": ["learning_rate"],
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.86, 0.96),
             "best_for": ["modern_architectures", "attention_based_vision", "large_scale_data"],
             "typical_training_time_sec": 40,
@@ -855,6 +893,8 @@ def list_available_models() -> List[Dict[str, Any]]:
                         "category": info.get("category", "custom"),
                         "optimization": info.get("optimization", []),
                         "test_results": info.get("test_results", {}),
+                        "planned_test_results": info.get("planned_test_results", {}),
+                        "implemented": info.get("implemented", True),
                         "supported": normalized in MODEL_CATALOG,
                     })
     if not available:
@@ -867,6 +907,8 @@ def list_available_models() -> List[Dict[str, Any]]:
                 "category": info.get("category", "custom"),
                 "optimization": info.get("optimization", []),
                 "test_results": info.get("test_results", {}),
+                "planned_test_results": info.get("planned_test_results", {}),
+                "implemented": info.get("implemented", True),
                 "supported": True,
             })
     return available
@@ -914,7 +956,7 @@ def infer_task_type(y: pd.Series) -> str:
 _LOWER_IS_BETTER_METRICS = ("mse", "rmse", "mae")
 
 # Metrics used to rank a candidate when the requested one is not reported by the run.
-_CANDIDATE_SCORE_KEYS = ("accuracy", "r2", "mse", "mean_reward")
+_CANDIDATE_SCORE_KEYS = ("accuracy", "r2", "mse", "mean_reward", "silhouette")
 
 
 def score_candidate(metrics: Dict[str, Any], optimize_metric: str) -> float:
@@ -1157,7 +1199,24 @@ def _train_clustering(model_name: str, X: pd.DataFrame, params: Dict[str, Any]) 
     if labels is None:
         labels = np.array([-1] * len(X))
 
-    metrics = {"cluster_count": int(pd.Series(labels).nunique()), "sample_count": int(len(labels))}
+    labels_arr = np.asarray(labels)
+    noise_count = int((labels_arr == -1).sum())
+    # The silhouette score is only defined for two or more clusters and cannot
+    # use DBSCAN's noise label (-1): it is excluded from the computation.
+    silhouette = None
+    non_noise = labels_arr[labels_arr != -1]
+    if len(np.unique(non_noise)) >= 2 and len(non_noise) >= 2:
+        try:
+            silhouette = float(silhouette_score(X, non_noise))
+        except Exception:
+            silhouette = None
+
+    metrics = {
+        "cluster_count": int(pd.Series(labels).nunique()),
+        "sample_count": int(len(labels)),
+        "noise_count": noise_count,
+        "silhouette": silhouette,
+    }
     try:
         setattr(model, "_labels", labels)
     except Exception:
@@ -1445,7 +1504,7 @@ def _train_resnet_image_model(model_name: str, dataset_name: str, hyperparameter
             total_samples += labels.size(0)
     metrics = {
         "task_type": "classification",
-        "accuracy": safe_json(correct / total_samples if total_samples else None),
+        "train_accuracy": safe_json(correct / total_samples if total_samples else None),
         "train_loss": safe_json(running_loss / total_samples if total_samples else None),
         "sample_count": total_samples,
         "classes": num_classes,
@@ -1494,6 +1553,15 @@ def train_model(
     user_hyperparameters = hyperparameters
     
     model_def = get_model_entry(model_name)
+    
+    # A placeholder entry advertises a model it cannot train: fail fast instead of
+    # silently training something else (an MLP in disguise for Autoencoder/GNN/LSTM/...,
+    # a ResNet for ViT, a stub for Q-Learning). No artifact is written for such a run.
+    if not model_def.get("implemented", True):
+        raise ValueError(
+            f"Model '{model_name}' is not implemented: it does not train what the "
+            f"catalog advertises. Pick an implemented model or wait for a real trainer."
+        )
     
     def _effective_params(suggested: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Merge the catalog defaults, the mode suggestions and the client's values.

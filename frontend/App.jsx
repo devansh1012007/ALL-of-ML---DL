@@ -1,4 +1,4 @@
-import React, { useState, useEffect, createContext, useContext, useCallback } from 'react';
+import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import { 
   Activity, Database, Server, PlusCircle, LogOut, ChevronRight, 
   Play, CheckCircle, XCircle, Clock, Download, Lock, User
@@ -378,14 +378,21 @@ const ModelsCatalog = () => {
           <div key={model.name} className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 flex flex-col hover:border-blue-700/50 transition-colors">
             <div className="flex justify-between items-start mb-2">
               <h3 className="text-lg font-semibold text-white">{model.name}</h3>
-              <span className="px-2 py-1 bg-zinc-800 text-zinc-300 text-xs rounded-full uppercase tracking-wider">
-                {model.category}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-1 bg-zinc-800 text-zinc-300 text-xs rounded-full uppercase tracking-wider">
+                  {model.category}
+                </span>
+                {model.implemented === false && (
+                  <span className="px-2 py-1 bg-red-900/20 text-red-400 border border-red-700/50 text-xs rounded-full uppercase tracking-wider">
+                    Not implemented
+                  </span>
+                )}
+              </div>
             </div>
             <p className="text-sm text-zinc-400 mb-4 flex-grow">{model.description}</p>
             
             {/* Test Results Summary */}
-            {model.test_results && (
+            {model.implemented === false ? null : model.test_results ? (
               <div className="mb-4 p-3 bg-zinc-950/50 rounded border border-zinc-800/50 space-y-2">
                 {getAccuracyRange(model.test_results) && (
                   <div className="text-xs">
@@ -419,6 +426,10 @@ const ModelsCatalog = () => {
                   </div>
                 )}
               </div>
+            ) : (
+              <p className="mb-4 p-3 bg-zinc-950/50 rounded border border-zinc-800/50 text-xs text-zinc-500">
+                no benchmark data yet
+              </p>
             )}
 
             {/* Parameters */}
@@ -546,6 +557,8 @@ const RunsDashboard = ({ navigate }) => {
 const RunDetails = ({ runId, navigate }) => {
   const { apiFetch } = useContext(AuthContext);
   const [run, setRun] = useState(null);
+  const [model, setModel] = useState(null);
+  const modelFetchedRef = useRef(null);
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(false);
 
@@ -580,6 +593,22 @@ const RunDetails = ({ runId, navigate }) => {
       if (timer) clearTimeout(timer);
     };
   }, [apiFetch, runId]);
+
+  // The run only names its model: look up the catalog entry to know whether
+  // the model is implemented. A placeholder model was never trained, so it
+  // has no metrics - that is different from a run still waiting for metrics.
+  // Fetched once per run; re-fetched when the run id changes.
+  useEffect(() => {
+    if (!run?.model_name) return;
+    if (modelFetchedRef.current === runId) return;
+    modelFetchedRef.current = runId;
+    setModel(null);
+    apiFetch(`/api/v1/ml/model-details?model_name=${encodeURIComponent(run.model_name)}`)
+      .then(m => setModel(m))
+      // The catalog lookup is secondary: if it fails the run still renders,
+      // just without the "not implemented" banner.
+      .catch(() => {});
+  }, [runId, run?.model_name, apiFetch]);
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -657,6 +686,10 @@ const RunDetails = ({ runId, navigate }) => {
             {run.status === 'failed' ? (
               <div className="bg-red-950/30 border border-red-900 rounded p-4 text-red-400 font-mono text-sm whitespace-pre-wrap">
                 {run.metrics?.error || "Unknown execution error."}
+              </div>
+            ) : model && model.implemented === false ? (
+              <div className="bg-red-900/20 border border-red-700/50 rounded p-4 text-red-400 text-sm">
+                Not implemented
               </div>
             ) : run.metrics ? (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
@@ -1243,14 +1276,21 @@ const NewJob = ({ navigate }) => {
                    className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
                  >
                    <option value="">-- Select Architecture --</option>
-                   {models.map(m => <option key={m.name} value={m.name}>{m.name} ({m.category})</option>)}
+                   {models.map(m => (
+                     <option key={m.name} value={m.name} disabled={m.implemented === false}>
+                       {m.name} ({m.category}){m.implemented === false ? ' — not implemented' : ''}
+                     </option>
+                   ))}
                  </select>
                  {modelsError && (
                    <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 mt-2">
                      Could not load models — {modelsError}. Using the built-in fallback list.
                    </p>
                  )}
-              </div>
+                 <p className="text-xs text-zinc-500 mt-1">
+                   Disabled models are not yet implemented.
+                 </p>
+               </div>
 
              <div>
                <label className="block text-sm font-medium text-zinc-400 mb-1">Training Mode</label>

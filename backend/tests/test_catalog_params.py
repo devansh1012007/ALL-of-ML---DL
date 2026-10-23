@@ -83,6 +83,51 @@ EXPECTED_CATEGORY_BY_MODEL = {
     "ViT": "vision",
 }
 
+# Source of truth for the catalog models that are actually implemented (they
+# train end to end). Deliberately NOT derived from ``MODEL_CATALOG``: a
+# silently-changed ``implemented`` flag must not be able to slip through this
+# expectation table, the same way ``EXPECTED_CATEGORY_BY_MODEL`` guards the
+# routing categories.
+IMPLEMENTED = frozenset(
+    {
+        "BERT",
+        "BERT2BERT",
+        "CATboost_timeseries",
+        "DBSCAN",
+        "DQN",
+        "DistilBERT",
+        "GMM",
+        "GPT",
+        "HDBSCAN",
+        "HMM_timeseries",
+        "Hierarchical_Clustering",
+        "K-Mean",
+        "KNN",
+        "LLaMA",
+        "Logistic_Regression",
+        "MLR",
+        "MiniLM",
+        "PCA",
+        "PPO",
+        "Random_Forest",
+        "ResNet",
+        "ResNet50",
+        "SVM",
+        "UL2",
+        "UMAP",
+        "XGboost_timeseries",
+        "lightGBM_timeseries",
+        "self-attenetion_transformer",
+        "seq2seq",
+        "t-SNE",
+    }
+)
+
+# Catalog models that are advertised but not implemented: ``train_model()``
+# fails fast for them before any trainer runs and before any artifact is
+# written. The complement of ``IMPLEMENTED`` within the catalog.
+NOT_IMPLEMENTED = set(MODEL_CATALOG) - IMPLEMENTED
+
 # The trainer each category has to select. "time-series" is the category of the
 # boosting models: they train as tabular models through build_model(), while
 # "timeseries" (LSTM/RNN/SSM/TCN) selects the torch trainer.
@@ -273,6 +318,10 @@ def test_every_catalog_model_has_an_expected_routing():
     """The expectation table has to cover the catalog exactly."""
     assert sorted(MODEL_CATALOG) == sorted(EXPECTED_CATEGORY_BY_MODEL)
     assert set(EXPECTED_CATEGORY_BY_MODEL.values()) <= set(CATEGORY_TO_TRAINER)
+    # The source-of-truth set of implemented models has to agree with the
+    # ``implemented`` flag of every catalog entry: a silently-changed flag
+    # must fail this assertion instead of slipping through.
+    assert IMPLEMENTED == {k for k, v in MODEL_CATALOG.items() if v.get("implemented")}
 
 
 @pytest.mark.parametrize("model_name", sorted(MODEL_CATALOG))
@@ -329,6 +378,20 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
     except Exception as exc:  # noqa: BLE001 - the error is inspected below
         error = exc
 
+    # Placeholder models fail fast in ``train_model()``: the error is raised
+    # before any trainer runs and before any artifact is written, so no trainer
+    # was dispatched and there is no artifact.
+    if model_name in NOT_IMPLEMENTED:
+        assert error is not None, f"{model_name} is a placeholder but did not raise"
+        assert "is not implemented" in str(error), (
+            f"{model_name} raised {error!r}, which is not a not-implemented error"
+        )
+        assert recorded_trainers == [], (
+            f"{model_name} dispatched to {recorded_trainers} although it is a placeholder"
+        )
+        assert artifact is None, f"{model_name} wrote an artifact although it is a placeholder"
+        return
+
     assert recorded_trainers == [expected_trainer], (
         f"{model_name} (category {expected_category}) was routed to {recorded_trainers}, "
         f"but {expected_trainer} is expected"
@@ -352,7 +415,7 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         assert metrics["classes"] == 2
         # Every image of the folder was seen in every epoch.
         assert metrics["sample_count"] == metrics["epochs"] * 2
-        assert metrics["accuracy"] is not None
+        assert metrics["train_accuracy"] is not None
         assert Path(artifact).exists()
     elif model_name in OFFLINE_TRAINABLE_MODELS:
         if expected_category == "clustering":
@@ -380,13 +443,19 @@ def test_the_artifact_of_the_torch_trainer_can_be_loaded_back(classification_dat
     The network used to be a class defined *inside* the trainer. Pickle stores a
     class by reference, so an artifact of a function-local class can never be
     loaded again: the training "succeeded", the run reported an artifact and the
-    artifact was useless. The test loads the artifact back and runs the loaded
-    network.
+    artifact was useless. ``SimpleNet`` now lives at module level on purpose, so
+    an artifact built from it can be loaded back and run.
+
+    ``LSTM`` is now a placeholder and no longer reaches the torch trainer through
+    ``train_model()``, so the artifact contract is exercised on ``SimpleNet``
+    directly.
     """
     if model_training.torch is None:
         pytest.skip("torch is not installed")
 
-    _metrics, _source, _tag, artifact = _train("LSTM", classification_dataset)
+    input_dim = _feature_count(classification_dataset)
+    model = model_training.SimpleNet(input_dim=input_dim, output_dim=1)
+    artifact = model_training.write_artifact("SimpleNet", model)
     assert Path(artifact).exists()
 
     loaded = joblib.load(artifact)
@@ -395,7 +464,7 @@ def test_the_artifact_of_the_torch_trainer_can_be_loaded_back(classification_dat
         "SimpleNet is expected"
     )
     # The loaded network has to be usable: a forward pass on a batch of rows.
-    outputs = loaded(model_training.torch.zeros(2, _feature_count(classification_dataset)))
+    outputs = loaded(model_training.torch.zeros(2, input_dim))
     assert tuple(outputs.shape) == (2, 1)
 
 
