@@ -174,8 +174,8 @@ Limitations:
 
 - The clustering entries (`K-Mean`, `GMM`, `Hierarchical_Clustering`, `DBSCAN`, `HDBSCAN`, `PCA`, `t-SNE`, `UMAP`, `HMM_timeseries`) all use the `clustering` category and are trained by `_train_clustering(...)`.
 - Their constructors are called with the merged params verbatim (`KMeans(**params)`, `GaussianMixture(**params)`, ...), so the entry's `params` must only contain keys that constructor accepts, and the trainer-owned keys (`test_size`) are filtered out there as well. The merged params are the catalog defaults, the mode's suggestions and the client's values, with the preset applied once (see "Presets").
-- `PCA`, `t-SNE` and `UMAP` are embeddings rather than clusterers: they report `embedding_shape` / `sample_count` instead of `cluster_count`.
-- Optional dependencies: `HDBSCAN` needs `hdbscan`, `UMAP` needs `umap`, `HMM_timeseries` needs `hmmlearn`. When the library is missing the trainer raises `RuntimeError("<lib> is not installed")`.
+- `PCA`, `t-SNE` and `UMAP` are embeddings rather than clusterers: they report `embedding_shape` / `sample_count` instead of `cluster_count`, plus a real quality number (`explained_variance` for PCA, `trustworthiness` for t-SNE and UMAP; the latter needs at least 12 rows).
+- `HDBSCAN` uses `sklearn.cluster.HDBSCAN` (scikit-learn >= 1.3), `UMAP` needs `umap-learn` (in `requirements.txt`) and `HMM_timeseries` needs `hmmlearn`. When a library is missing the trainer raises `RuntimeError("<lib> is not installed")`.
 
 Frontend integration
 -------------------

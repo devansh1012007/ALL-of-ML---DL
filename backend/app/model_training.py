@@ -12,9 +12,9 @@ import joblib
 import numpy as np
 import pandas as pd
 from datasets import load_dataset
-from sklearn.cluster import AgglomerativeClustering, KMeans, DBSCAN
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, HDBSCAN, KMeans
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from sklearn.manifold import TSNE, trustworthiness
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.mixture import GaussianMixture
@@ -77,11 +77,6 @@ try:
     import umap
 except ImportError:
     umap = None
-
-try:
-    import hdbscan
-except ImportError:
-    hdbscan = None
 
 try:
     from stable_baselines3 import DQN, PPO
@@ -210,7 +205,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "optimization": ["n_components", "perplexity"],
         "implemented": True,
         "test_results": {
-            "expected_quality": (0.4, 0.9),
+            "expected_trustworthiness": (0.8, 0.99),
             "best_for": ["visualization", "small_datasets", "embedding"],
             "typical_training_time_sec": 3,
             "scalability": "low",
@@ -223,7 +218,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "optimization": ["n_components", "n_neighbors"],
         "implemented": True,
         "test_results": {
-            "expected_quality": (0.45, 0.92),
+            "expected_trustworthiness": (0.8, 0.99),
             "best_for": ["visualization", "embedding", "preprocessing"],
             "typical_training_time_sec": 2,
             "scalability": "high",
@@ -249,7 +244,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "optimization": ["min_cluster_size", "min_samples"],
         "implemented": True,
         "test_results": {
-            "expected_quality": (0.3, 0.9),
+            "expected_silhouette": (0.3, 0.9),
             "best_for": ["robust_density_clustering", "variable_density"],
             "typical_training_time_sec": 4,
             "scalability": "medium",
@@ -537,11 +532,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "BERT2BERT": {
         "category": "nlp",
-        "description": "Encoder-decoder text modeling using BERT2BERT.",
+        "description": "Not implemented: it needs an encoder-decoder trainer, and this repository only fine-tunes sequence classifiers (so it would train a plain BERT classifier).",
         "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "bert-base-uncased"},
         "optimization": ["learning_rate"],
-        "implemented": True,
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.82, 0.96),
             "best_for": ["seq2seq_tasks", "text_generation", "multilingual_support"],
             "typical_training_time_sec": 30,
@@ -550,12 +545,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "self-attenetion_transformer": {
         "category": "nlp",
-        "description": "Self-attention transformer for sequence tasks.",
+        "description": "DistilBERT text classification (a self-attention transformer encoder with a new classification head).",
         "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "distilbert-base-uncased"},
         "optimization": ["learning_rate"],
         "implemented": True,
         "test_results": {
-            "expected_accuracy": (0.85, 0.95),
             "best_for": ["text_classification", "attention_mechanisms", "efficient_models"],
             "typical_training_time_sec": 25,
             "scalability": "high",
@@ -563,11 +557,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "seq2seq": {
         "category": "nlp",
-        "description": "Sequence-to-sequence training for text generation.",
+        "description": "Not implemented: it needs a text-generation trainer, and this repository only fine-tunes sequence classifiers.",
         "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "t5-small"},
         "optimization": ["learning_rate"],
-        "implemented": True,
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.80, 0.92),
             "best_for": ["translation", "summarization", "paraphrase_generation"],
             "typical_training_time_sec": 35,
@@ -576,11 +570,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "UL2": {
         "category": "nlp",
-        "description": "UL2-based language fine-tuning.",
+        "description": "Not implemented: it needs a text-generation trainer and a ~20B-parameter checkpoint, far beyond what this repository trains.",
         "params": {"epochs": 1, "batch_size": 4, "learning_rate": 2e-5, "model_name": "google/ul2"},
         "optimization": ["learning_rate"],
-        "implemented": True,
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.83, 0.93),
             "best_for": ["unified_text_tasks", "multitask_learning", "versatile_models"],
             "typical_training_time_sec": 40,
@@ -619,7 +613,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "optimization": ["learning_rate", "weight_decay"],
         "implemented": True,
         "test_results": {
-            "expected_accuracy": (0.88, 0.96),
             "best_for": ["text_classification", "sentiment_analysis", "nli_tasks"],
             "typical_training_time_sec": 28,
             "scalability": "high",
@@ -639,7 +632,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "optimization": ["learning_rate", "weight_decay"],
         "implemented": True,
         "test_results": {
-            "expected_accuracy": (0.85, 0.94),
             "best_for": ["lightweight_models", "mobile_deployment", "fast_inference"],
             "typical_training_time_sec": 18,
             "scalability": "high",
@@ -647,7 +639,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "GPT": {
         "category": "nlp",
-        "description": "GPT-style text fine-tuning.",
+        "description": "Not implemented: it needs a causal language-model trainer, and the sequence-classifier path cannot batch GPT-2 (no padding token is defined).",
         "params": {
             "epochs": 1,
             "batch_size": 8,
@@ -657,8 +649,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "distilgpt2",
         },
         "optimization": ["learning_rate", "weight_decay"],
-        "implemented": True,
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.82, 0.92),
             "best_for": ["text_generation", "language_modeling", "autoregressive_tasks"],
             "typical_training_time_sec": 25,
@@ -667,7 +659,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "LLaMA": {
         "category": "nlp",
-        "description": "LLaMA-based fine-tuning.",
+        "description": "Not implemented: it needs a causal language-model trainer and a gated 7B checkpoint that this repository cannot download or train.",
         "params": {
             "epochs": 1,
             "batch_size": 4,
@@ -677,8 +669,8 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "model_name": "meta-llama/Llama-2-7b",
         },
         "optimization": ["learning_rate", "weight_decay"],
-        "implemented": True,
-        "test_results": {
+        "implemented": False,
+        "planned_test_results": {
             "expected_accuracy": (0.87, 0.97),
             "best_for": ["instruction_following", "dialogue", "code_generation"],
             "typical_training_time_sec": 60,
@@ -706,7 +698,7 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "MiniLM": {
         "category": "nlp",
-        "description": "MiniLM text representation and classification.",
+        "description": "MiniLM text classification (fine-tunes the sentence-transformers MiniLM encoder with a new classification head).",
         "params": {
             "epochs": 1,
             "batch_size": 16,
@@ -718,7 +710,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "optimization": ["learning_rate", "weight_decay"],
         "implemented": True,
         "test_results": {
-            "expected_accuracy": (0.82, 0.93),
             "best_for": ["semantic_similarity", "embedding_tasks", "fast_models"],
             "typical_training_time_sec": 15,
             "scalability": "high",
@@ -1201,9 +1192,8 @@ def _train_clustering(model_name: str, X: pd.DataFrame, params: Dict[str, Any]) 
     elif model_name == "DBSCAN":
         model = DBSCAN(**estimator_params)
     elif model_name == "HDBSCAN":
-        if hdbscan is None:
-            raise RuntimeError("hdbscan is not installed")
-        model = hdbscan.HDBSCAN(**estimator_params)
+        # scikit-learn ships HDBSCAN since 1.3: no extra package is needed.
+        model = HDBSCAN(**estimator_params)
     elif model_name == "PCA":
         model = PCA(**estimator_params)
         is_embedding = True
@@ -1230,6 +1220,30 @@ def _train_clustering(model_name: str, X: pd.DataFrame, params: Dict[str, Any]) 
         except Exception:
             pass
         metrics = {"embedding_shape": tuple(embedding.shape), "sample_count": int(embedding.shape[0])}
+        # Real quality numbers, so that the catalog's advertised ranges are true:
+        # PCA reports the share of the variance it keeps, the neighbour-based
+        # embeddings (t-SNE, UMAP) report how well the local neighbourhoods
+        # survive the projection (trustworthiness, 0..1).
+        if hasattr(model, "explained_variance_ratio_"):
+            metrics["explained_variance"] = float(np.sum(model.explained_variance_ratio_))
+        else:
+            n_samples = int(embedding.shape[0])
+            # trustworthiness() compares nearest neighbours: it needs
+            # n_neighbors < n_samples / 2 (so at least 12 rows for 5 neighbours)
+            # and is quadratic in memory, so it is computed on at most 2000 points.
+            if n_samples >= 12:
+                try:
+                    features = np.asarray(X)
+                    if n_samples > 2000:
+                        idx = np.random.RandomState(0).choice(n_samples, 2000, replace=False)
+                        features, embedding_used = features[idx], embedding[idx]
+                    else:
+                        embedding_used = embedding
+                    metrics["trustworthiness"] = float(
+                        trustworthiness(features, embedding_used, n_neighbors=5)
+                    )
+                except Exception:
+                    pass
         return metrics, model
 
     # For clustering models, try common prediction patterns

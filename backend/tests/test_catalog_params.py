@@ -91,19 +91,16 @@ EXPECTED_CATEGORY_BY_MODEL = {
 IMPLEMENTED = frozenset(
     {
         "BERT",
-        "BERT2BERT",
         "CATboost_timeseries",
         "DBSCAN",
         "DQN",
         "DistilBERT",
         "GMM",
-        "GPT",
         "HDBSCAN",
         "HMM_timeseries",
         "Hierarchical_Clustering",
         "K-Mean",
         "KNN",
-        "LLaMA",
         "Logistic_Regression",
         "MLR",
         "MiniLM",
@@ -113,12 +110,10 @@ IMPLEMENTED = frozenset(
         "ResNet",
         "ResNet50",
         "SVM",
-        "UL2",
         "UMAP",
         "XGboost_timeseries",
         "lightGBM_timeseries",
         "self-attenetion_transformer",
-        "seq2seq",
         "t-SNE",
     }
 )
