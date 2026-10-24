@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feature/week1-honest-demo]
+  pull_request:
+    branches: [main]
+
+env:
+  # The application and the Alembic migrations share DATABASE_URL, so both
+  # talk to the same database. The app refuses to start on an unmigrated
+  # database, so CI migrates first and the suite runs against sqlite.
+  DATABASE_URL: sqlite+aiosqlite:////tmp/ci-backend.db
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install backend and frontend dependencies
+        run: |
+          scripts/install.sh --backend --frontend --cpu
+
+      - name: Migrate the database
+        run: |
+          cd backend && ../.venv/bin/python -m alembic upgrade head
+
+      - name: Verify no migration drift
+        run: |
+          cd backend && ../.venv/bin/python -m alembic check
+
+      - name: Run the test suite
+        run: .venv/bin/python -m pytest backend/tests
+
+      - name: Build the frontend
+        run: |
+          cd frontend && npm run build
