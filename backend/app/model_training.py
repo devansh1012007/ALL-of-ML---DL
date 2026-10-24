@@ -1121,8 +1121,9 @@ def suggest_hyperparameters(
 
     # Without the LLM the function returns the catalog parameters of the model as they
     # are: there is no heuristic that could add a value the catalog does not declare
-    # (an undeclared key would be rejected by the estimator constructor) and no grid
-    # search is implemented. A real search for the auto_tune mode is still TODO.
+    # (an undeclared key would be rejected by the estimator constructor). `auto_tune`
+    # and `auto_fine_tune` run a real randomized search over the model's `search_space`
+    # in `train_model()`; this function only provides the catalogue base.
     return base_params
 
 

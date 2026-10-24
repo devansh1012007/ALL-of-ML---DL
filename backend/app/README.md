@@ -201,8 +201,13 @@ Function limitations (detailed)
   - LLM output may not be valid JSON; the function strips some markdown wrappers and then `json.loads()` the response — malformed responses will raise errors.
   - The function only accepts suggested keys that the catalog entry declares for the model (`base_params`). The result is merged into the estimator constructor, so accepting an unknown key (e.g. `learning_rate` for `Logistic_Regression`) would raise `TypeError` during training.
   - **Without the LLM the function returns the catalog parameters of the model unchanged**: `suggest_hyperparameters(model, ...) == MODEL_CATALOG[model]["params"]` for every model. There is no heuristic left that could add a value, because a key the catalog does not declare is rejected by the estimator constructor.
-  - Consequence: the `auto_tune` and `auto_fine_tune` modes only re-apply the catalog values (`auto_fine_tune` additionally scales down `learning_rate` / `epochs` when the model declares them). The suggestions are merged into the base of the run, the preset is applied on top of them (see "Presets"). A **real grid or random search is not implemented**, so the mode description ("automatically searches for optimal parameters") does not describe the current behaviour.
-  - TODO: implement the search for the `auto_tune` mode, and let the LLM branch propose values for keys the catalog does not declare (with a per-estimator validation, otherwise the suggestion breaks the constructor call).
+  - Consequence: `auto_tune` runs a randomized hyperparameter search over the model's
+    curated `search_space` (`RandomizedSearchCV`, `n_iter = min(12, combinations)`,
+    `cv=3` with `cv=2` fallback on small folds, scoring accuracy for classification and
+    `r2` for regression) and reports `best_params` as `metrics["model_parameters"]` plus
+    `metrics["search_results"]`; `auto_fine_tune` runs the same search on a neighbourhood
+    of the base configuration; the preset is applied once on top of the merged base (see
+    "Presets"). Client-pinned hyperparameters are sampled out of the space and still win.
 
 2) `train_model(...)`
 - Synchronous execution: `train_model` is typically executed inside `run_in_threadpool()` (FastAPI endpoint). Long-running training will block the threadpool thread; for production use a job queue or background worker.
