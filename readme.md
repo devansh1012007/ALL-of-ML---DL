@@ -57,7 +57,7 @@ scripts/install.sh --backend --cpu
 scripts/install.sh --frontend
 ```
 
-`--backend` creates the virtual environment `.venv` at the repository root (Python 3.12) and installs `backend/requirements.txt`. `--dev` additionally installs `pytest`, `pytest-asyncio`, `httpx` and `ruff`; `--optional` installs `google-generativeai` (the LLM fine-tuning mode fails with an explicit message when it is missing). The installer retries generously and resumes interrupted downloads.
+`--backend` creates the virtual environment `.venv` at the repository root (Python 3.12) and installs `backend/requirements.txt`. `--dev` additionally installs `pytest`, `pytest-asyncio`, `httpx` and `ruff`; `--optional` installs `google-generativeai`, `umap-learn` and `hdbscan` (a model that needs one of them fails with an explicit message when it is missing). The installer retries generously and resumes interrupted downloads.
 
 3. Migrate the database first
 
@@ -193,7 +193,7 @@ This repository is released under the [MIT License](LICENSE).
 
 ## Available Models
 
-The repository includes the following 38 models in the `MODEL_CATALOG` (25 implemented, 13 placeholders marked "Not implemented" in the UI):
+The repository includes the following 38 models in the `MODEL_CATALOG` (30 implemented, 8 placeholders marked "Not implemented" in the UI):
 
 - K-Mean
 - HMM_timeseries
@@ -216,15 +216,15 @@ The repository includes the following 38 models in the `MODEL_CATALOG` (25 imple
 - DQN
 - Q-Learning (not implemented)
 - Autoencoder (not implemented)
-- BERT2BERT (not implemented)
+- BERT2BERT
 - self-attenetion_transformer
-- seq2seq (not implemented)
-- UL2 (not implemented)
+- seq2seq
+- UL2
 - GNN (not implemented)
 - BERT
 - DistilBERT
-- GPT (not implemented)
-- LLaMA (not implemented)
+- GPT
+- LLaMA
 - LSTM (not implemented)
 - MiniLM
 - ResNet

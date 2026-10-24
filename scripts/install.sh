@@ -143,7 +143,7 @@ install_backend() {
         log "the optional python dependencies"
         # They are optional: a model that needs one of them fails with an
         # explicit message when it is missing, the rest of the catalog works.
-        retry uv pip install --python "$PYTHON_BIN" google-generativeai || \
+        retry uv pip install --python "$PYTHON_BIN" google-generativeai umap-learn hdbscan || \
             warn "an optional dependency could not be installed, the models that need it will refuse to train"
     fi
 

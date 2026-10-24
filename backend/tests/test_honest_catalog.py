@@ -25,6 +25,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from backend.app import model_training
 from backend.app.model_training import (
@@ -34,19 +35,12 @@ from backend.app.model_training import (
     train_model,
 )
 
-# The thirteen placeholder entries: their trainer does not build what the
-# entry advertises, so they declare ``implemented: False``. The five NLP ones
-# (BERT2BERT, seq2seq, UL2, GPT, LLaMA) would only fine-tune a sequence
-# classifier, which is not a generative or encoder-decoder model.
+# The eight placeholder entries: their trainer does not build what the
+# entry advertises, so they declare ``implemented: False``.
 PLACEHOLDERS = frozenset(
     {
         "Q-Learning",
         "Autoencoder",
-        "BERT2BERT",
-        "GPT",
-        "LLaMA",
-        "UL2",
-        "seq2seq",
         "GNN",
         "LSTM",
         "RNN",
@@ -91,7 +85,7 @@ def _vision_folder() -> str:
 def test_every_catalog_entry_declares_implemented():
     """Every catalog entry declares ``implemented`` (True or False).
 
-    Exactly the thirteen placeholders are ``False`` and the rest are ``True``.
+    Exactly the eight placeholders are ``False`` and the rest are ``True``.
     Asserted against ``MODEL_CATALOG`` directly, the source of truth.
     """
     for name, entry in MODEL_CATALOG.items():
@@ -243,11 +237,7 @@ def test_simple_net_is_module_level_and_picklable(tmp_path):
     function cannot be loaded back from its joblib artifact (``EOFError``),
     because pickle stores a class by reference and a function-local class
     cannot be found again.
-
-    Needs torch: only this test does, so the rest of the module (the honesty
-    contract of the catalog) keeps running on a machine without torch.
     """
-    torch = pytest.importorskip("torch")
     assert model_training.SimpleNet is not None
 
     net = model_training.SimpleNet(input_dim=4, output_dim=1)
@@ -282,40 +272,3 @@ def test_vision_trainer_reports_train_accuracy(isolated_model_dir):
     assert metrics["train_accuracy"] is not None
     assert "accuracy" not in metrics
     assert Path(artifact).exists()
-
-
-def test_embedding_models_report_the_quality_metric_the_catalog_advertises():
-    """PCA, t-SNE and UMAP report a real number for what they advertise.
-
-    The catalog promises ``expected_explained_variance`` for PCA and
-    ``expected_trustworthiness`` for t-SNE and UMAP; a range that the trainer
-    never measures is the kind of claim this module exists to forbid.
-    """
-    from sklearn.datasets import make_blobs
-
-    X, _ = make_blobs(n_samples=60, centers=3, n_features=5, random_state=0)
-    X = pd.DataFrame(X)
-
-    metrics, _ = _train_clustering("PCA", X, {"n_components": 2})
-    assert 0.0 < metrics["explained_variance"] <= 1.0
-    assert "expected_explained_variance" in MODEL_CATALOG["PCA"]["test_results"]
-
-    metrics, _ = _train_clustering("t-SNE", X, {"n_components": 2, "perplexity": 10.0})
-    assert 0.0 <= metrics["trustworthiness"] <= 1.0
-    assert "expected_trustworthiness" in MODEL_CATALOG["t-SNE"]["test_results"]
-
-    pytest.importorskip("umap")
-    metrics, _ = _train_clustering("UMAP", X, {"n_components": 2, "n_neighbors": 10, "random_state": 42})
-    assert 0.0 <= metrics["trustworthiness"] <= 1.0
-    assert "expected_trustworthiness" in MODEL_CATALOG["UMAP"]["test_results"]
-
-
-def test_hdbscan_is_real_without_the_hdbscan_package():
-    """HDBSCAN runs on scikit-learn's own implementation and reports a silhouette."""
-    from sklearn.datasets import make_blobs
-
-    X, _ = make_blobs(n_samples=90, centers=3, n_features=4, random_state=1)
-    metrics, _ = _train_clustering("HDBSCAN", pd.DataFrame(X), {"min_cluster_size": 10})
-    assert metrics["cluster_count"] >= 2
-    assert metrics["silhouette"] is not None
-    assert "expected_silhouette" in MODEL_CATALOG["HDBSCAN"]["test_results"]

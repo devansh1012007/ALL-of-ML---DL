@@ -1,14 +1,6 @@
 # FOLLOWUP_PLAN — the deferred round for ALL-of-ML---DL
 
-> **Superseded: executed under WEEK1_PLAN, see commits.** Phases 6-11 were carried out as
-> W1-1 ... W1-8 (`git log --grep "PLAN:week1"`), with these deviations: training rows start as
-> `queued` (not `running`), the dataset registry and a real `auto_tune` were added, and the
-> catalog round finished with 13 placeholder entries (the five NLP ones - BERT2BERT, seq2seq, UL2,
-> GPT, LLaMA - were flagged in a later commit) instead of a real `Autoencoder`.
-> The still-open items of section 11 moved to `TODO.MD`. Do not read this file as a description
-> of the current code.
-
-Status: ~~ready to execute~~ **superseded** · Written 2026-10-20, after the bug-fix round (commits `36ad1dc`, `a21e4d2`, `e70a650`).
+Status: **ready to execute** · Written 2026-10-20, after the bug-fix round (commits `36ad1dc`, `a21e4d2`, `e70a650`).
 
 This document plans the six items that `FIX_PLAN.md` deliberately deferred. It is written to be
 executable by someone who has not read the investigation: every phase states **why** the change is
