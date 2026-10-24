@@ -563,7 +563,9 @@ def test_train_model_tabular_modes(mode, classification_dataset, isolated_model_
 
 
 def test_auto_fine_tune_changes_the_applied_parameters(classification_dataset):
-    """The modes have to differ: auto_fine_tune lowers the learning rate."""
+    """auto_tune searches the curated space, auto_fine_tune searches a
+    neighbourhood of the base configuration, and the client's pinned parameter
+    wins in every mode (auto_tune is no longer a no-op equal to manual)."""
     manual = _train(
         "XGboost_timeseries", classification_dataset, {"n_estimators": 5}, mode="manual"
     )[0]
@@ -574,13 +576,17 @@ def test_auto_fine_tune_changes_the_applied_parameters(classification_dataset):
         "XGboost_timeseries", classification_dataset, {"n_estimators": 5}, mode="auto_fine_tune"
     )[0]
 
+    # The client's pinned parameter wins in every mode.
     for metrics in (manual, tuned, fine_tuned):
         assert metrics["model_parameters"]["n_estimators"] == 5
-    assert tuned["model_parameters"]["learning_rate"] == manual["model_parameters"]["learning_rate"]
-    assert (
-        fine_tuned["model_parameters"]["learning_rate"]
-        < manual["model_parameters"]["learning_rate"]
-    )
+
+    # auto_tune runs a real randomized search over the curated space.
+    assert tuned.get("search_results"), "auto_tune must report search results"
+    assert tuned["model_parameters"]["learning_rate"] in (0.01, 0.1, 0.2)
+
+    # auto_fine_tune runs the same engine on a neighbourhood of the base.
+    assert fine_tuned.get("search_results"), "auto_fine_tune must report search results"
+    assert fine_tuned["model_parameters"]["learning_rate"] in (0.05, 0.1, 0.2)
 
 
 # --- training presets --------------------------------------------------------
@@ -648,9 +654,15 @@ def _effective_parameters(
     return metrics["model_parameters"]
 
 
-@pytest.mark.parametrize("mode", ["manual", "auto_tune", "auto_fine_tune", "auto_search"])
+@pytest.mark.parametrize("mode", ["manual", "auto_search"])
 def test_preset_scales_the_effective_parameters_in_every_mode(mode, classification_dataset):
-    """A preset is effective in every mode, even with an empty hyperparameters dict."""
+    """A preset is effective in every mode, even with an empty hyperparameters dict.
+
+    auto_tune and auto_fine_tune are not parametrised here: they run a randomized
+    search whose best parameters override the catalogue defaults, so their exact
+    effective n_estimators depends on the search outcome (the preset still scales
+    those best parameters, which test_search.py covers).
+    """
     conservative = _effective_parameters(
         "Random_Forest", classification_dataset, mode=mode, preset="conservative"
     )

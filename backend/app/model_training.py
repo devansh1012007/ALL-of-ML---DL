@@ -19,7 +19,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import accuracy_score, mean_squared_error, r2_score, silhouette_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
 from sklearn.svm import SVC, SVR
 
@@ -266,6 +266,12 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "random_state": 42,
             "n_jobs": -1,
         },
+        "search_space": {
+            "n_estimators": [50, 100, 200],
+            "max_depth": [None, 5, 10, 20],
+            "min_samples_split": [2, 5, 10],
+            "min_samples_leaf": [1, 2, 4],
+        },
         "optimization": ["n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"],
         "implemented": True,
         "test_results": {
@@ -285,6 +291,12 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "penalty": "l2",
             "random_state": 42,
         },
+        "search_space": {
+            "C": [0.1, 1.0, 10.0],
+            "max_iter": [100, 1000, 3000],
+            "solver": ['lbfgs', 'liblinear'],
+            "penalty": ['l2'],
+        },
         "optimization": ["C", "penalty"],
         "implemented": True,
         "test_results": {
@@ -298,6 +310,9 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         "category": "regression",
         "description": "Multiple Linear Regression for numeric prediction.",
         "params": {"fit_intercept": True},
+        "search_space": {
+            "fit_intercept": [True, False],
+        },
         "optimization": ["fit_intercept"],
         "implemented": True,
         "test_results": {
@@ -316,6 +331,12 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "algorithm": "auto",
             "p": 2,
             "n_jobs": -1,
+        },
+        "search_space": {
+            "n_neighbors": [3, 5, 7, 9],
+            "weights": ['uniform', 'distance'],
+            "algorithm": ['auto', 'ball_tree', 'kd_tree', 'brute'],
+            "p": [1, 2],
         },
         "optimization": ["n_neighbors", "p"],
         "implemented": True,
@@ -338,6 +359,12 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "gamma": "scale",
             "tol": 1e-3,
         },
+        "search_space": {
+            "C": [0.1, 1.0, 10.0],
+            "kernel": ['rbf', 'linear', 'poly'],
+            "gamma": ['scale', 'auto'],
+            "tol": [0.001],
+        },
         "optimization": ["C", "kernel", "gamma"],
         "implemented": True,
         "test_results": {
@@ -358,6 +385,14 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "colsample_bytree": 0.8,
             "gamma": 0,
             "random_state": 42,
+        },
+        "search_space": {
+            "n_estimators": [50, 100, 200],
+            "learning_rate": [0.01, 0.1, 0.2],
+            "max_depth": [3, 6, 9],
+            "subsample": [0.6, 0.8, 1.0],
+            "colsample_bytree": [0.6, 0.8, 1.0],
+            "gamma": [0, 0.1, 0.2],
         },
         "optimization": ["n_estimators", "learning_rate", "max_depth"],
         "implemented": True,
@@ -380,6 +415,13 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "max_depth": -1,
             "random_state": 42,
         },
+        "search_space": {
+            "n_estimators": [50, 100, 200],
+            "learning_rate": [0.01, 0.1, 0.2],
+            "num_leaves": [15, 31, 63],
+            "subsample": [0.6, 0.8, 1.0],
+            "max_depth": [-1, 3, 6],
+        },
         "optimization": ["n_estimators", "learning_rate", "num_leaves"],
         "implemented": True,
         "test_results": {
@@ -399,6 +441,13 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "l2_leaf_reg": 3,
             "border_count": 32,
             "random_state": 42,
+        },
+        "search_space": {
+            "iterations": [50, 100, 200],
+            "learning_rate": [0.01, 0.1, 0.2],
+            "depth": [3, 6, 9],
+            "l2_leaf_reg": [1, 3, 5],
+            "border_count": [32, 64, 128],
         },
         "optimization": ["iterations", "learning_rate", "depth"],
         "implemented": True,
@@ -1516,6 +1565,135 @@ def _train_resnet_image_model(model_name: str, dataset_name: str, hyperparameter
     return metrics, model
 
 
+def _searchable_space(model_def: Dict[str, Any], client_values: Dict[str, Any]) -> Dict[str, Any]:
+    """The curated search space of a catalog entry.
+
+    The keys the client pinned are removed: they are not sampled, because the
+    client wins and must keep its value. Trainer-owned keys (test_size) are
+    removed too.
+    """
+    space = copy.deepcopy(model_def.get("search_space", {})) or {}
+    for key in list(space):
+        if key in client_values or key in _TRAINER_OWNED_PARAMS:
+            del space[key]
+    return space
+
+
+def _neighborhood_space(base_params: Dict[str, Any]) -> Dict[str, Any]:
+    """A narrow search space centred on the base parameters.
+
+    Used by auto_fine_tune: a local search around the current configuration
+    instead of a full re-search of the catalogue space.
+    """
+    space: Dict[str, Any] = {}
+    for key, value in base_params.items():
+        if key in _TRAINER_OWNED_PARAMS or key == "random_state":
+            continue
+        if isinstance(value, bool):
+            space[key] = [value]
+        elif isinstance(value, int):
+            space[key] = [max(1, int(value * 0.5)), value, max(1, int(value * 2))]
+        elif isinstance(value, float):
+            space[key] = [round(value * 0.5, 6), value, round(value * 2, 6)]
+        elif isinstance(value, list):
+            # Already an enumerated choice: keep it as the only option.
+            space[key] = value
+        else:
+            # Strings, None and anything else: keep the current value fixed.
+            space[key] = [value]
+    return space
+
+
+def _top_candidates(cv_results: Dict[str, Any], limit: int = 5) -> List[Dict[str, Any]]:
+    """The best candidates of a search, ranked, as plain JSON-serialisable dicts."""
+    ranks = cv_results.get("rank_test_score", [])
+    order = sorted(range(len(ranks)), key=lambda i: ranks[i])[:limit]
+    out: List[Dict[str, Any]] = []
+    for i in order:
+        params = cv_results["params"][i]
+        out.append(
+            {
+                "params": safe_json(params),
+                "mean_test_score": safe_json(cv_results["mean_test_score"][i]),
+                "rank": int(cv_results["rank_test_score"][i]),
+            }
+        )
+    return out
+
+
+def _run_hyperparameter_search(
+    model_name: str,
+    task_type: str,
+    model_def: Dict[str, Any],
+    X_train: Any,
+    y_train: Any,
+    space: Dict[str, Any],
+    optimize_metric: str,
+    random_state: int,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int]:
+    """Run a randomized hyperparameter search on the training split.
+
+    Returns (best_params, search_results, cv_used). When the search cannot run
+    (no searchable parameters, a missing optional dependency, or a fold that is
+    too small even for cv=2) it returns ({}, [], cv_used) so the caller falls
+    back to the plain effective parameters.
+    """
+    if not space:
+        return {}, [], 0
+
+    scoring = "accuracy" if task_type == "classification" else "r2"
+    base_params = {
+        k: v
+        for k, v in model_def.get("params", {}).items()
+        if k not in _TRAINER_OWNED_PARAMS
+    }
+    total_combinations = 1
+    for values in space.values():
+        total_combinations *= len(values)
+    n_iter = max(1, min(12, total_combinations))
+    cv = 3
+    search_results: List[Dict[str, Any]] = []
+    best_params: Dict[str, Any] = {}
+
+    def _fit(cv_value: int) -> None:
+        nonlocal cv, search_results, best_params
+        estimator = build_model(model_name, task_type, base_params)
+        search = RandomizedSearchCV(
+            estimator=estimator,
+            param_distributions=space,
+            n_iter=n_iter,
+            cv=cv_value,
+            scoring=scoring,
+            refit=True,
+            random_state=random_state,
+        )
+        search.fit(X_train, y_train)
+        cv = cv_value
+        search_results = _top_candidates(search.cv_results_)
+        best_params = safe_json(search.best_params_)
+
+    try:
+        _fit(3)
+    except Exception as exc:
+        message = str(exc).lower()
+        if cv == 3 and (
+            "fold" in message or "split" in message or "sample" in message
+        ):
+            # The training fold is too small for cv=3: retry with cv=2 and say so.
+            try:
+                _fit(2)
+                for c in search_results:
+                    c["cv_used"] = 2
+            except Exception:
+                return {}, [], 2
+        else:
+            return {}, [], 3
+
+    for c in search_results:
+        c["cv_used"] = cv
+    return best_params, search_results, cv
+
+
 def train_model(
     model_name: str,
     dataset_name: Optional[str],
@@ -1757,6 +1935,33 @@ def train_model(
     task_type = infer_task_type(y)
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
+
+    search_results: List[Dict[str, Any]] = []
+    cv_used = 0
+    if mode in {"auto_tune", "auto_fine_tune"}:
+        if mode == "auto_tune":
+            # A randomized search over the curated, per-model space. Client-pinned
+            # keys are sampled out: they keep their value and win over the search.
+            space = _searchable_space(model_def, user_hyperparameters)
+        else:
+            # auto_fine_tune: the same search engine, restricted to a narrow
+            # neighbourhood of the current configuration.
+            base = {k: v for k, v in model_def.get("params", {}).items() if k not in _TRAINER_OWNED_PARAMS}
+            space = _neighborhood_space(base)
+        best_params, search_results, cv_used = _run_hyperparameter_search(
+            model_name,
+            task_type,
+            model_def,
+            X_train,
+            y_train,
+            space,
+            optimize_metric,
+            random_state,
+        )
+        # The search found the best values over the searchable space; the client's
+        # values still win when they are merged below by _effective_params().
+        mode_suggested = best_params
+
     model = build_model(model_name, task_type, _effective_params(mode_suggested))
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
@@ -1773,6 +1978,9 @@ def train_model(
         # suggestions and the client's values, with the preset applied once.
         "model_parameters": safe_json(_effective_params(mode_suggested)),
     }
+    if search_results:
+        metrics["search_results"] = search_results
+        metrics["search_cv"] = cv_used
     
     artifact_path = write_artifact(model_name, model)
     return metrics, dataset_source, dataset_tag, artifact_path
@@ -1789,3 +1997,5 @@ def build_train_payload(run_id: int, model_name: str, dataset_source: str, datas
         "artifact_path": artifact_path,
         "completed_at": datetime.utcnow().isoformat() + "Z",
     }
+
+

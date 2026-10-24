@@ -221,7 +221,7 @@ numbers; the "test ID" refers to section H.
 
 | | |
 |---|---|
-| What | `readme.md` (port 3000, the real paths, the real model count, the AI-artifact paragraphs removed), `backend/app/README.md:246,251`, `TODO.MD`, `AGENTS.md` (the new endpoints, `dataset_id`, the token requirement, `DATASETS_ROOT`), `.env.example`, `.gitignore` (`data/uploads/`, `.secret_key`), the 14 tracked `.pyc` files and `backend/app.log` untracked, the log to stdout instead of a CWD-relative file (`main.py:27`). |
+| What | `readme.md` (port 3000, the real paths, the real model count, the AI-artifact paragraphs removed), `backend/app/README.md:246,251`, `TODO.MD`, `AGENTS.md` (the new endpoints, `dataset_id`, the token requirement, `DATASETS_ROOT`), `.env.example`, `.gitignore` (`data/uploads/`, `.secret_key`), the 13 tracked `.pyc` files and `backend/app.log` untracked, the log to stdout and to `app.log` (`main.py:257-263`). |
 | How | One pass over the documents after the behaviour is final, so the text describes the shipped system. |
 | Why | The documentation currently contradicts the code (port 5173 vs 3000, a root `docker-compose.yml` that does not exist, the deleted `ML_models/` directories, "grid search" and "Bayesian optimization"). |
 | Depends on | W1-7 · **Test** — the manual demo path of section A · **Risk** low · **Revert** revert the commit |
@@ -388,6 +388,32 @@ routing test and someone "fixes" it by deleting assertions -> the expectation ta
   trainer was defined inside the function, so its artifact could not be loaded back, and the test
   of the vision models used empty class directories. Both are fixed, so the numbers of this
   repository are the numbers of a fresh clone.
+- W1-5 (2026-10-23): asynchronous training shipped. The row is created with status "queued" and
+  the worker sets "running" when it starts (the four-state lifecycle queued/running/completed/failed).
+  The worker uses its own AsyncSessionLocal(); failures are written into the run as the only channel
+  the client has; the lifespan reaper fails queued/running rows at startup; artifact names include
+  microseconds plus a uuid so two runs in the same second cannot collide. The frontend polls the run
+  every two seconds with a chained setTimeout and stops on completed/failed.
+- W1-6 (2026-10-23): the catalog is honest. Eight entries that train something other than what they
+  advertise (Q-Learning stub; Autoencoder/GNN/LSTM/RNN/SSM_timeseries/TCN_timeseries reach the MLP;
+  ViT trains ResNet-18) are implemented: False with their measured results moved to planned_test_results.
+  train_model() fails fast for placeholders before any trainer and before write_artifact(). Clustering
+  reports silhouette (DBSCAN's -1 noise excluded) plus noise_count, and silhouette joined
+  _CANDIDATE_SCORE_KEYS so auto_search can rank clustering candidates. The vision trainer reports
+  train_accuracy instead of accuracy. The frontend shows a "Not implemented" badge (distinct from
+  "no benchmark data yet"), disables placeholder options in NewJob, and RunDetails shows "Not
+  implemented". test_catalog_params.py gained an IMPLEMENTED source-of-truth set; new
+  test_honest_catalog.py pins the fail-fast/no-artifact, silhouette/noise_count, auto-search clustering,
+  SimpleNet picklability and vision train_accuracy contracts.
+- W1-7 (2026-10-23): a real auto_tune (stretch phase, accepted). Every tabular catalog entry carries a
+  search_space; auto_tune runs RandomizedSearchCV (n_iter=min(12, combinations), cv=3 with cv=2 fallback
+  on small folds, scoring accuracy/r2, refit=True) on the training split and reports best_params as
+  model_parameters plus search_results; client-pinned keys are sampled out and still win; auto_fine_tune
+  searches a neighbourhood of the base configuration; llm_fine_tune requires google-generativeai and
+  GOOGLE_API_KEY and fails fast with an actionable message; the false mode descriptions are replaced in
+  main.py, App.jsx and the run-summary copy. The preset still applies once to the merged base, so it
+  scales search results too; test_preset_scales_the_effective_parameters_in_every_mode no longer
+  parametrises auto_tune/auto_fine_tune for exact values (covered by test_search.py).
 
 ## N. Approval record
 

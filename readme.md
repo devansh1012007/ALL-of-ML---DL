@@ -12,7 +12,7 @@ Repository structure
 
 Features
 
-- 32+ model catalog entries (tabular, vision, NLP, time-series, RL, clustering)
+- 38 model catalog entries (tabular, vision, NLP, time-series, RL, clustering)
 - Training modes: `manual`, `auto_tune`, `auto_fine_tune`, `llm_fine_tune`, `auto_search`
 - Training presets: `conservative`, `balanced`, `aggressive` for quick hyperparameter adjustments
 - LLM-guided hyperparameter suggestions (Google Gemini integration)
@@ -64,24 +64,34 @@ cd ../backend
 uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
 ```
 
-The frontend (Vite) will default to port 5173 and talk to the backend on port 8010. Adjust CORS settings in `backend/app/main.py` if necessary.
+The frontend (Vite) will default to port 3000 and talk to the backend on port 8010. Adjust CORS settings in `backend/app/main.py` if necessary.
 
 How to Use (step-by-step)
 
-1. Open the frontend in your browser (usually `http://localhost:5173`).
+1. Open the frontend in your browser (usually `http://localhost:3000`).
 2. Register or log in using the app auth UI (the backend includes JWT authentication endpoints).
+   Every ML endpoint requires a token; there is no anonymous access.
 3. Navigate to "New Training Job".
-	 - Choose data source: a) Local CSV dataset detected in `data/` or b) Hugging Face dataset reference.
-	 - Select the model architecture from the catalog.
-	 - Choose a training mode:
-		 - `manual` — you provide all hyperparameters.
-		 - `auto_tune` — grid-search style automated tuning.
-		 - `auto_fine_tune` — conservative fine-tuning with reduced learning rate.
-		 - `llm_fine_tune` — uses Google Gemini to suggest hyperparameters (requires `GOOGLE_API_KEY`).
-		 - `auto_search` — searches across a set of candidate models and returns the best.
-	 - Choose a preset: `conservative`, `balanced`, or `aggressive` to quickly adjust common hyperparameters.
+   - Pick a dataset from the dropdown (`GET /api/v1/ml/datasets`). Datasets are rows of the
+     server-side registry: the built-in sample CSVs plus the CSVs you uploaded through
+     `POST /api/v1/ml/datasets/upload` (comma-separated CSV only, size/row/column limits apply).
+     Send the dataset as `dataset_id` (or `dataset_name`, a lookup in the same registry); the
+     server resolves the row to a path under `DATASETS_ROOT` — the client never sends a file path.
+   - Select the model architecture from the catalog. Entries flagged "Not implemented" cannot be
+     trained (they advertise a model no trainer builds yet).
+   - Choose a training mode:
+     - `manual` — you provide all hyperparameters.
+     - `auto_tune` — randomized hyperparameter search over a curated per-model space; reports
+       `best_params` and a search summary.
+     - `auto_fine_tune` — local hyperparameter search around the current configuration.
+     - `llm_fine_tune` — uses Google Gemini to suggest hyperparameters (requires `GOOGLE_API_KEY`
+       and the `google-generativeai` package).
+     - `auto_search` — model selection over multiple candidates (not Bayesian optimization).
+   - Choose a preset: `conservative`, `balanced`, or `aggressive` to quickly adjust common hyperparameters.
 4. Fill in target label column, train/test split, and any model-specific fields (e.g., `env_id` for RL agents).
-5. Submit the job. The backend will schedule and run training and return metrics and artifact paths when complete.
+5. Submit the job. Training runs in the background: the backend answers immediately with a `run_id`
+   and the run status (`queued` → `running` → `completed`/`failed`). Poll `GET /api/v1/ml/runs/{run_id}`
+   for the metrics and the trained artifact.
 6. Check run history under "Runs" to download trained model artifacts or review logs and metrics.
 
 Configuring LLM (Google Gemini) for hyperparameter suggestions
@@ -103,47 +113,24 @@ Optionally set `GOOGLE_MODEL` to an available Gemini model (defaults to `gemini-
 
 Docker setup (recommended)
 
-I'll provide a simple `Dockerfile` (backend) and `docker-compose.yml` to run the backend + frontend together.
-
-1. Build and run using Docker Compose
+The compose file lives at `backend/docker-compose.yml` (not at the repository root). Run it from
+the `backend/` directory:
 
 ```bash
-# From repository root
+cd backend
 docker-compose up --build
 ```
 
-2. Access the app
-- Frontend: http://localhost:5173
+The compose file mounts local code into containers for live development by default and runs the
+migrations (`alembic upgrade head`) before the server. For production, remove mounts and build
+image artifacts. To use Google Gemini inside Docker, set `GOOGLE_API_KEY` in the environment
+section of `backend/docker-compose.yml` (or via `env_file`).
+
+Access the app:
+- Frontend: http://localhost:3000
 - Backend API: http://localhost:8010
 
-Docker Compose notes
-
-- The compose file mounts local code into containers for live development by default. For production, remove mounts and build image artifacts.
-- To use Google Gemini inside Docker, set `GOOGLE_API_KEY` in the environment section of `docker-compose.yml`.
-
-Example docker-compose snippet
-
-```yaml
-version: '3.8'
-services:
-	backend:
-		build: ./backend
-		ports:
-			- '8010:8010'
-		environment:
-			- GOOGLE_API_KEY=${GOOGLE_API_KEY}
-		volumes:
-			- ./backend:/app
-		command: uvicorn app.main:app --host 0.0.0.0 --port 8010 --reload
-
-	frontend:
-		build: ./frontend
-		ports:
-			- '5173:5173'
-		volumes:
-			- ./frontend:/app
-		command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-```
+The backend must be started and CORS must allow the frontend origin in `backend/app/main.py`.
 
 Troubleshooting
 
@@ -153,19 +140,20 @@ Troubleshooting
 
 Contributing
 
-Feel free to add new model definitions under `DL_models/` or `ML_models/` and update the `MODEL_CATALOG` in `backend/app/model_training.py`.
+Feel free to add new model entries to `MODEL_CATALOG` in `backend/app/model_training.py`
+and update this document when behaviour or interfaces change.
 
 When adding new models:
-1. Add a model entry in `MODEL_CATALOG` with `params`, `optimization`, and `test_results` metadata.
-2. Implement training helper functions if the model requires custom data pipelines (e.g., image loaders for vision models).
-3. Add frontend card metadata if you want special UI behavior.
+1. Add a model entry in `MODEL_CATALOG` with `category`, `description`, `params`, `optimization`,
+   `test_results` (or `planned_test_results` for a placeholder), and an `implemented` flag.
+2. If the model needs custom training logic, add a branch to the category router in `train_model()`
+   (`backend/app/model_training.py`) and register its category in `CATEGORY_TO_TRAINER`.
+3. Keep `EXPECTED_CATEGORY_BY_MODEL` in `backend/tests/test_catalog_params.py` in sync with the catalog.
 
 License
 
 This repo is for personal use. Add a license file if you plan to open-source it.
 
----
-If you'd like, I can also commit a `docker-compose.yml` and a minimal `Dockerfile` for backend and frontend — want me to add those now?
 
 ## Available Models
 

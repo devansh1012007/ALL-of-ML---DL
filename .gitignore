@@ -13,6 +13,9 @@ __pycache__/
 *.log
 *.bak
 models/
+# Catboost writes a catboost_info/ scratch directory when it trains; tests that
+# exercise catboost leave it behind, so keep it out of the repository.
+catboost_info/
 # The cache of the installer of scripts/install.sh: it makes an interrupted
 # installation resume instead of starting over, and it is not worth keeping.
 .cache/

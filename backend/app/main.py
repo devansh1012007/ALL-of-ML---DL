@@ -680,10 +680,10 @@ async def get_training_modes(current_user: User = Depends(get_current_user)):
     """Returns available training modes and their descriptions."""
     modes_desc = {
         "manual": "User-defined hyperparameters - full control over training settings",
-        "auto_tune": "Grid search optimization - automatically searches for optimal parameters",
-        "auto_fine_tune": "Adaptive tuning - fine-tuning with reduced learning rates for stability",
-        "llm_fine_tune": "AI-guided parameters - uses Google Gemini to suggest optimal hyperparameters",
-        "auto_search": "Bayesian optimization - searches across multiple model candidates",
+        "auto_tune": "Randomized hyperparameter search over a curated per-model space",
+        "auto_fine_tune": "Local hyperparameter search around the current configuration",
+        "llm_fine_tune": "AI-guided parameters via Google Gemini (requires GOOGLE_API_KEY and the google-generativeai package)",
+        "auto_search": "Model selection over multiple candidates - not Bayesian optimization",
     }
     return {
         "modes": TRAINING_MODES,

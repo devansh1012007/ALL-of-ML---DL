@@ -246,8 +246,6 @@ Checklist when adding a new model
 6. Add any new Python dependencies to `backend/requirements.txt` and document them here.
 7. Run `python -m py_compile backend/app/model_training.py` to catch syntax errors.
 
-If you want, I can also add a template `backend/tests/test_new_model.py` and create `Dockerfile` + `docker-compose.yml` ready for production/dev — tell me which you'd prefer next.
-
 License & contact
 -----------------
 

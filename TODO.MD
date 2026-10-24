@@ -1,1 +1,1 @@
-- add auto fintuning features with and without using llm
+- [DONE] add auto fine-tuning features with and without using llm (implemented in W1-7)

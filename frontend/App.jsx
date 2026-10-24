@@ -66,10 +66,10 @@ const classNames = (...classes) => classes.filter(Boolean).join(' ');
 const FALLBACK_TRAINING_MODES = ['manual', 'auto_tune', 'auto_fine_tune', 'llm_fine_tune', 'auto_search'];
 const FALLBACK_MODE_DESCRIPTIONS = {
   manual: 'User-defined hyperparameters - full control over training settings',
-  auto_tune: 'Grid search optimization - automatically searches for optimal parameters',
-  auto_fine_tune: 'Adaptive tuning - fine-tuning with reduced learning rates for stability',
-  llm_fine_tune: 'AI-guided parameters - uses Google Gemini to suggest optimal hyperparameters',
-  auto_search: 'Bayesian optimization - searches across multiple model candidates',
+  auto_tune: 'Randomized hyperparameter search over a curated per-model space',
+  auto_fine_tune: 'Local hyperparameter search around the current configuration',
+  llm_fine_tune: 'AI-guided parameters via Google Gemini (requires GOOGLE_API_KEY and the google-generativeai package)',
+  auto_search: 'Model selection over multiple candidates - not Bayesian optimization',
 };
 
 // Fallback used when the training-presets endpoint cannot be reached.
@@ -1461,12 +1461,12 @@ const NewJob = ({ navigate }) => {
              <h2 className="text-lg font-semibold text-white mb-4 border-b border-zinc-800 pb-2">3. Hyperparameters</h2>
              <div className="text-sm text-zinc-400">
                <p className="mb-2">
-                 In <span className="font-semibold">{humanizeKey(payload.mode)}</span> mode, hyperparameters will be automatically {
-                   payload.mode === 'auto_tune' ? 'tuned via grid search' :
-                   payload.mode === 'auto_fine_tune' ? 'adapted with reduced learning rates' :
-                   payload.mode === 'llm_fine_tune' ? 'suggested by Google Gemini' :
-                   payload.mode === 'auto_search' ? 'optimized across model candidates' : 'configured'
-                 }.
+                  In <span className="font-semibold">{humanizeKey(payload.mode)}</span> mode, hyperparameters will be automatically {
+                    payload.mode === 'auto_tune' ? 'tuned via randomized search' :
+                    payload.mode === 'auto_fine_tune' ? 'tuned around the current configuration' :
+                    payload.mode === 'llm_fine_tune' ? 'suggested by Google Gemini' :
+                    payload.mode === 'auto_search' ? 'model selection across candidates' : 'configured'
+                  }.
                </p>
                {payload.mode === 'auto_search' && (
                  <p className="mb-2">
