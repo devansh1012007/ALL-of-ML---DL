@@ -115,8 +115,34 @@ How to Use (step-by-step)
      - `auto_search` — model selection over multiple candidates (not Bayesian optimization).
    - Choose a preset: `conservative`, `balanced`, or `aggressive` to quickly adjust common hyperparameters.
 4. Fill in target label column, train/test split, and any model-specific fields (e.g., `env_id` for RL agents).
-5. Submit the job. Training runs in the background: the backend answers immediately with a `run_id` and the run status (`queued` → `running` → `completed`/`failed`). Poll `GET /api/v1/ml/runs/{run_id}` for the metrics and the trained artifact.
-6. Check run history under "Runs" to download trained model artifacts or review logs and metrics.
+5. Submit the job. Training runs in the background: the backend answers immediately with a `run_id` and the run status (`queued` → `running` → `completed`/`failed`/`cancelled`). The page shows the metrics when the run finishes; over the API, poll `GET /api/v1/ml/runs/{run_id}`.
+6. Check run history under "Runs" to review metrics, download trained model artifacts, **compare** two to four completed runs (tick them, then "Compare"), or **predict** with a run (below).
+
+What a tabular run reports (and what it does to your data)
+
+The supervised tabular models (`Random_Forest`, `Logistic_Regression`, `MLR`, `KNN`, `SVM` and the three boosters) train on a messy CSV as it is:
+
+- **Preprocessing, inside the pipeline.** Numeric columns are imputed (median) and, for the models that need it (`Logistic_Regression`, `MLR`, `KNN`, `SVM`), standardised; text columns are imputed (most frequent) and one-hot encoded; a column that looks like an identifier or free text (more than 50 distinct values, mostly unique) is **dropped and reported**, and so is a column that is entirely empty; a row without a label is dropped. The preprocessor is fitted on the training rows only (and refitted in every fold of the search and of the cross-validation), so the test rows never influence it.
+- **A stratified hold-out split** whenever every class has at least two rows (the report says when it had to fall back to a plain split).
+- **Task-correct metrics with a baseline.** Classification: `accuracy`, `balanced_accuracy`, `f1_macro`, `precision_macro`, `recall_macro`, `roc_auc`, the confusion matrix and `baseline_accuracy` (always predicting the most frequent class). Regression: `r2`, `rmse`, `mae`, `mse` and `baseline_rmse` (always predicting the training mean). A score that does not beat its baseline is flagged in the run page.
+- **Cross-validation** (`cv_folds`, default 5, `0` turns it off) of the final pipeline on the training rows: mean and standard deviation of each metric, in `metrics.cv`. The test rows are not touched, so the hold-out score stays the unbiased one. When there are too few rows the report says why it was skipped. `auto_search` ranks its candidates on this cross-validated score when there is one.
+- **`task_type`** (`classification` or `regression`) overrides the guess made from the label column. The guess: text and booleans are classes; numbers are classes when they are integer-valued with at most 20 distinct values, and a regression target otherwise (a float label with non-integer values is never a class).
+
+The artifact of these runs is a `TabularModelBundle` (the fitted pipeline plus the schema of the columns and the label encoder), not a bare estimator: a `.joblib` saved by an earlier version holds a bare estimator and can be downloaded but not used for predictions.
+
+Predictions
+
+A completed tabular run (and an `Autoencoder` run) can predict rows it has never seen:
+
+- `GET /api/v1/ml/runs/{id}/schema` - the columns the model expects (kind, range or categories, a default), the classes, and the maximum number of rows per request (`PREDICT_MAX_ROWS`, default 1000). The run page builds its prediction form from it.
+- `POST /api/v1/ml/runs/{id}/predict` with `{"rows": [{"column": value, ...}]}` - for a classifier the labels (as in your CSV) and the probability of each class; for a regressor the numbers; for an `Autoencoder` the reconstruction error, an anomaly flag (above the threshold of the training rows) and the latent code. A column that is left out is treated as missing (imputed as in training), an unknown column is ignored, a category never seen in training is accepted: each of those is reported in `warnings`. A value that is not a number is a `422` that names the column. Only the owner of a completed run can use it, and only an artifact inside the model directory is ever loaded.
+
+Cancelling, the queue and the workers
+
+- `POST /api/v1/ml/runs/{id}/cancel`: a **queued** run never starts. A **running** run cannot be interrupted (an estimator has no hook to stop a `fit`): it is marked `cancelled` at once and its result and artifact are discarded when the training ends; the answer says so, and its slot is only freed then.
+- The rows of `training_runs` are the queue: a request stores everything a worker needs, so a **queued run survives a restart**. A worker claims the oldest queued run with one atomic `UPDATE`, writes a heartbeat every few seconds while it trains, and a sweeper fails only the running runs whose heartbeat stopped - it never fails the run of a live worker, so several processes can share one database.
+- Settings (environment): `TRAINING_CONCURRENCY` (trainings per process, default 1), `TRAINING_HEARTBEAT_SECONDS` (5), `TRAINING_STALE_SECONDS` (30), `QUEUE_POLL_SECONDS` (5), `PREDICT_MAX_ROWS` (1000). With `TRAINING_IN_API=0` the web process only enqueues, and one or more `python -m backend.app.worker` processes (`python -m app.worker` in the docker image) run the trainings.
+- Known limits: the training itself still runs in a thread of the worker process (a crash of that process loses the run, which is then failed by the sweeper once the heartbeat is stale, so up to `TRAINING_STALE_SECONDS` later); there is no priority or per-user fairness; the clustering, NLP, vision and RL trainers have no preprocessing of their own.
 
 Dataset registry and upload
 

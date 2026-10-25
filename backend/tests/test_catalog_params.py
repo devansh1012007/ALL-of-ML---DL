@@ -91,6 +91,7 @@ EXPECTED_CATEGORY_BY_MODEL = {
 IMPLEMENTED = frozenset(
     {
         "BERT",
+        "Autoencoder",
         "BERT2BERT",
         "CATboost_timeseries",
         "DBSCAN",
@@ -138,7 +139,7 @@ CATEGORY_TO_TRAINER = {
     "clustering": "_train_clustering",
     "timeseries": "_train_torch_regression_or_classification",
     "graph": "_train_torch_regression_or_classification",
-    "autoencoder": "_train_torch_regression_or_classification",
+    "autoencoder": "_train_autoencoder",
     "reinforcement-learning": "_train_rl_model",
     "nlp": "_train_transformer_text_classifier",
     "vision": "_train_resnet_image_model",
@@ -153,12 +154,14 @@ RECORDED_TRAINERS = (
     "_train_transformer_text_classifier",
     "_train_torch_regression_or_classification",
     "_train_resnet_image_model",
+    "_train_autoencoder",
 )
 
 # Models that only need scikit-learn (or the boosting libraries) and therefore
 # have to train end to end on the synthetic dataset.
 OFFLINE_TRAINABLE_MODELS = frozenset(
     {
+        "Autoencoder",
         "Random_Forest",
         "Logistic_Regression",
         "MLR",
@@ -418,7 +421,10 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         assert metrics["train_accuracy"] is not None
         assert Path(artifact).exists()
     elif model_name in OFFLINE_TRAINABLE_MODELS:
-        if expected_category == "clustering":
+        if expected_category == "autoencoder":
+            assert metrics["task_type"] == "autoencoder"
+            assert metrics["reconstruction_mse"] < metrics["baseline_mse"]
+        elif expected_category == "clustering":
             assert metrics["sample_count"] == 60
         elif expected_category == "regression":
             # A regressor must not be scored with a classification metric.

@@ -7,7 +7,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+from sklearn.neural_network import MLPRegressor
+from sklearn.exceptions import ConvergenceWarning
+import warnings
 import joblib
 import numpy as np
 import pandas as pd
@@ -105,6 +107,22 @@ try:
     import google.generativeai as genai
 except ImportError:
     genai = None
+
+from .tabular import (
+    SCALE_SENSITIVE_MODELS,
+    AutoencoderBundle,
+    FeaturePlan,
+    TabularModelBundle,
+    analyze_features,
+    build_preprocessor,
+    coerce_features,
+    cross_validate_pipeline,
+    describe_features,
+    evaluate_holdout,
+    preprocessing_report,
+    split_data,
+)
+
 
 def find_repo_root() -> Path:
     candidate = Path(__file__).resolve()
@@ -517,22 +535,31 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "Autoencoder": {
         "category": "autoencoder",
-        "description": "Autoencoder training for representation learning.",
+        "description": (
+            "Autoencoder: a network that learns to reproduce its own standardised input "
+            "through a narrow bottleneck. It reports the reconstruction error against a "
+            "predict-the-mean baseline, flags unusual rows (anomaly detection) and returns "
+            "the bottleneck code of a row."
+        ),
         "params": {
-            "epochs": 10,
+            "latent_dim": 4,
+            "hidden_units": 16,
+            "activation": "relu",
+            "epochs": 200,
             "batch_size": 32,
-            "learning_rate": 1e-3,
-            "latent_dim": 64,
-            "weight_decay": 0.0,
-            "dropout_rate": 0.1,
+            "learning_rate": 0.001,
+            "weight_decay": 0.0001,
+            "anomaly_quantile": 0.95,
         },
         "optimization": ["latent_dim", "learning_rate"],
-        "implemented": False,
-        "planned_test_results": {
-            "expected_reconstruction_mse": (0.01, 0.1),
+        "implemented": True,
+        "test_results": {
+            # The error is measured on standardised features, where 1.0 is what
+            # predicting the mean of every column scores.
+            "expected_reconstruction_mse": (0.0, 1.0),
             "best_for": ["dimensionality_reduction", "anomaly_detection", "feature_extraction"],
-            "typical_training_time_sec": 12,
-            "scalability": "high",
+            "typical_training_time_sec": 2,
+            "scalability": "medium",
         },
     },
     "BERT2BERT": {
@@ -991,21 +1018,49 @@ def load_huggingface_dataset(dataset_ref: str) -> Path:
     return Path(tmp.name)
 
 
+TASK_TYPES = ("classification", "regression")
+
+# Models that only make sense for one kind of label. Naming the mismatch beats
+# the cryptic error scikit-learn raises from deep inside fit().
+_TASK_ONLY_MODELS = {"MLR": "regression", "Logistic_Regression": "classification"}
+
+
 def infer_task_type(y: pd.Series) -> str:
-    if y.dtype == object or y.dtype == bool:
+    """Guess the kind of task from the label column.
+
+    Text and booleans are classes. Numbers are classes when there are few
+    distinct integer-valued ones, and a regression target otherwise. A float
+    label with non-integer values is a measurement, never a class, however few
+    distinct values it has. The guess can be overridden with ``task_type``.
+    """
+    if pd.api.types.is_bool_dtype(y) or not pd.api.types.is_numeric_dtype(y):
         return "classification"
-    if pd.api.types.is_numeric_dtype(y):
-        if y.nunique() <= 20:
-            return "classification"
+    values = y.dropna()
+    if values.empty:
+        return "classification"
+    if pd.api.types.is_float_dtype(values) and bool((values % 1 != 0).any()):
         return "regression"
-    return "classification"
+    if values.nunique() <= 20:
+        return "classification"
+    return "regression"
+
+
+def _check_task_fits_model(model_name: str, task_type: str, y: pd.Series) -> None:
+    required = _TASK_ONLY_MODELS.get(model_name)
+    if required is not None and required != task_type:
+        raise ValueError(
+            f"{model_name} is a {required} model, but the label column "
+            f"'{y.name}' was read as {task_type} ({int(y.nunique())} distinct values). "
+            f"Pick a {task_type} model, or set task_type to '{required}' if the label "
+            "was misread."
+        )
 
 
 # Metrics for which a lower value is the better one.
 _LOWER_IS_BETTER_METRICS = ("mse", "rmse", "mae")
 
 # Metrics used to rank a candidate when the requested one is not reported by the run.
-_CANDIDATE_SCORE_KEYS = ("accuracy", "r2", "mse", "mean_reward", "silhouette")
+_CANDIDATE_SCORE_KEYS = ("accuracy", "r2", "rmse", "mse", "mean_reward", "silhouette")
 
 
 def score_candidate(metrics: Dict[str, Any], optimize_metric: str) -> float:
@@ -1016,8 +1071,15 @@ def score_candidate(metrics: Dict[str, Any], optimize_metric: str) -> float:
     Missing metrics are skipped, and error metrics are negated because lower is
     better for them.
     """
+    # The cross-validated score ranks the candidates when the run has one: the
+    # hold-out score of the winner of several candidates is optimistic, because
+    # the winner was picked on exactly those rows.
+    cv_scores = ((metrics.get("cv") or {}).get("scores")) or {}
     for key in (optimize_metric, *_CANDIDATE_SCORE_KEYS):
-        value = metrics.get(key)
+        cv_entry = cv_scores.get(key)
+        value = cv_entry.get("mean") if isinstance(cv_entry, dict) else None
+        if value is None:
+            value = metrics.get(key)
         if value is None:
             continue
         try:
@@ -1169,15 +1231,23 @@ def build_model(model_name: str, task_type: str, params: Dict[str, Any]):
     if model_name == "lightGBM_timeseries":
         if lgb is None:
             raise RuntimeError("lightgbm is not installed")
+        # LightGBM logs every split to the console by default; with a
+        # cross-validation that is hundreds of lines per run.
+        lgb_params = {**estimator_params, "verbose": estimator_params.get("verbose", -1)}
         if task_type == "classification":
-            return lgb.LGBMClassifier(**estimator_params)
-        return lgb.LGBMRegressor(**estimator_params)
+            return lgb.LGBMClassifier(**lgb_params)
+        return lgb.LGBMRegressor(**lgb_params)
     if model_name == "CATboost_timeseries":
         if cb is None:
             raise RuntimeError("catboost is not installed")
         # Same as above: "verbose" is forced, so it is merged into the dict instead of
         # being passed as a separate keyword.
-        cb_params = {**estimator_params, "verbose": estimator_params.get("verbose", 0)}
+        cb_params = {
+            **estimator_params,
+            "verbose": estimator_params.get("verbose", 0),
+            # CatBoost writes a catboost_info/ directory into the working directory by default.
+            "allow_writing_files": estimator_params.get("allow_writing_files", False),
+        }
         if task_type == "classification":
             return cb.CatBoostClassifier(**cb_params)
         return cb.CatBoostRegressor(**cb_params)
@@ -1399,6 +1469,123 @@ else:
     SimpleNet = None
 
 
+_AUTOENCODER_PARAMS = frozenset(
+    {
+        "latent_dim",
+        "hidden_units",
+        "activation",
+        "epochs",
+        "batch_size",
+        "learning_rate",
+        "weight_decay",
+        "anomaly_quantile",
+        "random_state",
+    }
+)
+
+
+def _train_autoencoder(
+    dataset: pd.DataFrame,
+    label_column: str,
+    params: Dict[str, Any],
+    test_size: float,
+    random_state: int,
+) -> Tuple[Dict[str, Any], AutoencoderBundle, "FeaturePlan"]:
+    """Train a real autoencoder: encoder, bottleneck, decoder.
+
+    The network is ``features -> hidden -> latent -> hidden -> features`` (just
+    ``features -> latent -> features`` when ``hidden_units`` is 0), trained to
+    reproduce its own input. The input is preprocessed like every tabular
+    model's (imputed, one-hot encoded, standardised), and the reconstruction
+    error is reported on rows the network did not train on, next to the error
+    of the trivial reconstruction (the mean of every column): an error that
+    does not beat that baseline means the bottleneck learned nothing.
+
+    A label column, if the file has one, is ignored: the model is unsupervised.
+    """
+    unknown = sorted(set(params) - _AUTOENCODER_PARAMS)
+    if unknown:
+        raise TypeError(f"Autoencoder got unexpected parameter(s): {unknown}")
+    latent_dim = int(params["latent_dim"])
+    hidden_units = int(params.get("hidden_units", 0))
+    activation = str(params.get("activation", "relu"))
+    quantile = float(params.get("anomaly_quantile", 0.95))
+    if latent_dim < 1:
+        raise ValueError("latent_dim must be at least 1.")
+    if hidden_units < 0:
+        raise ValueError("hidden_units cannot be negative.")
+    if activation not in {"relu", "tanh", "logistic", "identity"}:
+        raise ValueError(
+            f"activation must be one of ['relu', 'tanh', 'logistic', 'identity'], got '{activation}'."
+        )
+    if not 0.5 <= quantile < 1.0:
+        raise ValueError("anomaly_quantile must be in [0.5, 1).")
+
+    X_raw = dataset.drop(columns=[label_column]) if label_column in dataset.columns else dataset
+    plan = analyze_features(X_raw)
+    X = coerce_features(X_raw, plan)
+    X_train, X_test = train_test_split(X, test_size=test_size, random_state=random_state)
+
+    preprocessor = build_preprocessor(plan, scale=True)
+    Z_train = preprocessor.fit_transform(X_train)
+    Z_test = preprocessor.transform(X_test)
+
+    layers = (hidden_units, latent_dim, hidden_units) if hidden_units else (latent_dim,)
+    network = MLPRegressor(
+        hidden_layer_sizes=layers,
+        activation=activation,
+        alpha=float(params.get("weight_decay", 0.0001)),
+        batch_size=min(int(params.get("batch_size", 32)), len(Z_train)),
+        learning_rate_init=float(params.get("learning_rate", 0.001)),
+        max_iter=int(params.get("epochs", 200)),
+        random_state=int(params.get("random_state", random_state)),
+    )
+    with warnings.catch_warnings():
+        # Reaching max_iter without converging is reported in the metrics
+        # ("converged"); the warning would only be noise in the server log.
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        network.fit(Z_train, Z_train)
+
+    bundle = AutoencoderBundle(
+        preprocessor=preprocessor,
+        network=network,
+        bottleneck_layers=2 if hidden_units else 1,
+        activation=activation,
+        plan=plan,
+        threshold=0.0,
+        quantile=quantile,
+        feature_schema=describe_features(X_train, plan),
+    )
+    train_errors = bundle.reconstruction_error(Z_train)
+    bundle.threshold = float(np.quantile(train_errors, quantile))
+    test_errors = bundle.reconstruction_error(Z_test)
+
+    mse = float(np.mean(test_errors))
+    # The trivial reconstruction: every column is replaced by its training mean,
+    # which is 0 once the columns are standardised.
+    baseline = float(np.mean(Z_test ** 2))
+    metrics = {
+        "task_type": "autoencoder",
+        "reconstruction_mse": safe_json(mse),
+        "baseline_mse": safe_json(baseline),
+        "reconstruction_r2": safe_json(1.0 - mse / baseline) if baseline > 0 else None,
+        "train_reconstruction_mse": safe_json(float(np.mean(train_errors))),
+        "latent_dim": latent_dim,
+        "encoded_feature_count": int(Z_train.shape[1]),
+        "epochs_run": int(network.n_iter_),
+        "converged": bool(network.n_iter_ < network.max_iter),
+        "anomaly_threshold": safe_json(bundle.threshold),
+        "anomaly_quantile": quantile,
+        "test_anomaly_rate": safe_json(float(np.mean(test_errors > bundle.threshold))),
+        "train_size": len(X_train),
+        "test_size": len(X_test),
+        "feature_count": len(plan.columns),
+        "artifact_kind": AutoencoderBundle.kind,
+        "preprocessing": preprocessing_report(X_raw, plan, True, 0),
+    }
+    return metrics, bundle, plan
+
+
 def _train_torch_regression_or_classification(
     model_name: str,
     dataset: pd.DataFrame,
@@ -1580,6 +1767,23 @@ def _searchable_space(model_def: Dict[str, Any], client_values: Dict[str, Any]) 
     return space
 
 
+# Float parameters that are fractions (0 < value <= 1): they cannot be scaled up freely.
+_FRACTION_PARAMS = frozenset(
+    {
+        "subsample",
+        "colsample_bytree",
+        "colsample_bylevel",
+        "colsample_bynode",
+        "bagging_fraction",
+        "feature_fraction",
+        "rsm",
+        "l1_ratio",
+        "max_samples",
+        "max_features",
+    }
+)
+
+
 def _neighborhood_space(base_params: Dict[str, Any]) -> Dict[str, Any]:
     """A narrow search space centred on the base parameters.
 
@@ -1594,6 +1798,11 @@ def _neighborhood_space(base_params: Dict[str, Any]) -> Dict[str, Any]:
             space[key] = [value]
         elif isinstance(value, int):
             space[key] = [max(1, int(value * 0.5)), value, max(1, int(value * 2))]
+        elif isinstance(value, float) and key in _FRACTION_PARAMS:
+            # A fraction lives in (0, 1]: doubling 0.8 gives 1.6, which the
+            # estimator rejects (and a rejected candidate silently disappears
+            # from the search).
+            space[key] = sorted({round(value * 0.5, 6), value, min(1.0, round(value * 1.25, 6))})
         elif isinstance(value, float):
             space[key] = [round(value * 0.5, 6), value, round(value * 2, 6)]
         elif isinstance(value, list):
@@ -1614,7 +1823,7 @@ def _top_candidates(cv_results: Dict[str, Any], limit: int = 5) -> List[Dict[str
         params = cv_results["params"][i]
         out.append(
             {
-                "params": safe_json(params),
+                "params": safe_json({k.removeprefix("model__"): v for k, v in params.items()}),
                 "mean_test_score": safe_json(cv_results["mean_test_score"][i]),
                 "rank": int(cv_results["rank_test_score"][i]),
             }
@@ -1631,6 +1840,7 @@ def _run_hyperparameter_search(
     space: Dict[str, Any],
     optimize_metric: str,
     random_state: int,
+    preprocessor: Optional[Any] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], int]:
     """Run a randomized hyperparameter search on the training split.
 
@@ -1659,9 +1869,15 @@ def _run_hyperparameter_search(
     def _fit(cv_value: int) -> None:
         nonlocal cv, search_results, best_params
         estimator = build_model(model_name, task_type, base_params)
+        distributions = space
+        if preprocessor is not None:
+            # The preprocessor is refitted inside every fold, so the search
+            # never sees the statistics of the rows it is scored on.
+            estimator = Pipeline([("prep", clone(preprocessor)), ("model", estimator)])
+            distributions = {f"model__{key}": value for key, value in space.items()}
         search = RandomizedSearchCV(
             estimator=estimator,
-            param_distributions=space,
+            param_distributions=distributions,
             n_iter=n_iter,
             cv=cv_value,
             scoring=scoring,
@@ -1671,7 +1887,9 @@ def _run_hyperparameter_search(
         search.fit(X_train, y_train)
         cv = cv_value
         search_results = _top_candidates(search.cv_results_)
-        best_params = safe_json(search.best_params_)
+        best_params = safe_json(
+            {key.removeprefix("model__"): value for key, value in search.best_params_.items()}
+        )
 
     try:
         _fit(3)
@@ -1710,7 +1928,15 @@ def train_model(
     env_id: Optional[str] = None,
     model_candidates: Optional[List[str]] = None,
     preset: str = "balanced",
+    task_type: Optional[str] = None,
+    cv_folds: int = 5,
 ) -> Tuple[Dict[str, Any], str, str, str]:
+    # ``task_type`` overrides the guess made from the label column, and
+    # ``cv_folds`` (< 2 disables it) sets the cross-validation of the tabular
+    # models. Both are optional and trailing, so existing callers are unaffected.
+    task_type_override = task_type
+    if task_type_override is not None and task_type_override not in TASK_TYPES:
+        raise ValueError(f"task_type must be one of {list(TASK_TYPES)}, got '{task_type_override}'.")
     model_name = normalize_model_name(model_name)
     if mode not in TRAINING_MODES:
         raise ValueError(f"Unsupported training mode '{mode}'.")
@@ -1804,7 +2030,7 @@ def train_model(
     if model_def["category"] == "clustering":
         task_type = "clustering"
     elif label_column in dataset.columns:
-        task_type = infer_task_type(dataset[label_column])
+        task_type = task_type_override or infer_task_type(dataset[label_column])
     
     # AUTO_SEARCH: Try multiple model candidates
     if mode == "auto_search" and model_candidates:
@@ -1838,6 +2064,8 @@ def train_model(
                     optimize_metric,
                     env_id,
                     preset=preset,
+                    task_type=task_type_override,
+                    cv_folds=cv_folds,
                 )
                 score = score_candidate(candidate_metrics, optimize_metric)
                 # "best_score is None" (not "or score") so that a legitimate score of 0
@@ -1916,8 +2144,20 @@ def train_model(
         artifact_path = write_artifact(model_name, model)
         return metrics, dataset_source, dataset_tag, artifact_path
     
-    # SPECIALIZED MODELS: Timeseries, Graph, Autoencoder
-    if model_def["category"] in {"timeseries", "graph", "autoencoder"}:
+    # AUTOENCODER: a real encoder-bottleneck-decoder (unsupervised)
+    if model_def["category"] == "autoencoder":
+        metrics, bundle, _plan = _train_autoencoder(
+            dataset,
+            label_column,
+            _effective_params(mode_suggested),
+            test_size,
+            random_state,
+        )
+        artifact_path = write_artifact(model_name, bundle)
+        return metrics, dataset_source, dataset_tag, artifact_path
+
+    # SPECIALIZED MODELS: Timeseries, Graph
+    if model_def["category"] in {"timeseries", "graph"}:
         metrics, model = _train_torch_regression_or_classification(
             model_name,
             dataset,
@@ -1930,12 +2170,47 @@ def train_model(
     # STANDARD TABULAR MODELS (Random Forest, SVM, LR, etc.)
     if label_column not in dataset.columns:
         raise ValueError(f"label column '{label_column}' not found in dataset.")
-    
+
+    # A row without a label cannot be trained on nor scored.
+    rows_without_label = int(dataset[label_column].isna().sum())
+    if rows_without_label:
+        dataset = dataset[dataset[label_column].notna()]
+        if dataset.empty:
+            raise ValueError(f"The label column '{label_column}' has no value in any row.")
+
     y = dataset[label_column]
-    X = dataset.drop(columns=[label_column])
-    task_type = infer_task_type(y)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state)
+    X_raw = dataset.drop(columns=[label_column])
+    task_type = task_type_override or infer_task_type(y)
+    _check_task_fits_model(model_name, task_type, y)
+
+    # Preprocessing: what is done to every column is decided here (from the
+    # columns alone), and fitted inside the pipeline below.
+    plan = analyze_features(X_raw)
+    X = coerce_features(X_raw, plan)
+    scale = model_name in SCALE_SENSITIVE_MODELS
+
+    label_encoder: Optional[LabelEncoder] = None
+    if task_type == "classification":
+        if y.nunique() < 2:
+            raise ValueError(
+                f"The label column '{label_column}' has a single class: there is nothing to classify."
+            )
+        # Every estimator trains on 0..k-1 (XGBoost requires it); the bundle
+        # decodes the predictions back to the original labels.
+        label_encoder = LabelEncoder().fit(y)
+        y_model = pd.Series(label_encoder.transform(y), index=y.index, name=label_column)
+    else:
+        try:
+            y_model = pd.to_numeric(y, errors="raise").astype(float)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"The label column '{label_column}' must be numeric for a regression "
+                f"(task_type is '{task_type}')."
+            )
+
+    X_train, X_test, y_train, y_test, stratified = split_data(
+        X, y_model, task_type, test_size, random_state
+    )
 
     search_results: List[Dict[str, Any]] = []
     cv_used = 0
@@ -1958,32 +2233,89 @@ def train_model(
             space,
             optimize_metric,
             random_state,
+            preprocessor=build_preprocessor(plan, scale),
         )
         # The search found the best values over the searchable space; the client's
         # values still win when they are merged below by _effective_params().
         mode_suggested = best_params
 
-    model = build_model(model_name, task_type, _effective_params(mode_suggested))
-    model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
-    
-    metrics = {
+    effective = _effective_params(mode_suggested)
+    pipeline = Pipeline(
+        [
+            ("prep", build_preprocessor(plan, scale)),
+            ("model", build_model(model_name, task_type, effective)),
+        ]
+    )
+    pipeline.fit(X_train, y_train)
+
+    predictions = pipeline.predict(X_test)
+    probabilities = None
+    if task_type == "classification" and hasattr(pipeline, "predict_proba"):
+        probabilities = pipeline.predict_proba(X_test)
+    held_out = evaluate_holdout(
+        task_type,
+        y_train.to_numpy(),
+        y_test.to_numpy(),
+        np.asarray(predictions),
+        probabilities,
+        list(label_encoder.classes_) if label_encoder is not None else None,
+    )
+
+    try:
+        encoded_feature_count = int(pipeline.named_steps["prep"].transform(X_train.head(1)).shape[1])
+    except Exception:
+        encoded_feature_count = None
+
+    metrics: Dict[str, Any] = {
         "task_type": task_type,
-        "accuracy": safe_json(accuracy_score(y_test, predictions)) if task_type == "classification" else None,
-        "mse": safe_json(mean_squared_error(y_test, predictions)) if task_type == "regression" else None,
-        "r2": safe_json(r2_score(y_test, predictions)) if task_type == "regression" else None,
+        # The keys every consumer already reads stay present (and None when they
+        # do not apply to the task); the evaluation fills in the real ones.
+        "accuracy": None,
+        "mse": None,
+        "r2": None,
+        **held_out,
         "train_size": len(X_train),
         "test_size": len(X_test),
-        "feature_count": X.shape[1],
+        "feature_count": len(plan.columns),
+        "encoded_feature_count": encoded_feature_count,
+        # What the artifact is: a bundle that knows its columns and can predict
+        # (the UI offers the prediction form for these runs only).
+        "artifact_kind": TabularModelBundle.kind,
         # The parameters that were really used: the catalog defaults, the mode's
         # suggestions and the client's values, with the preset applied once.
-        "model_parameters": safe_json(_effective_params(mode_suggested)),
+        "model_parameters": safe_json(effective),
+        "preprocessing": preprocessing_report(
+            X_raw,
+            plan,
+            scale,
+            rows_without_label,
+            stratified=stratified if task_type == "classification" else None,
+            task_type_source="request" if task_type_override else "inferred",
+        ),
     }
+
+    cv = cross_validate_pipeline(pipeline, X_train, y_train.to_numpy(), task_type, cv_folds, random_state)
+    metrics["cv"] = cv
+    primary = "accuracy" if task_type == "classification" else "r2"
+    if cv.get("scores", {}).get(primary):
+        metrics["cv_metric"] = primary
+        metrics["cv_score_mean"] = cv["scores"][primary]["mean"]
+        metrics["cv_score_std"] = cv["scores"][primary]["std"]
+
     if search_results:
         metrics["search_results"] = search_results
         metrics["search_cv"] = cv_used
-    
-    artifact_path = write_artifact(model_name, model)
+
+    bundle = TabularModelBundle(
+        pipeline=pipeline,
+        plan=plan,
+        model_name=model_name,
+        task_type=task_type,
+        label_column=label_column,
+        feature_schema=describe_features(X_train, plan),
+        label_encoder=label_encoder,
+    )
+    artifact_path = write_artifact(model_name, bundle)
     return metrics, dataset_source, dataset_tag, artifact_path
 
 

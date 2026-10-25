@@ -75,7 +75,20 @@ class TrainingRun(Base):
     hyperparameters = Column(JSON, nullable=False)
     metrics = Column(JSON, nullable=True)
     artifact_path = Column(String, nullable=True)
-    status = Column(String, nullable=False, default="pending")
+    # queued -> running -> completed | failed | cancelled. Indexed: the worker
+    # asks for the oldest queued run.
+    status = Column(String, nullable=False, default="pending", index=True)
+    # Everything a worker needs to run the training: the request, the resolved
+    # path of the dataset and its name. The row is the queue, so a queued run
+    # survives a restart and any process can pick it up.
+    request_payload = Column(JSON, nullable=True)
+    # Who runs the run, since when, and the last time it said it was alive. A
+    # running run whose heartbeat stopped is failed; one with a fresh heartbeat
+    # belongs to a live worker and is never touched.
+    worker_id = Column(String, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     owner = relationship("User", back_populates="training_runs")

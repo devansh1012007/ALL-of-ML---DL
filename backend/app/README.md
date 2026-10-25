@@ -21,7 +21,8 @@ High-level architecture
   | `vision` | `_train_resnet_image_model(...)` |
   | `clustering` | `_train_clustering(...)` |
   | `nlp` | `_train_transformer_text_classifier(...)` |
-  | `timeseries`, `graph`, `autoencoder` | `_train_torch_regression_or_classification(...)` |
+  | `timeseries`, `graph` | `_train_torch_regression_or_classification(...)` |
+  | `autoencoder` | `_train_autoencoder(...)` (scikit-learn `MLPRegressor` as encoder-bottleneck-decoder, no torch) |
   | `classification`, `regression`, `time-series` | tabular sklearn flow via `build_model(...)` |
 
   The boosting entries (`XGboost_timeseries`, `lightGBM_timeseries`, `CATboost_timeseries`) use the `time-series` category and train as tabular models through `build_model(...)`. `HMM_timeseries` uses the `clustering` category because its trainer (`hmm.GaussianHMM`) lives in `_train_clustering(...)`.
@@ -123,7 +124,7 @@ if model_name == "My_Sklearn_Model":
     return MyEstimator(**params)
 ```
 
-- `train_model()` will call `build_model()` and run the standard fit/predict/score flow.
+- `train_model()` will call `build_model()` and run the standard tabular flow: `analyze_features` / `coerce_features` / `build_preprocessor` (in `tabular.py`), a stratified `split_data`, the estimator inside a `Pipeline` (preprocessing is fitted on the training rows only), `evaluate_holdout` (task-correct metrics and a baseline), `cross_validate_pipeline`, and a `TabularModelBundle` as the artifact. The estimator is built with `build_model()` and trains on labels `0..k-1` (a `LabelEncoder`; the bundle decodes the predictions), so the catalog's `params` must still be accepted by the estimator.
 
 Limitations / notes:
 - `build_model()` currently contains only a subset of sklearn estimators. Add imports at top of file and a branch in `build_model()`.
@@ -164,11 +165,11 @@ Limitations:
 
 Limitations:
 - Gym envs must be available in the runtime environment (i.e., installed or reachable). Installing custom environments is outside the repo scope.
-- RL training is long-running and currently executed synchronously in a threadpool; consider using an async job queue (Celery / RQ) for production.
+- RL training is long-running and executes in a thread of the worker process (the queue is the `training_runs` table, see the readme); a dedicated queue (Celery / RQ) is in `TODO.MD`.
 
 5) Autoencoders, Graph models, Timeseries
 
-- Follow the same pattern: catalog entry + params + trainer if needed. For timeseries and graph models you will likely need to write a PyTorch training loop similar to `_train_torch_regression_or_classification()`.
+- Follow the same pattern: catalog entry + params + trainer if needed. `Autoencoder` is done (see `_train_autoencoder`: preprocessing, held-out reconstruction error against a predict-the-mean baseline, an anomaly threshold and an `AutoencoderBundle` for predictions). For timeseries and graph models you will likely need to write a PyTorch training loop similar to `_train_torch_regression_or_classification()`.
 
 6) Clustering models
 
@@ -210,10 +211,10 @@ Function limitations (detailed)
     "Presets"). Client-pinned hyperparameters are sampled out of the space and still win.
 
 2) `train_model(...)`
-- Synchronous execution: `train_model` is typically executed inside `run_in_threadpool()` (FastAPI endpoint). Long-running training will block the threadpool thread; for production use a job queue or background worker.
+- Execution: `train_model` runs in a threadpool thread of a worker (`_run_claimed`), never in a request. A long training holds one of the `TRAINING_CONCURRENCY` slots of its process; it cannot be interrupted (cancel discards its result), and the process can run as a separate `python -m backend.app.worker`.
 - Resource management: The code does not manage GPU allocation, it uses the default PyTorch device; adding explicit device selection is recommended for multi-GPU systems.
 - Error handling: Many helpers raise exceptions which bubble up to the endpoint; consider more granular error reporting and retries for recoverable failures.
-- `auto_search` ranks the trained candidates with `score_candidate(metrics, optimize_metric)`: the requested metric is used when the run reports it, otherwise the first reported metric of `accuracy` / `r2` / `mse` / `mean_reward` / `silhouette` is used. The error metrics (`mse`, `rmse`, `mae`) are negated because lower is better for them, and a candidate that reports none of these metrics scores `0.0`. The ranking therefore works for classification, regression, RL and clustering runs: clustering candidates are ranked by their `silhouette` score (DBSCAN's noise label `-1` is excluded from the computation, and a run with fewer than two clusters scores `0.0`).
+- `auto_search` ranks the trained candidates with `score_candidate(metrics, optimize_metric)`: the requested metric is used when the run reports it, otherwise the first reported metric of `accuracy` / `r2` / `rmse` / `mse` / `mean_reward` / `silhouette` is used. When the run has a cross-validation (`metrics.cv`), its mean for the metric ranks the candidate instead of the hold-out value, because the winner of several candidates is picked on exactly the hold-out rows. The error metrics (`mse`, `rmse`, `mae`) are negated because lower is better for them, and a candidate that reports none of these metrics scores `0.0`. The ranking therefore works for classification, regression, RL and clustering runs: clustering candidates are ranked by their `silhouette` score (DBSCAN's noise label `-1` is excluded from the computation, and a run with fewer than two clusters scores `0.0`).
 - `auto_search` trains every candidate in `manual` mode and applies the preset **once per candidate** (the recursion forwards the raw client values plus the preset, never already-adjusted values). It also forwards only the client parameters that the candidate's own catalog entry declares: a parameter of another candidate (e.g. `C` for `Random_Forest`) must not make a candidate fail and silently disappear from the comparison. This is the one deliberate asymmetry to the single-model path, where an unknown parameter name still raises `TypeError`. The filter is catalog-based, so a parameter that the estimator accepts but the catalog does not declare (e.g. `max_features` for `Random_Forest`) is honoured in the single-model path yet dropped for the candidates of an `auto_search` run.
 
 3) `build_model(...)`
@@ -238,7 +239,7 @@ Operational notes
 
 - Artifacts are written to `MODEL_DIR` (defined in `model_training.py`). Ensure persistent storage in production.
 - Secrets: do not commit API keys. Set `GOOGLE_API_KEY` in environment variables or secret manager used by your runtime.
-- Consider replacing synchronous job execution with a background worker for scalability (RQ, Celery, or a Kubernetes Job).
+- The queue is the `training_runs` table (claim, heartbeat, sweeper); run `python -m backend.app.worker` processes with `TRAINING_IN_API=0` on the web process to separate them. A dedicated queue (RQ, Celery) or a process per training (which would make a running run interruptible) is the next step.
 
 Checklist when adding a new model
 --------------------------------

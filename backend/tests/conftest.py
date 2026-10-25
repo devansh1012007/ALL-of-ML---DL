@@ -50,6 +50,11 @@ os.environ["DATASETS_ROOT"] = _TMP_DATASETS_DIR
 # repository during the test run. The tests bring their own key instead.
 os.environ["SECRET_KEY"] = "test-signing-key-for-the-backend-test-suite"
 
+# The maintenance loop of the training queue sweeps and drains every few
+# seconds. The tests drive the queue by hand (and assert the state of a run
+# between two steps), so the loop is kept from waking up in the middle of one.
+os.environ["QUEUE_POLL_SECONDS"] = "3600"
+
 
 def _remove_tmp_db_dir():
     shutil.rmtree(_TMP_DB_DIR, ignore_errors=True)
@@ -126,7 +131,7 @@ def clean_rate_limits():
     reset_rate_limits()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def wait_for_run():
     """Wait until a run is finished, and return it.
 
@@ -141,7 +146,7 @@ def wait_for_run():
             response = client.get(f"/api/v1/ml/runs/{run_id}", headers=headers)
             assert response.status_code == 200, response.text
             run = response.json()
-            if run["status"] in ("completed", "failed"):
+            if run["status"] in ("completed", "failed", "cancelled"):
                 return run
             if time.monotonic() > deadline:
                 raise AssertionError(

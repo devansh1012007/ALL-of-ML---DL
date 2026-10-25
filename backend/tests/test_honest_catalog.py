@@ -2,7 +2,7 @@
 
 These tests pin the honesty contract of the model catalog:
 
-* every catalog entry declares ``implemented`` and exactly the eight
+* every catalog entry declares ``implemented`` and exactly the twelve
   placeholders are ``False`` while the rest are ``True``;
 * a placeholder fails fast in ``train_model()`` and writes no artifact;
 * a real model still trains end to end and writes an artifact;
@@ -40,7 +40,6 @@ from backend.app.model_training import (
 PLACEHOLDERS = frozenset(
     {
         "Q-Learning",
-        "Autoencoder",
         "GNN",
         "LSTM",
         "RNN",

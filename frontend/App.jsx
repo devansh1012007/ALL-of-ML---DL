@@ -1,7 +1,7 @@
 import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import { 
   Activity, Database, Server, PlusCircle, LogOut, ChevronRight, 
-  Play, CheckCircle, XCircle, Clock, Download, Lock, User
+  Play, CheckCircle, XCircle, Clock, Download, Lock, User, Ban, BarChart3
 } from 'lucide-react';
 
 // --- CONFIGURATION ---
@@ -456,6 +456,11 @@ const RunsDashboard = ({ navigate }) => {
   const { apiFetch } = useContext(AuthContext);
   const [runs, setRuns] = useState([]);
   const [runsError, setRunsError] = useState(null);
+  // The runs ticked for a comparison (at most four: more would not fit a screen).
+  const [selected, setSelected] = useState([]);
+  const toggleSelected = (id) => setSelected((current) => (
+    current.includes(id) ? current.filter((x) => x !== id) : (current.length < 4 ? [...current, id] : current)
+  ));
 
   const fetchRuns = useCallback(() => {
     // A failed request is not the same as "there are no runs": the two cases are
@@ -476,6 +481,7 @@ const RunsDashboard = ({ navigate }) => {
     switch(status) {
       case 'completed': return <CheckCircle className="w-4 h-4 text-emerald-500" />;
       case 'failed': return <XCircle className="w-4 h-4 text-red-500" />;
+      case 'cancelled': return <Ban className="w-4 h-4 text-zinc-500" />;
       case 'running': return <Activity className="w-4 h-4 text-blue-500 animate-pulse" />;
       // A queued run waits for the worker, it has not started yet.
       case 'queued': return <Clock className="w-4 h-4 text-zinc-500" />;
@@ -490,13 +496,24 @@ const RunsDashboard = ({ navigate }) => {
           <h1 className="text-2xl font-bold text-white mb-2">Training Runs</h1>
           <p className="text-zinc-400">Monitor and inspect ML pipeline executions.</p>
         </div>
-        <button 
-          onClick={() => navigate('new-job')}
-          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium"
-        >
-          <PlusCircle className="w-4 h-4" />
-          <span>New Training Job</span>
-        </button>
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={() => navigate('compare', selected)}
+            disabled={selected.length < 2}
+            title="Tick two to four runs"
+            className="flex items-center space-x-2 border border-zinc-700 text-zinc-200 hover:bg-zinc-800 px-4 py-2 rounded-md font-medium disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Compare{selected.length > 0 ? ` (${selected.length})` : ''}</span>
+          </button>
+          <button 
+            onClick={() => navigate('new-job')}
+            className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium"
+          >
+            <PlusCircle className="w-4 h-4" />
+            <span>New Training Job</span>
+          </button>
+        </div>
       </div>
 
       {runsError && (
@@ -509,6 +526,7 @@ const RunsDashboard = ({ navigate }) => {
         <table className="w-full text-left text-sm">
           <thead className="bg-zinc-950 text-zinc-400 border-b border-zinc-800 uppercase tracking-wider">
             <tr>
+              <th className="px-4 py-4 w-8" />
               <th className="px-6 py-4 font-medium">ID</th>
               <th className="px-6 py-4 font-medium">Model</th>
               <th className="px-6 py-4 font-medium">Dataset</th>
@@ -520,7 +538,7 @@ const RunsDashboard = ({ navigate }) => {
           <tbody className="divide-y divide-zinc-800">
             {runs.length === 0 && !runsError && (
               <tr>
-                <td colSpan="6" className="px-6 py-8 text-center text-zinc-500">No training runs found.</td>
+                <td colSpan="7" className="px-6 py-8 text-center text-zinc-500">No training runs found.</td>
               </tr>
             )}
             {runs.map(run => (
@@ -529,6 +547,15 @@ const RunsDashboard = ({ navigate }) => {
                 onClick={() => navigate('run-details', run.id)}
                 className="hover:bg-zinc-800/50 cursor-pointer transition-colors text-zinc-300"
               >
+                <td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    aria-label={`Select run ${run.id} for a comparison`}
+                    checked={selected.includes(run.id)}
+                    onChange={() => toggleSelected(run.id)}
+                    disabled={run.status !== 'completed'}
+                  />
+                </td>
                 <td className="px-6 py-4 font-mono text-zinc-500">#{run.id}</td>
                 <td className="px-6 py-4 font-medium text-white">{run.model_name}</td>
                 <td className="px-6 py-4 truncate max-w-[200px]">{run.dataset_tag}</td>
@@ -539,14 +566,477 @@ const RunsDashboard = ({ navigate }) => {
                   </div>
                 </td>
                 <td className="px-6 py-4 font-mono">
-                  {run.metrics?.accuracy ? `Acc: ${run.metrics.accuracy.toFixed(4)}` : 
-                   run.metrics?.mse ? `MSE: ${run.metrics.mse.toFixed(4)}` : '-'}
+                  {primaryMetric(run)}
                 </td>
                 <td className="px-6 py-4 text-zinc-500">
                   {new Date(run.created_at).toLocaleString()}
                 </td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// --- METRICS, EVALUATION AND PREDICTION ---------------------------------------
+
+// Metrics for which a smaller value is the better one.
+const LOWER_IS_BETTER = new Set(['mse', 'rmse', 'mae', 'reconstruction_mse', 'train_loss']);
+// Metrics that are not a single number: they get a panel of their own instead
+// of a tile (a tile would print "[object Object]").
+const STRUCTURED_METRICS = new Set([
+  'model_parameters', 'cv', 'confusion_matrix', 'preprocessing', 'search_results',
+]);
+const isNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+
+const formatMetric = (val) => {
+  if (val === null || val === undefined) return '—';
+  if (typeof val === 'boolean') return val ? 'yes' : 'no';
+  if (typeof val === 'number') return Number.isInteger(val) ? String(val) : val.toFixed(4);
+  return String(val);
+};
+
+// What the list shows for a run: the score, and the baseline it has to beat.
+const primaryMetric = (run) => {
+  const m = run.metrics;
+  if (!m || run.status !== 'completed') return '-';
+  if (isNumber(m.accuracy)) {
+    return `Acc ${m.accuracy.toFixed(3)}` + (isNumber(m.baseline_accuracy) ? ` (baseline ${m.baseline_accuracy.toFixed(3)})` : '');
+  }
+  if (isNumber(m.rmse)) {
+    return `RMSE ${m.rmse.toFixed(3)}` + (isNumber(m.baseline_rmse) ? ` (baseline ${m.baseline_rmse.toFixed(3)})` : '');
+  }
+  if (isNumber(m.reconstruction_mse)) {
+    return `Recon MSE ${m.reconstruction_mse.toFixed(4)}` + (isNumber(m.baseline_mse) ? ` (baseline ${m.baseline_mse.toFixed(4)})` : '');
+  }
+  if (isNumber(m.mse)) return `MSE ${m.mse.toFixed(4)}`;
+  return '-';
+};
+
+const Bar = ({ label, value, max, tone = 'bg-blue-500', note }) => {
+  const width = isNumber(value) && max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+  return (
+    <div>
+      <div className="flex justify-between text-xs text-zinc-400 mb-1">
+        <span>{label}</span>
+        <span className="font-mono text-zinc-300">{formatMetric(value)}{note ? ` ${note}` : ''}</span>
+      </div>
+      <div className="h-2 bg-zinc-800 rounded">
+        <div className={`h-2 rounded ${tone}`} style={{ width: `${width}%` }} />
+      </div>
+    </div>
+  );
+};
+
+// The score of a run next to what a model that learned nothing scores, plus the
+// cross-validation. A score without its baseline is how a 95%-"no" dataset makes
+// a useless model look good, so the verdict is spelled out.
+const EvaluationPanel = ({ metrics }) => {
+  const rows = [];
+  let verdict = null;
+  if (isNumber(metrics.accuracy)) {
+    rows.push({ label: 'Accuracy', value: metrics.accuracy, max: 1, tone: 'bg-blue-500' });
+    if (isNumber(metrics.baseline_accuracy)) {
+      rows.push({ label: 'Baseline (always the most frequent class)', value: metrics.baseline_accuracy, max: 1, tone: 'bg-zinc-600' });
+      if (metrics.accuracy <= metrics.baseline_accuracy + 0.01) {
+        verdict = 'This model does not beat always predicting the most frequent class: its accuracy says nothing.';
+      }
+    }
+    if (isNumber(metrics.balanced_accuracy)) rows.push({ label: 'Balanced accuracy', value: metrics.balanced_accuracy, max: 1, tone: 'bg-blue-400' });
+    if (isNumber(metrics.f1_macro)) rows.push({ label: 'F1 (macro)', value: metrics.f1_macro, max: 1, tone: 'bg-blue-400' });
+    if (isNumber(metrics.roc_auc)) rows.push({ label: 'ROC AUC', value: metrics.roc_auc, max: 1, tone: 'bg-blue-400' });
+  } else if (isNumber(metrics.rmse)) {
+    const top = Math.max(metrics.rmse, metrics.baseline_rmse || 0) || 1;
+    rows.push({ label: 'RMSE', value: metrics.rmse, max: top, tone: 'bg-blue-500' });
+    if (isNumber(metrics.baseline_rmse)) {
+      rows.push({ label: 'Baseline RMSE (always the training mean)', value: metrics.baseline_rmse, max: top, tone: 'bg-zinc-600' });
+      if (metrics.rmse >= metrics.baseline_rmse) {
+        verdict = 'This model is not better than always predicting the training mean.';
+      }
+    }
+  } else if (isNumber(metrics.reconstruction_mse)) {
+    const top = Math.max(metrics.reconstruction_mse, metrics.baseline_mse || 0) || 1;
+    rows.push({ label: 'Reconstruction error (held-out rows)', value: metrics.reconstruction_mse, max: top, tone: 'bg-blue-500' });
+    if (isNumber(metrics.baseline_mse)) {
+      rows.push({ label: 'Baseline (the mean of every column)', value: metrics.baseline_mse, max: top, tone: 'bg-zinc-600' });
+      if (metrics.reconstruction_mse >= metrics.baseline_mse) {
+        verdict = 'The bottleneck learned nothing: it reconstructs no better than the mean.';
+      }
+    }
+  }
+  if (rows.length === 0) return null;
+
+  const cv = metrics.cv;
+  const cvScores = cv && cv.scores ? Object.entries(cv.scores) : [];
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+      <h3 className="text-lg font-semibold text-white mb-4">Evaluation</h3>
+      <p className="text-xs text-zinc-500 mb-4">
+        Measured on rows the model never trained on
+        {metrics.preprocessing && metrics.preprocessing.stratified_split ? ' (stratified split)' : ''}.
+      </p>
+      <div className="space-y-3">
+        {rows.map((r) => <Bar key={r.label} {...r} />)}
+      </div>
+      {verdict && (
+        <p className="mt-4 text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">{verdict}</p>
+      )}
+      {cv && (
+        <div className="mt-5 text-sm text-zinc-300">
+          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-2">Cross-validation</div>
+          {cvScores.length > 0 ? (
+            <>
+              <p className="text-xs text-zinc-500 mb-2">{cv.folds} folds on the training rows (mean ± standard deviation).</p>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                {cvScores.map(([name, s]) => (
+                  <div key={name} className="bg-zinc-950 p-3 rounded-md border border-zinc-800/50">
+                    <div className="text-xs text-zinc-500 uppercase tracking-wider">{name.replace(/_/g, ' ')}</div>
+                    <div className="font-mono text-zinc-200">{formatMetric(s.mean)} ± {formatMetric(s.std)}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="text-zinc-500">Not run: {cv.skipped}.</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ConfusionMatrix = ({ confusion }) => {
+  if (!confusion || !Array.isArray(confusion.matrix) || confusion.matrix.length === 0) return null;
+  const labels = confusion.labels || [];
+  const top = Math.max(1, ...confusion.matrix.flat());
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+      <h3 className="text-lg font-semibold text-white mb-1">Confusion matrix</h3>
+      <p className="text-xs text-zinc-500 mb-4">Rows: the true class. Columns: the predicted class.</p>
+      <div className="overflow-x-auto">
+        <table className="text-sm text-center">
+          <thead>
+            <tr>
+              <th className="px-3 py-2" />
+              {labels.map((l) => <th key={String(l)} className="px-3 py-2 text-zinc-400 font-medium">{String(l)}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {confusion.matrix.map((row, i) => (
+              <tr key={i}>
+                <th className="px-3 py-2 text-zinc-400 font-medium text-right">{String(labels[i])}</th>
+                {row.map((count, j) => (
+                  <td
+                    key={j}
+                    className={`px-3 py-2 font-mono ${i === j ? 'text-emerald-200' : 'text-red-200'}`}
+                    style={{ background: `rgba(${i === j ? '16,185,129' : '239,68,68'},${(count / top) * 0.45})` }}
+                  >
+                    {count}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// What was done to the data before the model saw it.
+const PreprocessingReport = ({ report }) => {
+  if (!report) return null;
+  const list = (items) => (items && items.length ? items.join(', ') : 'none');
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+      <h3 className="text-lg font-semibold text-white mb-4">Data preparation</h3>
+      <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Numeric columns</dt><dd className="text-zinc-300 break-words">{list(report.numeric_columns)}</dd></div>
+        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Categorical columns (one-hot)</dt><dd className="text-zinc-300 break-words">{list(report.categorical_columns)}</dd></div>
+        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Missing cells filled in</dt><dd className="text-zinc-300">{report.missing_cells_imputed}</dd></div>
+        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Rows without a label (dropped)</dt><dd className="text-zinc-300">{report.rows_dropped_missing_label}</dd></div>
+        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Features standardised</dt><dd className="text-zinc-300">{formatMetric(report.scaled)}</dd></div>
+        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Task type</dt><dd className="text-zinc-300">{report.task_type_source === 'request' ? 'chosen by you' : 'guessed from the label'}</dd></div>
+      </dl>
+      {report.dropped_columns && report.dropped_columns.length > 0 && (
+        <div className="mt-4">
+          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Dropped columns</div>
+          <ul className="text-sm text-amber-200/90 space-y-1">
+            {report.dropped_columns.map((d) => <li key={d.column}><span className="font-mono">{d.column}</span>: {d.reason}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// A prediction form built from the schema of the run: the model says which
+// columns it expects, so nobody has to know them by heart.
+const PredictPanel = ({ runId }) => {
+  const { apiFetch } = useContext(AuthContext);
+  const [schema, setSchema] = useState(null);
+  const [schemaError, setSchemaError] = useState(null);
+  const [values, setValues] = useState({});
+  const [mode, setMode] = useState('form');
+  const [jsonText, setJsonText] = useState('');
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setSchema(null);
+    setSchemaError(null);
+    setResult(null);
+    apiFetch(`/api/v1/ml/runs/${runId}/schema`)
+      .then((s) => {
+        if (!active) return;
+        setSchema(s);
+        const initial = {};
+        s.features.forEach((f) => { initial[f.name] = f.default === undefined ? '' : String(f.default); });
+        setValues(initial);
+        setJsonText(JSON.stringify([Object.fromEntries(s.features.map((f) => [f.name, f.default]))], null, 2));
+      })
+      .catch((err) => { if (active) setSchemaError(err.message || 'The model cannot predict.'); });
+    return () => { active = false; };
+  }, [apiFetch, runId]);
+
+  const rowFromForm = () => {
+    const row = {};
+    schema.features.forEach((f) => {
+      const raw = values[f.name];
+      if (raw === '' || raw === undefined) return; // left out: the model imputes it
+      row[f.name] = f.kind === 'numeric' ? Number(raw) : raw;
+    });
+    return row;
+  };
+
+  const predict = async () => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      let rows;
+      if (mode === 'json') {
+        rows = JSON.parse(jsonText);
+        if (!Array.isArray(rows)) throw new Error('The rows have to be a JSON array of objects.');
+      } else {
+        rows = [rowFromForm()];
+      }
+      setResult(await apiFetch(`/api/v1/ml/runs/${runId}/predict`, { method: 'POST', body: JSON.stringify({ rows }) }));
+    } catch (err) {
+      setError(err.message || 'The prediction failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (schemaError) {
+    return (
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-white mb-2">Predict</h3>
+        <p className="text-sm text-zinc-500">{schemaError}</p>
+      </div>
+    );
+  }
+  if (!schema) return <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6 text-zinc-500">Loading the model…</div>;
+
+  const inputClass = 'w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white text-sm focus:ring-2 focus:ring-blue-500';
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-lg font-semibold text-white">Predict with this model</h3>
+        <div className="flex text-xs border border-zinc-800 rounded-md overflow-hidden">
+          {['form', 'json'].map((m) => (
+            <button key={m} onClick={() => setMode(m)} className={`px-3 py-1 ${mode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'}`}>
+              {m === 'form' ? 'One row' : 'Several rows (JSON)'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {mode === 'form' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {schema.features.map((f) => (
+            <div key={f.name}>
+              <label className="block text-xs text-zinc-400 mb-1">
+                {f.name}
+                <span className="text-zinc-600">{f.kind === 'numeric' ? ` (${formatMetric(f.min)} to ${formatMetric(f.max)})` : ''}</span>
+              </label>
+              {f.kind === 'categorical' && !f.categories_truncated ? (
+                <select value={values[f.name] ?? ''} onChange={(e) => setValues({ ...values, [f.name]: e.target.value })} className={inputClass}>
+                  <option value="">(missing)</option>
+                  {f.categories.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              ) : (
+                <input
+                  type={f.kind === 'numeric' ? 'number' : 'text'} step="any"
+                  value={values[f.name] ?? ''}
+                  onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}
+                  className={inputClass}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} rows={8} className={`${inputClass} font-mono`} />
+      )}
+
+      <div className="mt-4 flex items-center space-x-3">
+        <button onClick={predict} disabled={loading} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium disabled:opacity-50">
+          {loading ? 'Predicting…' : 'Predict'}
+        </button>
+        <span className="text-xs text-zinc-500">A field left empty is treated as missing, as in training.</span>
+      </div>
+
+      {error && <p className="mt-4 text-sm text-red-300 border border-red-900 rounded-md px-3 py-2">{error}</p>}
+      {result && <PredictionResult result={result} />}
+    </div>
+  );
+};
+
+const PredictionResult = ({ result }) => (
+  <div className="mt-5 space-y-3">
+    {result.warnings && result.warnings.length > 0 && (
+      <ul className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 space-y-1">
+        {result.warnings.map((w, i) => <li key={i}>{w}</li>)}
+      </ul>
+    )}
+    {result.predictions.map((p, i) => (
+      <div key={i} className="bg-zinc-950 border border-zinc-800/50 rounded-md p-4">
+        <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Row {i + 1}</div>
+        <div className="text-2xl font-mono text-white">{isNumber(p) ? formatMetric(p) : String(p)}</div>
+        {result.probabilities && result.probabilities[i] && (
+          <div className="mt-3 space-y-2">
+            {Object.entries(result.probabilities[i]).map(([label, prob]) => (
+              <Bar key={label} label={String(label)} value={prob} max={1} tone={String(label) === String(p) ? 'bg-emerald-500' : 'bg-zinc-600'} />
+            ))}
+          </div>
+        )}
+      </div>
+    ))}
+    {result.reconstruction_error && result.reconstruction_error.map((err, i) => (
+      <div key={i} className="bg-zinc-950 border border-zinc-800/50 rounded-md p-4">
+        <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Row {i + 1}</div>
+        <div className={`text-xl font-mono ${result.is_anomaly[i] ? 'text-red-300' : 'text-emerald-300'}`}>
+          {result.is_anomaly[i] ? 'Unusual' : 'Usual'} — error {formatMetric(err)}
+        </div>
+        <div className="text-xs text-zinc-500 mt-1">Threshold {formatMetric(result.threshold)}. Latent code: [{result.latent[i].map((v) => v.toFixed(3)).join(', ')}]</div>
+      </div>
+    ))}
+  </div>
+);
+
+// Several runs side by side: the same metric in a row, the best value marked,
+// and a bar so the difference is visible without reading the numbers.
+const CompareRuns = ({ runIds, navigate }) => {
+  const { apiFetch } = useContext(AuthContext);
+  const [runs, setRuns] = useState(null);
+  const [error, setError] = useState(null);
+  const [metric, setMetric] = useState(null);
+  const ids = Array.isArray(runIds) ? runIds : [];
+
+  useEffect(() => {
+    let active = true;
+    Promise.all(ids.map((id) => apiFetch(`/api/v1/ml/runs/${id}`)))
+      .then((data) => { if (active) setRuns(data); })
+      .catch((err) => { if (active) setError(err.message || 'Could not load the runs.'); });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiFetch, ids.join(',')]);
+
+  if (error) return <div className="bg-red-900/30 border border-red-500/50 p-4 rounded-md text-red-200">{error}</div>;
+  if (!runs) return <div className="text-zinc-500 p-8">Loading the runs...</div>;
+
+  const completed = runs.filter((r) => r.status === 'completed' && r.metrics);
+  const metricNames = [];
+  completed.forEach((r) => Object.entries(r.metrics).forEach(([k, v]) => {
+    if (isNumber(v) && !STRUCTURED_METRICS.has(k) && !metricNames.includes(k)) metricNames.push(k);
+  }));
+  const selected = metric && metricNames.includes(metric) ? metric : metricNames[0];
+  const valueOf = (run, name) => (run.metrics && isNumber(run.metrics[name]) ? run.metrics[name] : null);
+  const bestOf = (name) => {
+    const values = completed.map((r) => valueOf(r, name)).filter((v) => v !== null);
+    if (values.length < 2) return null;
+    return LOWER_IS_BETTER.has(name) ? Math.min(...values) : Math.max(...values);
+  };
+  const top = selected ? Math.max(1e-12, ...completed.map((r) => Math.abs(valueOf(r, selected) || 0))) : 1;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center space-x-2 text-sm text-zinc-500">
+        <button onClick={() => navigate('runs')} className="hover:text-white">Runs</button>
+        <ChevronRight className="w-4 h-4" />
+        <span className="text-zinc-300">Compare {runs.length} runs</span>
+      </div>
+      <h1 className="text-2xl font-bold text-white">Compare runs</h1>
+      {completed.length < runs.length && (
+        <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">
+          Only completed runs have metrics: {runs.length - completed.length} of the selected runs {runs.length - completed.length === 1 ? 'is' : 'are'} not shown in the metric table.
+        </p>
+      )}
+
+      {selected && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">Chart</h3>
+            <select value={selected} onChange={(e) => setMetric(e.target.value)} className="bg-zinc-950 border border-zinc-800 rounded-md px-3 py-1 text-sm text-white">
+              {metricNames.map((n) => <option key={n} value={n}>{n.replace(/_/g, ' ')}</option>)}
+            </select>
+          </div>
+          <div className="space-y-3">
+            {completed.map((r) => (
+              <Bar
+                key={r.id}
+                label={`#${r.id} ${r.model_name}`}
+                value={valueOf(r, selected)}
+                max={top}
+                tone={valueOf(r, selected) !== null && valueOf(r, selected) === bestOf(selected) ? 'bg-emerald-500' : 'bg-blue-500'}
+              />
+            ))}
+          </div>
+          <p className="text-xs text-zinc-500 mt-3">{LOWER_IS_BETTER.has(selected) ? 'Lower is better.' : 'Higher is better.'} The best run is green.</p>
+        </div>
+      )}
+
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-zinc-950 text-zinc-400 border-b border-zinc-800">
+            <tr>
+              <th className="px-4 py-3 font-medium">Metric</th>
+              {completed.map((r) => (
+                <th key={r.id} className="px-4 py-3 font-medium cursor-pointer hover:text-white" onClick={() => navigate('run-details', r.id)}>
+                  #{r.id} {r.model_name}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800 text-zinc-300">
+            {metricNames.map((name) => (
+              <tr key={name}>
+                <td className="px-4 py-2 text-zinc-500 uppercase text-xs tracking-wider">{name.replace(/_/g, ' ')}</td>
+                {completed.map((r) => {
+                  const v = valueOf(r, name);
+                  const best = bestOf(name);
+                  return (
+                    <td key={r.id} className={`px-4 py-2 font-mono ${v !== null && best !== null && v === best ? 'text-emerald-300' : ''}`}>
+                      {v === null ? '—' : formatMetric(v)}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+            <tr>
+              <td className="px-4 py-2 text-zinc-500 uppercase text-xs tracking-wider">Parameters</td>
+              {completed.map((r) => (
+                <td key={r.id} className="px-4 py-2 font-mono text-xs text-zinc-400 align-top">
+                  <pre className="whitespace-pre-wrap">{JSON.stringify(r.metrics.model_parameters || r.hyperparameters || {}, null, 1)}</pre>
+                </td>
+              ))}
+            </tr>
           </tbody>
         </table>
       </div>
@@ -561,6 +1051,10 @@ const RunDetails = ({ runId, navigate }) => {
   const modelFetchedRef = useRef(null);
   const [error, setError] = useState(null);
   const [downloading, setDownloading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelNote, setCancelNote] = useState(null);
+  // Bumped to read the run again at once (after a cancel).
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -577,8 +1071,8 @@ const RunDetails = ({ runId, navigate }) => {
         .then(data => {
           if (!active) return;
           setRun(data);
-          // A run that is neither completed nor failed is still going.
-          const finished = data.status === 'completed' || data.status === 'failed';
+          // A run that is not completed, failed or cancelled is still going.
+          const finished = ['completed', 'failed', 'cancelled'].includes(data.status);
           if (!finished) {
             timer = setTimeout(fetchRun, RUN_POLL_INTERVAL_MS);
           }
@@ -592,7 +1086,7 @@ const RunDetails = ({ runId, navigate }) => {
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, [apiFetch, runId]);
+  }, [apiFetch, runId, reloadKey]);
 
   // The run only names its model: look up the catalog entry to know whether
   // the model is implemented. A placeholder model was never trained, so it
@@ -609,6 +1103,21 @@ const RunDetails = ({ runId, navigate }) => {
       // just without the "not implemented" banner.
       .catch(() => {});
   }, [runId, run?.model_name, apiFetch]);
+
+  const handleCancel = async () => {
+    setCancelling(true);
+    setCancelNote(null);
+    try {
+      const answer = await apiFetch(`/api/v1/ml/runs/${runId}/cancel`, { method: 'POST' });
+      // A running training cannot be interrupted: the answer says so.
+      if (answer.note) setCancelNote(answer.note);
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      setCancelNote(e.message || 'The run could not be cancelled.');
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -665,8 +1174,21 @@ const RunDetails = ({ runId, navigate }) => {
               {run.status}
             </span>
             <span>Started: {new Date(run.created_at).toLocaleString()}</span>
+            {run.started_at && run.finished_at && (
+              <span>Took {Math.max(0, Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000))} s</span>
+            )}
           </div>
         </div>
+        {(run.status === 'queued' || run.status === 'running') && (
+          <button
+            onClick={handleCancel}
+            disabled={cancelling}
+            className="flex items-center space-x-2 border border-red-800 text-red-300 hover:bg-red-950/40 px-4 py-2 rounded-md font-medium disabled:opacity-50"
+          >
+            <Ban className="w-4 h-4" />
+            <span>{cancelling ? 'Cancelling...' : 'Cancel run'}</span>
+          </button>
+        )}
         {run.status === 'completed' && run.artifact_path && (
           <button 
             onClick={handleDownload}
@@ -679,6 +1201,10 @@ const RunDetails = ({ runId, navigate }) => {
         )}
       </div>
 
+      {cancelNote && (
+        <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">{cancelNote}</p>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
@@ -687,19 +1213,19 @@ const RunDetails = ({ runId, navigate }) => {
               <div className="bg-red-950/30 border border-red-900 rounded p-4 text-red-400 font-mono text-sm whitespace-pre-wrap">
                 {run.metrics?.error || "Unknown execution error."}
               </div>
+            ) : run.status === 'cancelled' ? (
+              <p className="text-zinc-400 text-sm">This run was cancelled. It has no result.</p>
             ) : model && model.implemented === false ? (
               <div className="bg-red-900/20 border border-red-700/50 rounded p-4 text-red-400 text-sm">
                 Not implemented
               </div>
             ) : run.metrics ? (
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                {Object.entries(run.metrics).filter(([k]) => k !== 'model_parameters').map(([key, val]) => (
+                {Object.entries(run.metrics).filter(([k, v]) => !STRUCTURED_METRICS.has(k) && (v === null || typeof v !== 'object')).map(([key, val]) => (
                   <div key={key} className="bg-zinc-950 p-4 rounded-md border border-zinc-800/50">
                     <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{key.replace(/_/g, ' ')}</div>
-                    <div className="text-xl font-mono text-zinc-200">
-                      {val === null || val === undefined
-                        ? '—'
-                        : (typeof val === 'number' ? (Number.isInteger(val) ? val : val.toFixed(4)) : String(val))}
+                    <div className="text-xl font-mono text-zinc-200 break-words">
+                      {formatMetric(val)}
                     </div>
                   </div>
                 ))}
@@ -708,6 +1234,11 @@ const RunDetails = ({ runId, navigate }) => {
               <p className="text-zinc-500">No metrics available yet.</p>
             )}
           </div>
+
+          {run.status === 'completed' && run.metrics && <EvaluationPanel metrics={run.metrics} />}
+          {run.status === 'completed' && run.metrics && <ConfusionMatrix confusion={run.metrics.confusion_matrix} />}
+          {run.status === 'completed' && run.metrics && <PreprocessingReport report={run.metrics.preprocessing} />}
+          {run.status === 'completed' && run.metrics && run.metrics.artifact_kind && <PredictPanel runId={runId} />}
 
           <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
             <h3 className="text-lg font-semibold text-white mb-4">Submitted hyperparameters</h3>
@@ -793,6 +1324,9 @@ const NewJob = ({ navigate }) => {
     label_column: 'label',
     test_size: 0.2,
     random_state: 42,
+    // '' lets the server guess the task from the label column.
+    task_type: '',
+    cv_folds: 5,
     mode: 'manual',
     preset: 'balanced',
     env_id: '',
@@ -1061,6 +1595,8 @@ const NewJob = ({ navigate }) => {
       // Ensure types are correct for numbers
       submitPayload.test_size = parseFloat(submitPayload.test_size);
       submitPayload.random_state = parseInt(submitPayload.random_state, 10);
+      if (!submitPayload.task_type) delete submitPayload.task_type;
+      submitPayload.cv_folds = parseInt(submitPayload.cv_folds, 10);
       
       // The training runs in the background: the answer carries the id of the
       // run and nothing else. The metrics are written in the run itself, so
@@ -1255,6 +1791,30 @@ const NewJob = ({ navigate }) => {
                   required
                   value={payload.random_state}
                   onChange={(e) => setPayload({...payload, random_state: e.target.value})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-400 mb-1">Task type (tabular models)</label>
+                <select
+                  value={payload.task_type}
+                  onChange={(e) => setPayload({...payload, task_type: e.target.value})}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Guess from the label column</option>
+                  <option value="classification">Classification</option>
+                  <option value="regression">Regression</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-zinc-400 mb-1">Cross-validation folds (0 = off)</label>
+                <input
+                  type="number" min="0" max="20" required
+                  value={payload.cv_folds}
+                  onChange={(e) => setPayload({...payload, cv_folds: e.target.value})}
                   className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -1528,6 +2088,7 @@ const MainApp = () => {
       case 'models': return <ModelsCatalog />;
       case 'runs': return <RunsDashboard navigate={navigate} />;
       case 'run-details': return <RunDetails runId={activeParams} navigate={navigate} />;
+      case 'compare': return <CompareRuns runIds={activeParams} navigate={navigate} />;
       case 'new-job': return <NewJob navigate={navigate} />;
       default: return <RunsDashboard navigate={navigate} />;
     }
@@ -1545,7 +2106,7 @@ const MainApp = () => {
         <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
           <SidebarItem 
             icon={Activity} label="Training Runs" 
-            active={currentView === 'runs' || currentView === 'run-details'} 
+            active={currentView === 'runs' || currentView === 'run-details' || currentView === 'compare'} 
             onClick={() => navigate('runs')} 
           />
           <SidebarItem 

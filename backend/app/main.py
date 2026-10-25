@@ -11,11 +11,15 @@ from fastapi import (
 )
 from starlette.datastructures import Headers
 from starlette.datastructures import UploadFile as StarletteUploadFile
+import asyncio
+import functools
 import json
 import logging
 import os
+import socket
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi.concurrency import run_in_threadpool
@@ -27,6 +31,7 @@ from jose import JOSEError, jwt
 from pathlib import Path
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_, update
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .base import Base
@@ -50,6 +55,7 @@ from .datasets import (
     unique_dataset_name,
 )
 from . import model_training as model_training_module
+from .tabular import AutoencoderBundle, FeatureInputError, TabularModelBundle
 from .model_training import (
     TRAINING_MODES,
     TRAINING_PRESETS,
@@ -78,14 +84,33 @@ async def lifespan(app: FastAPI):
     that no longer matches the migrations. Instead the startup check below
     fails fast with an actionable message.
     """
+    global _slots_in_use
     await verify_schema()
     await reap_the_interrupted_runs()
     await seed_builtin_datasets()
+    _slots_in_use = 0
+    maintenance = None
+    if TRAINING_IN_API:
+        # Picks up the runs a restart left queued, and sweeps the dead ones.
+        maintenance = asyncio.create_task(maintenance_loop())
     # The hash of the dummy password is computed on the first unknown-user
     # login, which would make that one request twice as slow as the others.
     # It is computed here instead, while the application starts.
     await run_in_threadpool(dummy_password_hash)
-    yield
+    try:
+        yield
+    finally:
+        for task in [maintenance, *_background_tasks]:
+            if task is not None:
+                task.cancel()
+        for task in [maintenance, *_background_tasks]:
+            if task is not None:
+                try:
+                    await task
+                except BaseException:
+                    # Cancelled (or already finished with an error that was logged).
+                    pass
+        _background_tasks.clear()
 
 
 async def seed_builtin_datasets() -> None:
@@ -416,6 +441,37 @@ STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
+
+# --- the training queue -----------------------------------------------------
+# The rows of ``training_runs`` are the queue. A worker claims the oldest
+# queued run with one atomic UPDATE, says that it is alive every few seconds
+# while it trains, and a sweeper fails the running runs whose heartbeat
+# stopped. Nothing here lives in the memory of one process, so a restart loses
+# no queued run and a second process cannot fail the runs of the first.
+#
+# How many trainings one process runs at the same time.
+TRAINING_CONCURRENCY = max(1, int(os.getenv("TRAINING_CONCURRENCY", "1")))
+# How often a worker writes ``heartbeat_at``, and how old a heartbeat may be
+# before its run is considered dead (several beats may be lost to a slow disk).
+TRAINING_HEARTBEAT_SECONDS = float(os.getenv("TRAINING_HEARTBEAT_SECONDS", "5"))
+TRAINING_STALE_SECONDS = float(os.getenv("TRAINING_STALE_SECONDS", "30"))
+# How often the maintenance loop looks for stale runs and for queued ones that
+# no process picked up (the runs another process queued, or left behind).
+QUEUE_POLL_SECONDS = float(os.getenv("QUEUE_POLL_SECONDS", "5"))
+# "0" makes the web process only enqueue: the trainings then run in separate
+# ``python -m backend.app.worker`` processes.
+TRAINING_IN_API = os.getenv("TRAINING_IN_API", "1") != "0"
+# Who this process is, as written in ``worker_id``.
+WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
+
+_slots_in_use = 0
+_background_tasks: set = set()
+
+
+def _now() -> datetime:
+    """The time as the columns store it: timezone-aware UTC."""
+    return datetime.now(timezone.utc)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -571,6 +627,11 @@ class TrainRequest(BaseModel):
     model_candidates: Optional[List[str]] = None
     sep: Optional[str] = ","
     usecols: Optional[List[str]] = None
+    # Overrides the guess made from the label column ("classification" or
+    # "regression"); None keeps the guess.
+    task_type: Optional[str] = None
+    # Folds of the cross-validation of the tabular models; 0 turns it off.
+    cv_folds: int = Field(5, ge=0, le=20)
 
 async def get_current_admin(current_user: User = Depends(get_current_user)):
     if current_user.role != "admin":
@@ -1058,6 +1119,13 @@ async def train_model_endpoint(
         optimize_metric=payload.optimize_metric,
         model_candidates=payload.model_candidates,
         status=STATUS_QUEUED,
+        # Everything a worker needs: the run no longer depends on the memory
+        # of this request, so it survives a restart.
+        request_payload={
+            "request": payload.model_dump(),
+            "storage_path": storage_path,
+            "dataset_name": dataset.name if dataset is not None else None,
+        },
     )
     db.add(training_run)
     # The row is written before the answer: the client polls it, and a run
@@ -1065,13 +1133,10 @@ async def train_model_endpoint(
     await db.commit()
     await db.refresh(training_run)
 
-    background_tasks.add_task(
-        _execute_training,
-        training_run.id,
-        payload,
-        storage_path,
-        dataset.name if dataset is not None else None,
-    )
+    if TRAINING_IN_API:
+        # Starts the queue now: the worker takes the oldest queued run (this
+        # one, unless the process is busy - then it waits its turn).
+        background_tasks.add_task(drain_training_queue)
 
     return {
         "run_id": training_run.id,
@@ -1081,80 +1146,160 @@ async def train_model_endpoint(
     }
 
 
-async def _execute_training(
-    run_id: int,
-    payload: TrainRequest,
-    storage_path: Optional[str],
-    dataset_name: Optional[str],
-) -> None:
-    """Train a model in the background and write the result in the run.
+async def drain_training_queue() -> None:
+    """Run queued runs while this process has a free slot.
 
-    The worker has its own session: the session of the request is closed when
-    the answer was sent, and the training outlives the request.
+    A slot is taken *before* the claim is awaited: two drains that both saw a
+    free slot would otherwise both claim a run, and the process would train
+    more runs at once than ``TRAINING_CONCURRENCY`` allows.
     """
-    try:
-        await _train_and_write_the_run(run_id, payload, storage_path, dataset_name)
-    except Exception:
-        # The worker must not raise into the server: the request was answered
-        # long ago, and a traceback there would hide the reason of the
-        # failure. A run that stays in a state that never changes is failed by
-        # the reaper at the next start.
-        logger.exception("The worker of the run %s stopped", run_id)
+    global _slots_in_use
+    while _slots_in_use < TRAINING_CONCURRENCY:
+        _slots_in_use += 1
+        try:
+            run_id = await _claim_next_run()
+            if run_id is None:
+                return
+            await _run_claimed(run_id)
+        finally:
+            _slots_in_use -= 1
 
 
-async def _train_and_write_the_run(
-    run_id: int,
-    payload: TrainRequest,
-    storage_path: Optional[str],
-    dataset_name: Optional[str],
-) -> None:
+async def _claim_next_run() -> Optional[int]:
+    """Claim the oldest queued run with one atomic UPDATE, or None.
+
+    ``WHERE status = 'queued'`` is what makes the claim safe between
+    processes: of two workers that pick the same row, exactly one UPDATE
+    changes it.
+    """
+    for _ in range(5):
+        async with AsyncSessionLocal() as session:
+            candidate = (
+                await session.execute(
+                    select(TrainingRun.id)
+                    .where(
+                        TrainingRun.status == STATUS_QUEUED,
+                        TrainingRun.request_payload.is_not(None),
+                    )
+                    .order_by(TrainingRun.id)
+                    .limit(1)
+                )
+            ).first()
+            if candidate is None:
+                return None
+            now = _now()
+            claimed = await session.execute(
+                update(TrainingRun)
+                .where(TrainingRun.id == candidate[0], TrainingRun.status == STATUS_QUEUED)
+                .values(
+                    status=STATUS_RUNNING,
+                    worker_id=WORKER_ID,
+                    started_at=now,
+                    heartbeat_at=now,
+                )
+            )
+            await session.commit()
+            if claimed.rowcount == 1:
+                return candidate[0]
+        # Another worker took it between the SELECT and the UPDATE: try the next one.
+    return None
+
+
+async def _run_claimed(run_id: int) -> None:
+    """Train a claimed run and write the result in it.
+
+    The worker has its own sessions: the request that queued the run was
+    answered long ago.
+    """
     async with AsyncSessionLocal() as session:
         run = await session.get(TrainingRun, run_id)
-        if run is None:
-            # The run was removed while it was queued.
-            return
-        run.status = STATUS_RUNNING
-        await session.commit()
-
-    try:
-        metrics, dataset_source, dataset_tag, artifact_path = await run_in_threadpool(
-            train_model,
-            payload.model_name,
-            storage_path,
-            payload.hf_dataset_url,
-            payload.label_column,
-            payload.test_size,
-            payload.random_state,
-            payload.hyperparameters or {},
-            payload.sep,
-            payload.usecols,
-            payload.mode,
-            payload.optimize_metric,
-            payload.env_id,
-            payload.model_candidates,
-            payload.preset,
-        )
-    except Exception as exc:
-        # The failure is written in the run: the request was answered long
-        # ago, and the run is the only channel the client has left.
-        logger.exception("The training of the run %s failed", run_id)
+        stored = run.request_payload if run is not None else None
+    if not stored:
         await _finish_run(
-            run_id,
-            status=STATUS_FAILED,
-            metrics={"error": _public_error(exc)},
+            run_id, STATUS_FAILED, metrics={"error": "The run has no stored request."}
         )
         return
+    try:
+        payload = TrainRequest(**stored["request"])
+    except Exception:
+        logger.exception("The stored request of the run %s is invalid", run_id)
+        await _finish_run(
+            run_id,
+            STATUS_FAILED,
+            metrics={"error": "The stored request of the run is not valid any more."},
+        )
+        return
+    storage_path = stored.get("storage_path")
+    dataset_name = stored.get("dataset_name")
 
-    await _finish_run(
-        run_id,
-        status=STATUS_COMPLETED,
-        metrics=metrics,
-        artifact_path=artifact_path,
-        dataset_source=dataset_source,
-        # The tag of a local dataset is its name: the path the registry
-        # resolved it to is an internal detail of the server.
-        dataset_tag=dataset_name if dataset_name is not None else dataset_tag,
-    )
+    heartbeat = asyncio.create_task(_heartbeat(run_id))
+    try:
+        try:
+            metrics, dataset_source, dataset_tag, artifact_path = await run_in_threadpool(
+                train_model,
+                payload.model_name,
+                storage_path,
+                payload.hf_dataset_url,
+                payload.label_column,
+                payload.test_size,
+                payload.random_state,
+                payload.hyperparameters or {},
+                payload.sep,
+                payload.usecols,
+                payload.mode,
+                payload.optimize_metric,
+                payload.env_id,
+                payload.model_candidates,
+                payload.preset,
+                payload.task_type,
+                payload.cv_folds,
+            )
+        except Exception as exc:
+            # The failure is written in the run: the request was answered long
+            # ago, and the run is the only channel the client has left.
+            logger.exception("The training of the run %s failed", run_id)
+            await _finish_run(
+                run_id, STATUS_FAILED, metrics={"error": _public_error(exc)}
+            )
+            return
+        await _finish_run(
+            run_id,
+            STATUS_COMPLETED,
+            metrics=metrics,
+            artifact_path=artifact_path,
+            dataset_source=dataset_source,
+            # The tag of a local dataset is its name: the path the registry
+            # resolved it to is an internal detail of the server.
+            dataset_tag=dataset_name if dataset_name is not None else dataset_tag,
+        )
+    finally:
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except BaseException:
+            pass
+
+
+async def _heartbeat(run_id: int) -> None:
+    """Say, every few seconds, that the worker of the run is alive."""
+    while True:
+        await asyncio.sleep(TRAINING_HEARTBEAT_SECONDS)
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(TrainingRun)
+                    .where(
+                        TrainingRun.id == run_id,
+                        TrainingRun.status == STATUS_RUNNING,
+                        TrainingRun.worker_id == WORKER_ID,
+                    )
+                    .values(heartbeat_at=_now())
+                )
+                await session.commit()
+        except Exception:
+            # A missed beat is not an error: the run is only considered dead
+            # after several of them.
+            logger.warning("Could not write the heartbeat of the run %s", run_id)
 
 
 async def _finish_run(
@@ -1164,50 +1309,166 @@ async def _finish_run(
     artifact_path: Optional[str] = None,
     dataset_source: Optional[str] = None,
     dataset_tag: Optional[str] = None,
-) -> None:
-    """Write the result of a training in its run."""
+) -> bool:
+    """Write the result of a training in its run, if the run is still running.
+
+    The write is conditional (``WHERE status = 'running'``): a run that was
+    cancelled while it trained must stay cancelled, so its result is dropped,
+    and the artifact it wrote is removed instead of being left orphaned.
+    """
+    values: Dict[str, Any] = {"status": status, "finished_at": _now()}
+    if metrics is not None:
+        values["metrics"] = metrics
+    if artifact_path is not None:
+        values["artifact_path"] = artifact_path
+    if dataset_source is not None:
+        values["dataset_source"] = dataset_source
+    if dataset_tag is not None:
+        values["dataset_tag"] = dataset_tag
     async with AsyncSessionLocal() as session:
-        run = await session.get(TrainingRun, run_id)
-        if run is None:
-            return
-        run.status = status
-        if metrics is not None:
-            run.metrics = metrics
-        if artifact_path is not None:
-            run.artifact_path = artifact_path
-        if dataset_source is not None:
-            run.dataset_source = dataset_source
-        if dataset_tag is not None:
-            run.dataset_tag = dataset_tag
+        result = await session.execute(
+            update(TrainingRun)
+            .where(TrainingRun.id == run_id, TrainingRun.status == STATUS_RUNNING)
+            .values(**values)
+        )
         await session.commit()
+        written = result.rowcount == 1
+    if not written:
+        logger.info("The run %s is no longer running: its result is discarded", run_id)
+        if artifact_path:
+            try:
+                Path(artifact_path).unlink()
+            except OSError:
+                pass
+    return written
 
 
 async def reap_the_interrupted_runs() -> None:
-    """Fail the runs that a restart interrupted.
+    """Fail the runs whose worker is gone.
 
-    A run that is still queued or running when the process starts was
-    interrupted: the worker that owned it died with the process. The run is
-    failed with a message that says so, instead of staying in a state that
-    never changes.
+    A running run is dead when its heartbeat stopped (or was never written:
+    the runs of an older version). A run with a fresh heartbeat belongs to a
+    live worker - possibly another process - and is left alone: that is what
+    the previous version got wrong, when it failed every queued or running
+    row at startup. A queued run without a stored request cannot be resumed
+    either (it was queued by an older version), and is failed with a message.
+
+    Both updates are conditional, so a run that finishes while the sweeper
+    looks at it is never overwritten.
     """
+    now = _now()
+    cutoff = now - timedelta(seconds=TRAINING_STALE_SECONDS)
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(TrainingRun).where(
-                TrainingRun.status.in_([STATUS_QUEUED, STATUS_RUNNING])
+        stopped = await session.execute(
+            update(TrainingRun)
+            .where(
+                TrainingRun.status == STATUS_RUNNING,
+                or_(TrainingRun.heartbeat_at.is_(None), TrainingRun.heartbeat_at < cutoff),
+            )
+            .values(
+                status=STATUS_FAILED,
+                finished_at=now,
+                metrics={
+                    "error": (
+                        "The worker stopped before the training finished (the server "
+                        "restarted or crashed). Please run it again."
+                    )
+                },
             )
         )
-        runs = result.scalars().all()
-        for run in runs:
-            run.status = STATUS_FAILED
-            run.metrics = {
-                "error": (
-                    "The server restarted before the training finished. "
-                    "Please run it again."
-                )
-            }
-        if runs:
-            await session.commit()
-            logger.info("%s interrupted runs were failed", len(runs))
+        orphaned = await session.execute(
+            update(TrainingRun)
+            .where(
+                TrainingRun.status == STATUS_QUEUED,
+                TrainingRun.request_payload.is_(None),
+            )
+            .values(
+                status=STATUS_FAILED,
+                finished_at=now,
+                metrics={
+                    "error": (
+                        "This run was queued by an older version of the server and "
+                        "cannot be resumed. Please run it again."
+                    )
+                },
+            )
+        )
+        await session.commit()
+    if stopped.rowcount or orphaned.rowcount:
+        logger.info(
+            "%s stopped runs and %s unresumable queued runs were failed",
+            stopped.rowcount,
+            orphaned.rowcount,
+        )
+
+
+async def maintenance_loop() -> None:
+    """Sweep the dead runs and pick up the queued ones, forever.
+
+    The training itself runs in a task of its own, so a long training never
+    stops the sweeper.
+    """
+    while True:
+        try:
+            await reap_the_interrupted_runs()
+            if _slots_in_use < TRAINING_CONCURRENCY:
+                task = asyncio.create_task(drain_training_queue())
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("The maintenance of the training queue failed")
+        await asyncio.sleep(QUEUE_POLL_SECONDS)
+
+
+@app.post("/api/v1/ml/runs/{run_id}/cancel")
+async def cancel_training_run(
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel a queued or running run.
+
+    A queued run never starts. A running run cannot be interrupted - the
+    estimators have no hook to stop a ``fit`` - so it is marked cancelled at
+    once and its result is discarded when the training ends. Its slot is
+    freed then, not now; the answer says so instead of pretending otherwise.
+    """
+    result = await db.execute(
+        select(TrainingRun).where(
+            TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id
+        )
+    )
+    run = result.scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    if run.status not in (STATUS_QUEUED, STATUS_RUNNING):
+        raise HTTPException(status_code=409, detail=f"The run is already {run.status}.")
+    was = run.status
+    updated = await db.execute(
+        update(TrainingRun)
+        .where(
+            TrainingRun.id == run_id,
+            TrainingRun.status.in_([STATUS_QUEUED, STATUS_RUNNING]),
+        )
+        .values(
+            status=STATUS_CANCELLED,
+            finished_at=_now(),
+            metrics={"cancelled": True, "message": "The run was cancelled by its owner."},
+        )
+    )
+    await db.commit()
+    if updated.rowcount != 1:
+        # It finished between the read and the write.
+        raise HTTPException(status_code=409, detail="The run has just finished.")
+    response: Dict[str, Any] = {"id": run_id, "status": STATUS_CANCELLED, "was": was}
+    if was == STATUS_RUNNING:
+        response["note"] = (
+            "The training cannot be interrupted once it started: its result is "
+            "discarded when it ends."
+        )
+    return response
 
 
 @app.get("/api/v1/ml/runs")
@@ -1229,6 +1490,8 @@ async def list_training_runs(current_user: User = Depends(get_current_user), db:
             "metrics": run.metrics,
             "created_at": run.created_at.isoformat() if run.created_at else None,
             "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         }
         for run in runs
     ]
@@ -1255,6 +1518,9 @@ async def get_training_run(run_id: int, current_user: User = Depends(get_current
         "model_candidates": run.model_candidates,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "heartbeat_at": run.heartbeat_at.isoformat() if run.heartbeat_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }
 
 @app.get("/api/v1/ml/runs/{run_id}/artifact")
@@ -1266,3 +1532,110 @@ async def download_artifact(run_id: int, current_user: User = Depends(get_curren
     if not Path(run.artifact_path).exists():
         raise HTTPException(status_code=404, detail="Artifact file missing")
     return FileResponse(run.artifact_path, filename=Path(run.artifact_path).name)
+
+
+# --- inference ---------------------------------------------------------------
+# A saved artifact is only useful if it can be used: these two routes turn the
+# bundle of a completed run into a prediction service. The schema route says
+# which columns the model expects (the UI builds its form from it), and the
+# predict route answers for rows the model has never seen.
+
+# The most rows one prediction request may carry. The rows are held in memory
+# and predicted in one call, so the limit is what keeps one request cheap.
+PREDICT_MAX_ROWS = int(os.getenv("PREDICT_MAX_ROWS", "1000"))
+
+
+class PredictRequest(BaseModel):
+    # One object per row, keyed by the feature names of the schema. A column
+    # that is left out is treated as missing; the answer lists the warnings.
+    rows: List[Dict[str, Any]] = Field(..., min_length=1)
+
+
+@functools.lru_cache(maxsize=8)
+def _load_bundle(path: str, mtime_ns: int) -> Any:
+    """Load an artifact. The key holds the modification time, so a file that
+    was rewritten is loaded again instead of served from the cache."""
+    import joblib
+
+    return joblib.load(path)
+
+
+async def _bundle_for_run(
+    run_id: int, current_user: User, db: AsyncSession
+) -> Tuple[TrainingRun, Any]:
+    """The run of the caller and the bundle of its artifact, or the error to answer with."""
+    result = await db.execute(
+        select(TrainingRun).where(
+            TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id
+        )
+    )
+    run = result.scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    if run.status != STATUS_COMPLETED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The run is {run.status}: only a completed run can predict.",
+        )
+    if not run.artifact_path:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    path = Path(run.artifact_path)
+    models_dir = Path(model_training_module.MODEL_DIR).resolve()
+    # Loading an artifact unpickles it, which runs code: only a file inside the
+    # directory the trainer writes to is ever loaded.
+    if not path.resolve().is_relative_to(models_dir):
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file missing")
+
+    bundle = await run_in_threadpool(_load_bundle, str(path), path.stat().st_mtime_ns)
+    if not isinstance(bundle, (TabularModelBundle, AutoencoderBundle)):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"The artifact of this {run.model_name} run cannot predict: only the "
+                "supervised tabular models and the autoencoder save a model that knows "
+                "its columns. A run trained before that change has to be trained again."
+            ),
+        )
+    return run, bundle
+
+
+@app.get("/api/v1/ml/runs/{run_id}/schema")
+async def get_run_schema(
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The columns a prediction request has to carry, with their types, ranges and categories."""
+    run, bundle = await _bundle_for_run(run_id, current_user, db)
+    return {"run_id": run.id, **bundle.schema(), "max_rows": PREDICT_MAX_ROWS}
+
+
+@app.post("/api/v1/ml/runs/{run_id}/predict")
+async def predict_with_run(
+    run_id: int,
+    payload: PredictRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Predict rows with the model of a completed run."""
+    if len(payload.rows) > PREDICT_MAX_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"A request may carry at most {PREDICT_MAX_ROWS} rows, got {len(payload.rows)}.",
+        )
+    run, bundle = await _bundle_for_run(run_id, current_user, db)
+    try:
+        result = await run_in_threadpool(bundle.infer, payload.rows)
+    except (FeatureInputError, ValueError) as exc:
+        # A value the model cannot use: the message names the column.
+        raise HTTPException(status_code=422, detail=_public_error(exc))
+    return {
+        "run_id": run.id,
+        "model_name": run.model_name,
+        "n_rows": len(payload.rows),
+        **result,
+    }
+
