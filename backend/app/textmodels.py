@@ -57,6 +57,7 @@ try:
         AutoConfig,
         AutoModelForCausalLM,
         AutoModelForSeq2SeqLM,
+        AutoModelForSequenceClassification,
         AutoTokenizer,
         EncoderDecoderModel,
     )
@@ -79,6 +80,20 @@ DEFAULT_MAX_TRAIN_TOKENS = 200000
 
 def _tiny_enabled() -> bool:
     return os.getenv(TINY_CONFIG_ENV, "").strip() not in ("", "0", "false")
+
+
+# The fine-tuning default of the catalog (2e-5) assumes pretrained weights;
+# a tiny configuration is built from scratch and needs a from-scratch rate.
+TINY_LEARNING_RATE = 1e-3
+FINE_TUNING_LEARNING_RATE = 2e-5
+
+
+def _tiny_learning_rate(requested: float) -> float:
+    """The learning rate of a tiny run: the from-scratch default replaces
+    the fine-tuning default, an explicit different value is honoured."""
+    if _tiny_enabled() and abs(float(requested) - FINE_TUNING_LEARNING_RATE) < 1e-12:
+        return TINY_LEARNING_RATE
+    return float(requested)
 
 
 def _require_transformers():
@@ -237,9 +252,19 @@ class TextClassifierBundle:
     # the bundle only records where it is, so ``save`` copies nothing and the
     # manifest covers the files the trainer wrote.
     def save(self, directory: Path) -> None:
+        import json
         import shutil
 
         shutil.copytree(self.directory, Path(directory) / "pretrained")
+        (Path(directory) / "config.json").write_text(
+            json.dumps(
+                {
+                    "kind": self.kind,
+                    "class_names": [str(c) for c in self.class_names],
+                    "max_length": self.max_length,
+                }
+            )
+        )
         shutil.rmtree(self.directory, ignore_errors=True)  # the scratch of the trainer
 
     @classmethod
@@ -261,11 +286,19 @@ class TextGenerationBundle:
     kind = "text_generation"
     request_kind = "prompt"
 
-    def __init__(self, directory: Path, block_size: int, lora: bool = False, base_model: Optional[str] = None):
+    def __init__(
+        self,
+        directory: Path,
+        block_size: int,
+        lora: bool = False,
+        base_model: Optional[str] = None,
+        tiny: bool = False,
+    ):
         self.directory = Path(directory)
         self.block_size = block_size
         self.lora = lora
         self.base_model = base_model
+        self.tiny = tiny
         self._model = None
         self._tokenizer = None
 
@@ -276,8 +309,16 @@ class TextGenerationBundle:
                     from peft import PeftModel
                 except ImportError:
                     raise RuntimeError("peft is not installed: this adapter needs it.") from None
-                base = AutoModelForCausalLM.from_pretrained(self.base_model)
-                self._model = PeftModel.from_pretrained(base, self.directory / "adapter")
+                if self.tiny:
+                    # The adapter was trained on the tiny offline
+                    # configuration: the base has to be rebuilt the same way
+                    # or the shapes cannot match.
+                    base, _tokenizer = _tiny_causal(self.base_model or "llama")
+                else:
+                    base = AutoModelForCausalLM.from_pretrained(self.base_model)
+                # ``self.directory`` already is the adapter directory (the
+                # loader resolves it from the artifact layout).
+                self._model = PeftModel.from_pretrained(base, str(self.directory))
             else:
                 self._model = AutoModelForCausalLM.from_pretrained(self.directory)
             self._model.eval()
@@ -323,12 +364,24 @@ class TextGenerationBundle:
         }
 
     def save(self, directory: Path) -> None:
+        import json
         import shutil
 
         if self.lora:
             shutil.copytree(self.directory, Path(directory) / "adapter")
         else:
             shutil.copytree(self.directory, Path(directory) / "pretrained")
+        (Path(directory) / "config.json").write_text(
+            json.dumps(
+                {
+                    "kind": self.kind,
+                    "block_size": self.block_size,
+                    "lora": self.lora,
+                    "base_model": self.base_model,
+                    "tiny": self.tiny,
+                }
+            )
+        )
         shutil.rmtree(self.directory, ignore_errors=True)  # the scratch of the trainer
 
     @classmethod
@@ -340,6 +393,7 @@ class TextGenerationBundle:
             block_size=payload["block_size"],
             lora=bool(payload.get("lora")),
             base_model=payload.get("base_model"),
+            tiny=bool(payload.get("tiny")),
         )
 
 
@@ -366,6 +420,22 @@ class TextSeq2SeqBundle:
             self._model = AutoModelForSeq2SeqLM.from_pretrained(self.directory)
             self._model.eval()
             self._tokenizer = AutoTokenizer.from_pretrained(self.directory)
+            # A model warm-started from encoder/decoder checkpoints needs
+            # its decoder start token for generation; a config that does not
+            # carry one is a well-known source of silent failure (plan F6).
+            start_token = (
+                self._tokenizer.cls_token_id
+                if self._tokenizer.cls_token_id is not None
+                else self._tokenizer.bos_token_id
+            )
+            if getattr(self._model.config, "decoder_start_token_id", None) is None:
+                self._model.config.decoder_start_token_id = start_token
+            # generate() reads the generation config, not the model config.
+            if (
+                self._model.generation_config is not None
+                and self._model.generation_config.decoder_start_token_id is None
+            ):
+                self._model.generation_config.decoder_start_token_id = start_token
         return self._model, self._tokenizer
 
     def schema(self) -> Dict[str, Any]:
@@ -398,9 +468,19 @@ class TextSeq2SeqBundle:
         return {"predictions": decoded}
 
     def save(self, directory: Path) -> None:
+        import json
         import shutil
 
         shutil.copytree(self.directory, Path(directory) / "pretrained")
+        (Path(directory) / "config.json").write_text(
+            json.dumps(
+                {
+                    "kind": self.kind,
+                    "max_length": self.max_length,
+                    "beam_search": self.beam_search,
+                }
+            )
+        )
         shutil.rmtree(self.directory, ignore_errors=True)  # the scratch of the trainer
 
     @classmethod
@@ -483,6 +563,10 @@ def _tiny_seq2seq(checkpoint: str):
         config = AutoConfig.for_model(
             "t5", d_model=32, d_ff=64, num_layers=2, num_heads=2
         )
+        # T5 starts its decoder with the pad token; a config built from
+        # scratch does not carry it, and the seq2seq machinery needs it.
+        config.decoder_start_token_id = 0
+        config.pad_token_id = 0
         model = AutoModelForSeq2SeqLM.from_config(config)
         tokenizer = AutoTokenizer.from_pretrained("t5-small")
     else:
@@ -505,10 +589,20 @@ def _tiny_seq2seq(checkpoint: str):
             is_decoder=True,
             add_cross_attention=True,
         )
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = EncoderDecoderModel(
             encoder=BertModel(encoder_config), decoder=BertLMHeadModel(decoder_config)
         )
-        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+        # The same wiring as the real warm start (plan F6): the decoder
+        # starts at [CLS] and ends at [SEP], and a missing
+        # decoder_start_token_id is a well-known source of silent failure.
+        # generate() reads the generation config, so both are set.
+        model.config.decoder_start_token_id = tokenizer.cls_token_id
+        model.config.eos_token_id = tokenizer.sep_token_id
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.generation_config.decoder_start_token_id = tokenizer.cls_token_id
+        model.generation_config.eos_token_id = tokenizer.sep_token_id
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
     return model, tokenizer
 
 
@@ -540,7 +634,7 @@ def train_text_classifier(
     max_length = int(params.get("max_length", DEFAULT_MAX_LENGTH))
     epochs = max(1, int(params.get("epochs", 1)))
     batch_size = max(1, int(params.get("batch_size", 8)))
-    learning_rate = float(params.get("learning_rate", 2e-5))
+    learning_rate = _tiny_learning_rate(params.get("learning_rate", 2e-5))
     seed = int(params.get("random_state", 42))
     torch.manual_seed(seed)
 
@@ -660,7 +754,7 @@ def train_language_model(
     block_size = int(params.get("block_size", DEFAULT_BLOCK_SIZE))
     epochs = max(1, int(params.get("epochs", 1)))
     batch_size = max(1, int(params.get("batch_size", 4)))
-    learning_rate = float(params.get("learning_rate", 2e-5))
+    learning_rate = _tiny_learning_rate(params.get("learning_rate", 2e-5))
     max_train_tokens = int(params.get("max_train_tokens", DEFAULT_MAX_TRAIN_TOKENS))
     seed = int(params.get("random_state", 42))
     torch.manual_seed(seed)
@@ -797,7 +891,7 @@ def train_seq2seq(
     max_length = int(params.get("max_length", DEFAULT_MAX_LENGTH))
     epochs = max(1, int(params.get("epochs", 1)))
     batch_size = max(1, int(params.get("batch_size", 8)))
-    learning_rate = float(params.get("learning_rate", 2e-5))
+    learning_rate = _tiny_learning_rate(params.get("learning_rate", 2e-5))
     task_prefix = str(params.get("task_prefix", ""))
     seed = int(params.get("random_state", 42))
     torch.manual_seed(seed)
@@ -828,6 +922,10 @@ def train_seq2seq(
             model.config.eos_token_id = tokenizer.sep_token_id
             model.config.pad_token_id = tokenizer.pad_token_id
             model.config.vocab_size = model.config.encoder.vocab_size
+            # generate() reads the generation config, so both carry it.
+            model.generation_config.decoder_start_token_id = tokenizer.cls_token_id
+            model.generation_config.eos_token_id = tokenizer.sep_token_id
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
         else:
             model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint)
         pretrained_loaded = True
@@ -1071,6 +1169,7 @@ def train_llama_lora(
         "_charts": cap_charts({"loss_curve": loss_curve}),
     }
     bundle = TextGenerationBundle(
-        adapter_dir, block_size=block_size, lora=True, base_model=checkpoint
+        adapter_dir, block_size=block_size, lora=True, base_model=checkpoint,
+        tiny=_tiny_enabled(),
     )
     return metrics, bundle

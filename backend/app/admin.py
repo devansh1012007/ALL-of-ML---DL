@@ -551,6 +551,13 @@ async def list_invites(db: AsyncSession = Depends(get_db)):
         await db.execute(select(Invite).order_by(Invite.id.desc()).limit(200))
     ).scalars().all()
     now = _now()
+
+    def _aware(value):
+        # SQLite returns naive datetimes; the comparison needs one time zone.
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
     return {
         "items": [
             {
@@ -558,7 +565,7 @@ async def list_invites(db: AsyncSession = Depends(get_db)):
                 "max_uses": invite.max_uses,
                 "use_count": invite.use_count,
                 "expires_at": invite.expires_at.isoformat(),
-                "expired": invite.expires_at < now,
+                "expired": _aware(invite.expires_at) < now,
                 "exhausted": invite.use_count >= invite.max_uses,
                 "created_at": invite.created_at.isoformat() if invite.created_at else None,
             }

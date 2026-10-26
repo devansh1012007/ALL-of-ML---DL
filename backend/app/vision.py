@@ -308,6 +308,17 @@ def train_image_model(
     random_state = int(params.get("random_state", 42))
     torch.manual_seed(random_state)
 
+    # The checkpoint allow-list of plans F1/G is enforced BEFORE anything is
+    # built or downloaded: a client cannot make the server fetch an
+    # arbitrary repository from the hub.
+    if architecture == "vit" and allowed_checkpoints:
+        checkpoint = str(params.get("model_name", allowed_checkpoints[0]))
+        if checkpoint not in allowed_checkpoints:
+            raise ValueError(
+                f"The checkpoint '{checkpoint}' is not in the allow-list "
+                f"{allowed_checkpoints} of this model."
+            )
+
     # The sample list of the ImageFolder drives the stratified split of
     # plan C3: two images per class minimum, or the split cannot stratify.
     from sklearn.model_selection import train_test_split
@@ -330,16 +341,6 @@ def train_image_model(
     model, pretrained_loaded, download_note = _build_model(
         architecture, n_classes, pretrained, image_size
     )
-
-    # The checkpoint allow-list of plan F1/G: the vision checkpoints are
-    # pinned, and anything else is refused.
-    if pretrained and allowed_checkpoints and architecture == "vit":
-        checkpoint = str(params.get("model_name", "google/vit-base-patch16-224"))
-        if checkpoint not in allowed_checkpoints:
-            raise ValueError(
-                f"The checkpoint '{checkpoint}' is not in the allow-list "
-                f"{allowed_checkpoints} of this model."
-            )
 
     if freeze_backbone and architecture == "vit":
         for parameter in model.vit.parameters():

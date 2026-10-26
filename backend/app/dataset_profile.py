@@ -200,14 +200,20 @@ def compute_profile(path: Path, label_column: Optional[str] = None) -> Dict[str,
     # shuffled split would leak the future into the training rows.
     ordered_hint = False
     if len(frame) >= 30:
-        for name in frame.columns[: min(6, len(frame.columns))]:
+        for name in frame.columns[: min(8, len(frame.columns))]:
             series = frame[name]
-            if pd.api.types.is_numeric_dtype(series):
-                diff = series.diff().dropna()
-                if len(diff) >= 10 and (diff > 0).mean() > 0.98:
-                    ordered_hint = True
-                    result["time_ordered_column"] = str(name)
-                    break
+            if not pd.api.types.is_numeric_dtype(series):
+                # A date-like text column (an ISO date, a timestamp) counts:
+                # a CSV whose rows carry increasing dates is a time series.
+                parsed = pd.to_datetime(series, errors="coerce", format="mixed")
+                if parsed.notna().mean() < 0.9:
+                    continue
+                series = parsed.astype("int64")
+            diff = series.diff().dropna()
+            if len(diff) >= 10 and (diff > 0).mean() > 0.98:
+                ordered_hint = True
+                result["time_ordered_column"] = str(name)
+                break
     result["rows_look_time_ordered"] = ordered_hint
 
     return result

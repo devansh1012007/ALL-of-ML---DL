@@ -289,8 +289,9 @@ if torch is not None:
         """A diagonal state-space layer in the style of S4D and LRU.
 
         The state matrix is complex diagonal with a magnitude below one by
-        construction (the log-magnitude is parameterised and exponentiated),
-        so the layer is stable after training - a test asserts it. Learned
+        construction (the magnitude is parameterised through a sigmoid, so
+        it lives in (0, 1) whatever the training does), so the layer is
+        stable after training - a test asserts it. Learned
         input and output maps, a skip term, normalisation, gating and a
         residual connection around it.
         """
@@ -298,7 +299,13 @@ if torch is not None:
         def __init__(self, d_model: int, state_dim: int):
             super().__init__()
             self.state_dim = state_dim
-            self.log_magnitude = nn.Parameter(torch.log(0.9 * torch.ones(state_dim, dtype=torch.cfloat).real))
+            # The magnitude is parameterised through a sigmoid: it lives in
+            # (0, 1) by construction, whatever the training does (a free
+            # log-magnitude parameter could cross one and go unstable).
+            # sigmoid(2.197) = 0.9, the LRU-style initial magnitude.
+            self.magnitude_raw = nn.Parameter(
+                torch.full((state_dim,), float(np.log(0.9 / 0.1)))
+            )
             self.phase = nn.Parameter(torch.randn(state_dim) * 0.5)
             self.input_real = nn.Linear(d_model, state_dim)
             self.input_imag = nn.Linear(d_model, state_dim)
@@ -308,7 +315,7 @@ if torch is not None:
             self.gate = nn.Linear(d_model, d_model)
 
         def state_matrix(self):
-            magnitude = torch.exp(self.log_magnitude)
+            magnitude = torch.sigmoid(self.magnitude_raw)
             return magnitude * torch.exp(1j * self.phase)
 
         def forward(self, x):
@@ -422,7 +429,10 @@ class TimeSeriesBundle:
         scaled = self._scale(rows)
         if self.architecture.startswith("booster"):
             features = _booster_window_features(scaled, self.window, self.horizon, self.config)
-            prediction = np.asarray(self.model.predict(features), dtype=float).reshape(-1)[: self.horizon]
+            models = self.model if isinstance(self.model, list) else [self.model]
+            prediction = np.asarray(
+                [float(m.predict(features)[0]) for m in models], dtype=float
+            )[: self.horizon]
         else:
             if torch is None:
                 raise RuntimeError("torch is not installed")
@@ -642,7 +652,10 @@ def train_forecaster(
     X_test, y_test = _cut_windows(frame, feature_columns, window, horizon, test_idx)
 
     # The scaler is fitted on the training segment only (plan F3): the test
-    # rows never touch it, which is what a leakage test can rebuild.
+    # rows never touch it, which is what a leakage test can rebuild. The
+    # target is the first feature column, so its statistics are the same
+    # scaler's first entry - the head learns in the standardized space and
+    # the evaluation unscales, consistently on both sides.
     train_mean = X_train.reshape(-1, X_train.shape[2]).mean(axis=0)
     train_std = X_train.reshape(-1, X_train.shape[2]).std(axis=0)
     train_std = np.where(train_std == 0, 1.0, train_std)
@@ -650,7 +663,11 @@ def train_forecaster(
     def _scale_windows(windows: np.ndarray) -> np.ndarray:
         return (windows - train_mean) / train_std
 
+    def _scale_targets(targets: np.ndarray) -> np.ndarray:
+        return (targets - train_mean[0]) / train_std[0]
+
     X_train_s, X_val_s, X_test_s = map(_scale_windows, (X_train, X_val, X_test))
+    y_train_s, y_val_s = _scale_targets(y_train), _scale_targets(y_val)
 
     architecture = {
         "RNN": "rnn",
@@ -678,11 +695,19 @@ def train_forecaster(
     loss_curve: List[float] = []
 
     if is_booster:
-        model = _build_booster(model_name, params)
+        # One booster per horizon step (the direct multi-step of plan F3):
+        # CatBoost has no multi-output regressor, and one model per step is
+        # what "direct" means anyway.
         features_train = _booster_feature_matrix(X_train_s, window, horizon)
         features_test = _booster_feature_matrix(X_test_s, window, horizon)
-        model.fit(features_train, y_train.reshape(len(y_train)))
-        predictions_scaled = np.asarray(model.predict(features_test), dtype=float).reshape(len(y_test), -1)[:, :horizon]
+        model = []
+        for step in range(horizon):
+            booster = _build_booster(model_name, params)
+            booster.fit(features_train, y_train_s[:, step])
+            model.append(booster)
+        predictions_scaled = np.stack(
+            [np.asarray(b.predict(features_test), dtype=float) for b in model], axis=1
+        )
         config = {"booster": model_name}
     else:
         if torch is None:
@@ -705,9 +730,9 @@ def train_forecaster(
 
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         X_train_t = torch.tensor(X_train_s, dtype=torch.float32)
-        y_train_t = torch.tensor(y_train, dtype=torch.float32)
+        y_train_t = torch.tensor(y_train_s, dtype=torch.float32)
         X_val_t = torch.tensor(X_val_s, dtype=torch.float32)
-        y_val_t = torch.tensor(y_val, dtype=torch.float32)
+        y_val_t = torch.tensor(y_val_s, dtype=torch.float32)
 
         best_val = float("inf")
         best_state = None
@@ -725,7 +750,7 @@ def train_forecaster(
                 # Gradient clipping at 1.0 (plan F3).
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-                total += float(loss) * len(batch)
+                total += float(loss.detach()) * len(batch)
             loss_curve.append(round(total / len(order), 6))
             model.eval()
             with torch.no_grad():
@@ -750,7 +775,7 @@ def train_forecaster(
             metrics["receptive_field"] = int(model.receptive_field)
             metrics["receptive_field_covers_window"] = bool(model.receptive_field >= window)
         if architecture == "ssm":
-            magnitudes = torch.abs(model.layers[0].state_matrix())
+            magnitudes = torch.abs(model.layers[0].state_matrix()).detach()
             metrics["ssm_state_max_magnitude"] = round(float(magnitudes.max()), 4)
             metrics["ssm_states_below_one"] = bool(float(magnitudes.max()) < 1.0)
 

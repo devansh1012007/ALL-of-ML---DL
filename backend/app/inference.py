@@ -189,8 +189,12 @@ async def user_for_api_key(db: AsyncSession, token: str) -> Optional[User]:
     ).scalars().first()
     if key is None or key.revoked_at is not None:
         return None
-    if key.expires_at is not None and key.expires_at < _now():
-        return None
+    if key.expires_at is not None:
+        expires = key.expires_at
+        if expires.tzinfo is None:  # SQLite returns naive datetimes
+            expires = expires.replace(tzinfo=timezone.utc)
+        if expires < _now():
+            return None
     key.last_used_at = _now()
     await db.commit()
     owner = await db.get(User, key.user_id)
@@ -315,7 +319,9 @@ async def create_deployment(body: DeploymentCreate, request: Request, db: AsyncS
         _, bundle = await load_bundle_of_run(run)
         _require_predicting_bundle(bundle)
     except BundleError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from None
     existing = await _deployment_of_caller_or_none(body.name, user, db)
     if existing is not None:
         raise HTTPException(
@@ -384,7 +390,9 @@ async def repoint_deployment(
         _, bundle = await load_bundle_of_run(run)
         _require_predicting_bundle(bundle)
     except BundleError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from None
     from_run = deployment.run_id
     deployment.run_id = run.id
     deployment.updated_at = _now()
@@ -781,7 +789,9 @@ async def _predict_file(
         _, bundle = await load_bundle_of_run(run)
         _require_predicting_bundle(bundle)
     except BundleError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from None
     if getattr(bundle, "request_kind", "rows") != "rows":
         raise HTTPException(
             status_code=422, detail="This model cannot score a table of rows."

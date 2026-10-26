@@ -45,3 +45,21 @@ There are two ways:
 - one column is the target. The application suggests it (a column named
   `label`, `target`, `y`, `class`, `outcome` or `churn`, otherwise the last
   column) and the suggestion can be changed in the form.
+
+
+## The sample data of every dataset kind (plan F1)
+
+The tests must not download anything, and a user needs a file of every
+dataset kind to try the corresponding model family:
+
+- `synthetic_sine.csv` - a sine plus noise series (kind: timeseries). Train
+  the forecasters on it: `LSTM` with `label_column=value`.
+- `karate_club.zip` - the Zachary karate club graph, 34 nodes and 78 edges
+  (kind: graph). Train `GNN` on it for the classic semi-supervised split.
+- `sbm_graph.zip` - a stochastic block model with informative structure and
+  uninformative features: the graph is the signal, which is the honest test
+  of whether a GNN uses it at all.
+- `sample_text_corpus.csv` - a small text corpus (kind: text) for the text
+  classifiers and the GPT fine-tuning.
+- `sample_text_pairs.csv` - a source/target pair file (kind: text_pairs):
+  an uppercase mapping, a deterministic relation a tiny T5 can learn.
