@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from sklearn.neural_network import MLPRegressor
 from sklearn.exceptions import ConvergenceWarning
+from sklearn.base import clone
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder
 import warnings
 import joblib
 import numpy as np
