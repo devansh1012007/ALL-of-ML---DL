@@ -1,8 +1,10 @@
 import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import { 
   Activity, Database, Server, PlusCircle, LogOut, ChevronRight, 
-  Play, CheckCircle, XCircle, Clock, Download, Lock, User, Ban, BarChart3
+  Play, CheckCircle, XCircle, Clock, Download, Lock, User, Ban, BarChart3,
+  ShieldCheck
 } from 'lucide-react';
+import { AdminScreen } from './AdminScreen';
 
 // --- CONFIGURATION ---
 const API_BASE = 'http://localhost:8010';
@@ -48,7 +50,20 @@ const formatApiDetail = (detail, status) => {
     if (messages.length) return messages.join('; ');
   }
   if (detail && typeof detail === 'object') {
-    if (typeof detail.message === 'string') return detail.message;
+    if (typeof detail.message === 'string') {
+      const quota = detail.quota;
+      if (quota && quota.name) {
+        // The quota object of plan A4: what was hit, against what, and when
+        // it resets - the difference between information and an opaque 403.
+        const unlimited = quota.limit === null || quota.limit === undefined;
+        const limitText = unlimited ? 'unlimited' : `the limit of ${quota.limit}`;
+        let text = `${detail.message} (${quota.name}: ${limitText}`;
+        if (quota.used !== undefined && quota.used !== null) text += `, currently ${quota.used}`;
+        if (quota.resets_at) text += `, resets at ${new Date(quota.resets_at).toLocaleString()}`;
+        return text + ')';
+      }
+      return detail.message;
+    }
     return JSON.stringify(detail);
   }
   return `HTTP error! status: ${status}`;
@@ -2074,9 +2089,17 @@ const NewJob = ({ navigate }) => {
 // --- MAIN APP COMPONENT ---
 
 const MainApp = () => {
-  const { user, logout } = useContext(AuthContext);
+  const { user, logout, apiFetch } = useContext(AuthContext);
   const [currentView, setCurrentView] = useState('runs');
   const [activeParams, setActiveParams] = useState(null);
+  // The authoritative role and the usage of the caller (plan A7): a quota
+  // the user cannot see is experienced as a bug, and the admin section is
+  // visible only to an admin.
+  const [me, setMe] = useState(null);
+
+  useEffect(() => {
+    apiFetch('/api/v1/me').then(setMe).catch(() => {});
+  }, [apiFetch]);
 
   const navigate = useCallback((view, params = null) => {
     setCurrentView(view);
@@ -2090,6 +2113,7 @@ const MainApp = () => {
       case 'run-details': return <RunDetails runId={activeParams} navigate={navigate} />;
       case 'compare': return <CompareRuns runIds={activeParams} navigate={navigate} />;
       case 'new-job': return <NewJob navigate={navigate} />;
+      case 'admin': return <AdminScreen apiFetch={apiFetch} />;
       default: return <RunsDashboard navigate={navigate} />;
     }
   };
@@ -2119,6 +2143,13 @@ const MainApp = () => {
             active={currentView === 'new-job'} 
             onClick={() => navigate('new-job')} 
           />
+          {me?.role === 'admin' ? (
+            <SidebarItem 
+              icon={ShieldCheck} label="Admin" 
+              active={currentView === 'admin'} 
+              onClick={() => navigate('admin')} 
+            />
+          ) : null}
         </nav>
         <div className="p-4 border-t border-zinc-800 shrink-0">
           <div className="flex items-center justify-between">
@@ -2128,7 +2159,16 @@ const MainApp = () => {
               </div>
               <div className="truncate text-sm">
                 <div className="font-medium truncate">{user?.sub}</div>
-                <div className="text-xs text-zinc-500 uppercase">{user?.role}</div>
+                <div className="text-xs text-zinc-500 uppercase">{me?.role || user?.role}</div>
+                {me?.usage ? (
+                  <div className="text-[11px] text-zinc-600 mt-0.5 tabular-nums">
+                    {me.usage.runs_today}{me.usage.limits?.max_runs_per_day ? `/${me.usage.limits.max_runs_per_day}` : ''} runs today
+                    {' · '}
+                    {me.usage.storage_bytes >= 1024 * 1024
+                      ? `${(me.usage.storage_bytes / (1024 * 1024)).toFixed(1)} MB`
+                      : `${Math.round(me.usage.storage_bytes / 1024)} KB`} stored
+                  </div>
+                ) : null}
               </div>
             </div>
             <button onClick={logout} className="p-2 text-zinc-400 hover:text-white rounded-md hover:bg-zinc-800 transition">

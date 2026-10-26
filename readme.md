@@ -259,3 +259,19 @@ The repository includes the following 38 models in the `MODEL_CATALOG` (30 imple
 - SSM_timeseries (not implemented)
 - TCN_timeseries (not implemented)
 - ViT (not implemented)
+
+
+## The two decisions the next contributor should read first
+
+- **[docs/CHECKPOINT.md](docs/CHECKPOINT.md)** - when to keep building and
+  when to stop: the three measurements that gate the model tiers (a
+  stranger trained and predicted in ten minutes; five outside users; you
+  can say what they used it for).
+- **[docs/MODEL_TIERS.md](docs/MODEL_TIERS.md)** - the order inside the
+  model ladder, what each family costs, which entries are GPU-gated, and
+  which one is retired with a permanent reason.
+
+The admin screen (visible to an admin account) manages the users, the
+quota profiles, the queue, the invites and the audit trail; the API keys
+and the stable deployment names are served under `/api/v1/keys` and
+`/api/v1/ml/deployments`.
