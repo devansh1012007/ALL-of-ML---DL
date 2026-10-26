@@ -22,27 +22,29 @@ import socket
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.encoders import jsonable_encoder
 from jose import JOSEError, jwt
 from pathlib import Path
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import or_, update
+from sqlalchemy import or_, update, func
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .base import Base
 from .database import get_db, engine, AsyncSessionLocal
-from .models import Dataset, User, TrainingRun
+from .models import Dataset, User, TrainingRun, Deployment
 from .auth import (
+    ACCESS_TOKEN_MINUTES,
     ALGORITHM,
+    BCRYPT_MAX_BYTES,
     SECRET_KEY,
     create_token,
+    decode_token,
     dummy_password_hash,
     hash_pass,
     is_reserved_username,
@@ -59,6 +61,12 @@ from .datasets import (
 from . import model_training as model_training_module
 from . import admin as admin_module
 from . import inference as inference_module
+from . import sessions
+from . import rate_limit as rate_limit_module
+from . import cleanup
+from . import observability
+from . import progress
+from . import executor as executor_module
 from .admin import audit as write_audit
 from .admin import REGISTRATION_MODE
 from .bundles import BundleError
@@ -103,6 +111,20 @@ async def lifespan(app: FastAPI):
     fails fast with an actionable message.
     """
     global _slots_in_use
+    # The validated configuration of plan H4: every variable is read and
+    # checked once, a nonsense value is refused with a message that names it,
+    # and the effective non-secret configuration is printed, so an operator
+    # sees what the process actually uses. A secret is never printed.
+    from .config import ConfigError, Settings
+
+    try:
+        settings = Settings.from_env()
+    except ConfigError as exc:
+        raise RuntimeError(f"The configuration is not valid: {exc}") from None
+    logger.info(
+        "The effective configuration (secrets masked): %s",
+        json.dumps(settings.effective_non_secret(), default=str),
+    )
     await verify_schema()
     await reap_the_interrupted_runs()
     await seed_builtin_datasets()
@@ -464,6 +486,70 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- the refresh cookie and the CORS allow-list (plan A2 / G2) ---------------
+# The refresh token of section A2 travels in an httpOnly cookie, and a cookie
+# is a credential: a deployment that serves it must name its origins
+# explicitly. A wildcard there would make the browser reject every credentialed
+# request, and the server would be an open refector anyway, so the ambiguity is
+# refused at the startup instead of being discovered in the browser.
+REFRESH_COOKIE_ENABLED = os.getenv("REFRESH_COOKIE_ENABLED", "1") != "0"
+if REFRESH_COOKIE_ENABLED and _CORS_ALLOWS_ANY:
+    raise RuntimeError(
+        'CORS_ORIGINS contains "*": a deployment that sends the refresh cookie '
+        "must name its allowed origins explicitly. Set CORS_ORIGINS to a "
+        "comma-separated list, or set REFRESH_COOKIE_ENABLED=0 to run without "
+        "browser sessions (API-key-only deployments)."
+    )
+
+
+# --- security headers (plan G2) ----------------------------------------------
+# The headers a browser honours and the API cannot rely on the proxy for. HSTS
+# is deliberately absent: it belongs to the TLS-terminating proxy, and sending
+# it over plain HTTP from the application would be a lie the browser caches.
+class SecurityHeaders:
+    """Add the static security headers to every response."""
+
+    HEADERS = (
+        (b"x-content-type-options", b"nosniff"),
+        (b"referrer-policy", b"no-referrer"),
+        # The API serves no frames and is not framed: both directions are
+        # closed. The style/script sources are 'self' - the SPA is served by
+        # its own origin and calls the API cross-origin, which CSP does not
+        # restrict (it restricts what the *response's* origin may load, and
+        # the API loads nothing).
+        (b"content-security-policy",
+         b"default-src 'self'; frame-ancestors 'none'; base-uri 'self'; "
+         b"form-action 'self'"),
+    )
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                present = {name.lower() for name, _ in headers}
+                for name, value in self.HEADERS:
+                    if name not in present:
+                        headers.append((name, value))
+                message = dict(message, headers=headers)
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeaders)
+
+# The request log (plan H3): one JSON line per request, with the request id
+# the client can echo and the run id when the path carries one. It sits
+# inside everything else, so a refusal of any middleware is logged too.
+app.add_middleware(observability.RequestLogMiddleware)
+
 # The states of a run. The column is a free string, so a new state needs no
 # migration, but the names live here: the worker, the reaper and the tests
 # have to agree on them.
@@ -506,96 +592,104 @@ def _now() -> datetime:
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
-# --- rate limiting ----------------------------------------------------------
-# A login endpoint that is not limited can be used to try passwords, and an
-# un-limited registration endpoint can be used to fill the database. The
-# limiter counts the attempts of every client in a sliding window. It lives in
-# the memory of the process, which is enough for the single-process deployment
-# this application runs in; a multi-worker deployment would need a shared
-# store.
+# --- rate limiting (plan A8) --------------------------------------------------
+# The limiter used to live in the memory of the process, which made it a lie
+# the moment a second worker started: every process had its own budget. The
+# counts live in the ``rate_events`` table now (one row per counted attempt),
+# so every worker of the deployment shares one budget per key. The mechanics
+# are in ``rate_limit.py``; the limits themselves are here, next to the
+# endpoints they guard.
 LOGIN_RATE_LIMIT = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
 REGISTER_RATE_LIMIT = int(os.getenv("REGISTER_RATE_LIMIT", "20"))
 UPLOAD_RATE_LIMIT = int(os.getenv("UPLOAD_RATE_LIMIT", "20"))
-RATE_LIMIT_WINDOW_SECONDS = 60.0
+# Re-exported for the tests and the operators that read one place.
+RATE_LIMIT_WINDOW_SECONDS = rate_limit_module.RATE_LIMIT_WINDOW_SECONDS
 
-# The maximum number of clients the limiter remembers. Without it, an
-# unauthenticated client could fill the memory of the process by sending
-# requests with a different username every time.
-RATE_LIMIT_MAX_CLIENTS = int(os.getenv("RATE_LIMIT_MAX_CLIENTS", "10000"))
-
-# The attempts per key. A failed login is counted twice: under the address
-# alone, so that one client cannot spray one password over many accounts, and
-# under the address *and* the account, so that one client cannot hammer one
-# account. The account is deliberately not a key of its own: a limit that
-# counts every attempt on an account, wherever it comes from, lets an
-# attacker lock a victim out of their own account.
-_login_attempts: Dict[str, deque] = defaultdict(deque)
+# The addresses of the reverse proxies this deployment sits behind. Only when
+# the socket address of the request is one of these is the ``X-Forwarded-For``
+# header believed - and even then the walk starts at the right, because a
+# client can put anything it likes in the left of that list. Without the
+# setting the socket address is used, which is the only value nobody can
+# forge.
+TRUSTED_PROXIES = {
+    entry.strip()
+    for entry in os.getenv("TRUSTED_PROXIES", "").split(",")
+    if entry.strip()
+}
 
 
 def _client_address(request: Request) -> str:
-    """The address of the client that made the request."""
-    return request.client.host if request.client else "unknown"
+    """The address of the client that made the request.
 
-
-def _prune_attempts(now: float) -> None:
-    """Forget the attempts that fell out of the window.
-
-    The entries of the clients that are not seen any more would otherwise
-    stay in the memory of the process forever.
+    The socket address, unless the request arrived through a proxy this
+    deployment declared trusted (``TRUSTED_PROXIES``); in that case the
+    forward chain is read from the right, skipping the trusted proxies, and
+    the first address nobody vouched for is the client. An attacker can write
+    anything into the left of the list, so the left is never the answer.
     """
-    for key in list(_login_attempts.keys()):
-        attempts = _login_attempts[key]
-        while attempts and now - attempts[0] > RATE_LIMIT_WINDOW_SECONDS:
-            attempts.popleft()
-        if not attempts:
-            del _login_attempts[key]
+    socket_address = request.client.host if request.client else "unknown"
+    if not TRUSTED_PROXIES or socket_address not in TRUSTED_PROXIES:
+        return socket_address
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if not forwarded:
+        return socket_address
+    hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+    for hop in reversed(hops):
+        if hop not in TRUSTED_PROXIES:
+            return hop
+    # Every hop is a proxy we vouch for: the client is the leftmost entry.
+    return hops[0] if hops else socket_address
 
 
-def _check_rate_limit(key: str, limit: int) -> None:
-    """Raise 429 when the client made too many attempts.
-
-    The window is a sliding one: an attempt that is older than the window is
-    forgotten, so a client that stops trying gets its budget back.
-    """
-    if limit <= 0:
-        return
-    now = time.monotonic()
-    attempts = _login_attempts[key]
-    while attempts and now - attempts[0] > RATE_LIMIT_WINDOW_SECONDS:
-        attempts.popleft()
-    if len(attempts) >= limit:
+async def _check_rate_limit(db: AsyncSession, key: str, limit: int) -> None:
+    """Raise 429 when the key made too many attempts in the window."""
+    try:
+        await rate_limit_module.check_rate_limit(db, key, limit)
+    except rate_limit_module.RateLimitExceeded as exceeded:
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many attempts. Please try again in a minute.",
-        )
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=exceeded.detail
+        ) from None
 
 
-def _record_rate_limit(key: str) -> None:
-    """Count an attempt against the client's budget."""
-    now = time.monotonic()
-    _login_attempts[key].append(now)
-    if len(_login_attempts) > RATE_LIMIT_MAX_CLIENTS:
-        _prune_attempts(now)
-        if len(_login_attempts) > RATE_LIMIT_MAX_CLIENTS:
-            # The window did not free anything: the oldest entry is dropped.
-            oldest = min(
-                _login_attempts,
-                key=lambda name: _login_attempts[name][0] if _login_attempts[name] else now,
-            )
-            _login_attempts.pop(oldest, None)
+async def _record_rate_limit(db: AsyncSession, key: str) -> None:
+    """Count an attempt against the key's budget."""
+    await rate_limit_module.record_rate_limit(db, key)
 
 
-def _forget_rate_limit(key: str) -> None:
-    """Give the client its budget back after a successful attempt."""
-    _login_attempts.pop(key, None)
+async def _forget_rate_limit(db: AsyncSession, key: str) -> None:
+    """Give the key its budget back after a successful attempt."""
+    await rate_limit_module.forget_rate_limit(db, key)
 
 
-def reset_rate_limits() -> None:
-    """Forget every recorded attempt.
+async def reset_rate_limits(db: AsyncSession) -> None:
+    """Forget every recorded attempt (the test suite and the admin tooling)."""
+    await rate_limit_module.reset_rate_limits(db)
 
-    The test suite uses it so that every test starts with a clean budget.
+
+def reset_rate_limits_sync() -> None:
+    """The test-suite bridge: a synchronous reset against the configured
+    database, on its own engine, on its own loop.
+
+    The application engine belongs to the event loop of the process; the
+    fixture that clears the budget runs outside it. A throwaway engine,
+    created and disposed inside one ``asyncio.run``, is the dialect-neutral
+    way to do that (a plain ``DELETE FROM rate_events``).
     """
-    _login_attempts.clear()
+    import asyncio
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from .settings import DATABASE_URL
+
+    async def _reset():
+        engine = create_async_engine(DATABASE_URL)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("DELETE FROM rate_events"))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_reset())
 
 
 async def get_current_user(
@@ -616,7 +710,7 @@ async def get_current_user(
     missing or malformed.
     """
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = decode_token(token)
     except JOSEError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"}) from None
     username: str = payload.get("sub")
@@ -630,6 +724,16 @@ async def get_current_user(
     # account stops working at the next request, because the row is read from
     # the database every time - the token itself never has to expire.
     if getattr(user, "status", "active") != "active":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    # The revocation of a session (plan A2): the token carries the
+    # ``token_version`` it was issued with, and any change that must end
+    # sessions (password change, suspension, role change) increments the
+    # column. A token from before the change is then an old token, and an old
+    # token is rejected here. A token that predates the claim at all is
+    # treated as version 0, so it survives until the first bump - a
+    # deployment that adopts the check does not log everyone out at once.
+    issued_version = int(payload.get("token_version") or 0)
+    if issued_version < int(getattr(user, "token_version", 0) or 0):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
     return user
 
@@ -697,7 +801,7 @@ async def register(
     suspended login gets the same generic message as a wrong password.
     """
     address = _client_address(request)
-    _check_rate_limit(f"register:{address}", REGISTER_RATE_LIMIT)
+    await _check_rate_limit(db, f"register:{address}", REGISTER_RATE_LIMIT)
     reason = validate_credentials(user.username, user.password)
     if reason:
         logger.warning(f"Registration rejected for '{user.username}': {reason}")
@@ -739,7 +843,8 @@ async def register(
     logger.info(f"Success: User '{user.username}' registered with status '{initial_status}'.")
     if initial_status != "active":
         await write_audit(db, new_user.id, "user.registered_pending", "user", new_user.id, {})
-    _record_rate_limit(f"register:{address}")
+    await _record_rate_limit(db, f"register:{address}")
+    await db.commit()
     return {
         "message": "User registered successfully",
         "status": initial_status,
@@ -778,8 +883,8 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     # many accounts; the account budget stops one client from hammering one
     # account. Neither is a budget of the account alone, so a victim can
     # always log in from another address.
-    _check_rate_limit(address_key, LOGIN_RATE_LIMIT * 3)
-    _check_rate_limit(account_key, LOGIN_RATE_LIMIT)
+    await _check_rate_limit(db, address_key, LOGIN_RATE_LIMIT * 3)
+    await _check_rate_limit(db, account_key, LOGIN_RATE_LIMIT)
     if is_reserved_username(form_data.username):
         # The reserved names are refused at the login as well as at the
         # registration: a row with that name may still exist in a database
@@ -796,26 +901,191 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     password_matches = await run_in_threadpool(verify_pass, form_data.password, stored_hash)
     if not user or not password_matches:
         logger.warning(f"Failed login: Incorrect credentials for '{form_data.username}'")
-        _record_rate_limit(account_key)
-        _record_rate_limit(address_key)
+        await _record_rate_limit(db, account_key)
+        await _record_rate_limit(db, address_key)
+        await db.commit()
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     # The same generic message for a pending or suspended account, so the
     # status of an account is not an oracle (plan A1).
     if getattr(user, "status", "active") != "active":
-        _record_rate_limit(account_key)
-        _record_rate_limit(address_key)
+        await _record_rate_limit(db, account_key)
+        await _record_rate_limit(db, address_key)
+        await db.commit()
         raise HTTPException(status_code=400, detail="Incorrect username or password")
     logger.info(f"Success: User '{user.username}' logged in successfully.")
     user.last_login_at = _now()
+    # The session of the browser (plan A2): a refresh token is issued with the
+    # access token, in the same transaction as the login stamp.
+    refresh_raw, _refresh_row = await sessions.issue_refresh_token(db, user.id)
     await db.commit()
-    access_token = create_token(data={"sub": user.username, "role": user.role})
-    _forget_rate_limit(account_key)
-    return {
+    # The role lives in the database and is read on every request; the claim
+    # was removed (plan G1) so that no client can ever trust a stale one.
+    access_token = create_token(data={"sub": user.username, "token_version": getattr(user, "token_version", 0)})
+    await rate_limit_module.forget_rate_limit(db, account_key)
+    await db.commit()
+    response = JSONResponse({
         "access_token": access_token,
         "token_type": "bearer",
         "role": user.role,
         "registration_mode": REGISTRATION_MODE,
-    }
+        # Programmatic clients (a script, a test) take the refresh token from
+        # the body. A browser ignores it: the credential it uses is the
+        # httpOnly cookie set below, which no script on the page can read.
+        "refresh_token": refresh_raw,
+        "expires_in": ACCESS_TOKEN_MINUTES * 60,
+    })
+    _set_refresh_cookie(response, refresh_raw)
+    return response
+
+
+# --- the session endpoints (plan A2) ------------------------------------------
+
+def _set_refresh_cookie(response, raw: str) -> None:
+    """Put the refresh token in an httpOnly, SameSite=Strict cookie.
+
+    The cookie is the *only* credential a browser page needs and the one it
+    can never read itself. The path is narrowed to the endpoints that consume
+    it, ``Secure`` is set when the deployment says it runs behind TLS, and
+    ``SameSite=Strict`` keeps it off every cross-site request.
+    """
+    if not REFRESH_COOKIE_ENABLED:
+        return
+    response.set_cookie(
+        sessions.REFRESH_COOKIE_NAME,
+        raw,
+        max_age=sessions.REFRESH_TOKEN_DAYS * 86400,
+        httponly=True,
+        samesite="strict",
+        secure=os.getenv("COOKIE_SECURE", "0") == "1",
+        path=sessions.REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(response) -> None:
+    if not REFRESH_COOKIE_ENABLED:
+        return
+    response.delete_cookie(
+        sessions.REFRESH_COOKIE_NAME, path=sessions.REFRESH_COOKIE_PATH
+    )
+
+
+class _RefreshBody(BaseModel):
+    refresh_token: Optional[str] = None
+
+
+def _presented_refresh_token(request: Request, body: Optional[_RefreshBody]) -> Optional[str]:
+    """The refresh token of the request: the cookie first, the body second."""
+    from_cookie = request.cookies.get(sessions.REFRESH_COOKIE_NAME)
+    if from_cookie:
+        return from_cookie
+    if body is not None and body.refresh_token:
+        return body.refresh_token
+    return None
+
+
+@app.post("/api/v1/auth/refresh")
+async def refresh_session(
+    request: Request,
+    body: Optional[_RefreshBody] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Exchange a refresh token for a fresh access token (plan A2).
+
+    The presented token is rotated: a new row is issued in the same family
+    and the old one is marked revoked. Presenting a token that was already
+    rotated means the family leaked - every token of the family is revoked
+    before the 401 is answered.
+    """
+    raw = _presented_refresh_token(request, body)
+    if not raw:
+        raise HTTPException(status_code=401, detail="No session to refresh.")
+    try:
+        new_raw, _new_row, _old_row = await sessions.rotate_refresh_token(db, raw)
+    except sessions.SessionError:
+        await db.commit()
+        response = JSONResponse({"detail": "The session is no longer valid."}, status_code=401)
+        _clear_refresh_cookie(response)
+        return response
+    user = (
+        await db.execute(select(User).where(User.id == _new_row.user_id))
+    ).scalars().first()
+    if user is None or getattr(user, "status", "active") != "active":
+        await db.commit()
+        response = JSONResponse({"detail": "The session is no longer valid."}, status_code=401)
+        _clear_refresh_cookie(response)
+        return response
+    await db.commit()
+    access_token = create_token(data={"sub": user.username, "token_version": getattr(user, "token_version", 0)})
+    response = JSONResponse({
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user.role,
+        "refresh_token": new_raw,
+        "expires_in": ACCESS_TOKEN_MINUTES * 60,
+    })
+    _set_refresh_cookie(response, new_raw)
+    return response
+
+
+@app.post("/api/v1/auth/logout")
+async def logout_session(
+    request: Request,
+    body: Optional[_RefreshBody] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """End the presented session (plan A2): the token is revoked, the cookie
+    is cleared. The access token dies at its own expiry - which is minutes."""
+    raw = _presented_refresh_token(request, body)
+    if raw:
+        await sessions.revoke_refresh_token(db, raw)
+        await db.commit()
+    response = JSONResponse({"detail": "Logged out."})
+    _clear_refresh_cookie(response)
+    return response
+
+
+class _PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/v1/auth/change-password")
+async def change_password(
+    body: _PasswordChange,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Change the password (plan A2): the current one is required, the new
+    one follows the credential policy, every session of the account ends,
+    and a fresh access token (with the new ``token_version``) is returned."""
+    stored_hash = current_user.hashed_password
+    matches = await run_in_threadpool(verify_pass, body.current_password, stored_hash)
+    if not matches:
+        raise HTTPException(status_code=400, detail="The current password is not correct.")
+    reason = validate_credentials(current_user.username, body.new_password)
+    if reason:
+        # Only the password part of the policy can bite here; the message is
+        # readable either way.
+        raise HTTPException(status_code=400, detail=reason)
+    # The same 72-byte truncation the login verification applies.
+    safe_new = body.new_password[:BCRYPT_MAX_BYTES]
+    current_user.hashed_password = await run_in_threadpool(hash_pass, safe_new)
+    current_user.token_version = (current_user.token_version or 0) + 1
+    revoked = await sessions.revoke_all_for_user(db, current_user.id)
+    await write_audit(
+        db, current_user.id, "user.password_changed", "user", current_user.id,
+        {"sessions_revoked": revoked},
+    )
+    await db.commit()
+    logger.info(f"User '{current_user.username}' changed their password ({revoked} session(s) ended).")
+    access_token = create_token(data={"sub": current_user.username, "token_version": current_user.token_version})
+    response = JSONResponse({
+        "access_token": access_token,
+        "token_type": "bearer",
+        "detail": "The password was changed; the other sessions have ended.",
+    })
+    return response
 
 @app.get("/api/v1/admin/all-users")
 async def get_all_users(admin_user: User = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
@@ -904,6 +1174,13 @@ async def suggest_hyperparameters_endpoint(
     hf_dataset_url: Optional[str] = None,
     current_user: User = Depends(get_current_user),
 ):
+    if hf_dataset_url:
+        # The same hub-identifier rule as the train endpoint (plan G3): the
+        # suggestion path reaches the same loader, so it gets the same guard.
+        try:
+            model_training_module.validate_hf_dataset_reference(hf_dataset_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
     try:
         return {"suggested_hyperparameters": suggest_hyperparameters(model_name, task_type, optimize_metric, dataset_name, hf_dataset_url)}
     except Exception as exc:
@@ -1009,16 +1286,33 @@ async def upload_dataset(
     The body is read here and not by the framework: a request that is not
     authenticated has to be refused before its file is written to the disk.
     """
-    _check_rate_limit(f"upload:{_client_address(request)}", UPLOAD_RATE_LIMIT)
-    _record_rate_limit(f"upload:{_client_address(request)}")
-
-    # The upload checks of plan A4 (bytes, dataset count, storage headroom)
-    # run before the body is parsed: the refusal answers immediately.
-
     # The values of the session are read before the first commit: a rollback
     # expires them, and reading them afterwards is an error.
     owner_id = current_user.id
     username = current_user.username
+
+    # The upload budget of plan A8 is keyed on the *authenticated user* (an
+    # address can be shared by a whole office; an account is one tenant) with
+    # a wider address budget as the second line against a rented machine.
+    address = _client_address(request)
+    await _check_rate_limit(db, f"upload:user:{owner_id}", UPLOAD_RATE_LIMIT)
+    await _check_rate_limit(db, f"upload:addr:{address}", UPLOAD_RATE_LIMIT * 3)
+    # The ledger is written through a session of its own: an upload that is
+    # refused later (a quota, a bad file) has still *used* its attempt, and
+    # the event must survive the rollback of the request's transaction - while
+    # the request session itself is left exactly as it is. A failure of the
+    # ledger is not the request's business: it is advisory, and a database
+    # that refuses it will fail the request soon enough anyway.
+    try:
+        async with AsyncSessionLocal() as ledger:
+            await rate_limit_module.record_rate_limit(ledger, f"upload:user:{owner_id}")
+            await rate_limit_module.record_rate_limit(ledger, f"upload:addr:{address}")
+            await ledger.commit()
+    except Exception:  # noqa: BLE001 - the ledger must not break the request
+        logger.warning("The upload rate ledger could not be written", exc_info=True)
+
+    # The upload checks of plan A4 (bytes, dataset count, storage headroom)
+    # run before the body is parsed: the refusal answers immediately.
 
     async with request.form() as form:
         upload = form.get("file")
@@ -1269,6 +1563,16 @@ async def train_model_endpoint(
                 "Hugging Face dataset, not both."
             ),
         )
+    if payload.hf_dataset_url:
+        # A Hugging Face reference is accepted as a hub identifier only
+        # (plan G3): an arbitrary URL would make the server fetch whatever
+        # the string points at, which is a server-side request forgery with
+        # extra steps. The check runs before the run exists, so the refusal
+        # is immediate and the reason is in the answer.
+        try:
+            model_training_module.validate_hf_dataset_reference(payload.hf_dataset_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
     if _needs_a_dataset(payload.model_name):
         dataset, storage_path = await _dataset_for_training(payload, current_user, db)
     else:
@@ -1309,6 +1613,23 @@ async def train_model_endpoint(
     else:
         dataset_source, dataset_tag = "rl", payload.env_id or "unknown"
 
+    # The capability routing of plan B7: the run records what its model
+    # needs, and the submit answers 409 when no online worker could ever
+    # run it - a request that would wait forever is refused, not queued.
+    requirements = {
+        "requires_gpu": bool(entry.get("requires_gpu", False)),
+        "min_memory_mb": entry.get("min_memory_mb"),
+    }
+    if not await _some_worker_satisfies(requirements):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"No worker online can run '{payload.model_name}': it needs "
+                + ("a GPU" if requirements["requires_gpu"] else "more memory than any worker has")
+                + ". The catalog entry says so; ask an operator to add a capable worker."
+            ),
+        )
+
     training_run = TrainingRun(
         owner_id=current_user.id,
         model_name=payload.model_name,
@@ -1321,6 +1642,7 @@ async def train_model_endpoint(
         optimize_metric=payload.optimize_metric,
         model_candidates=payload.model_candidates,
         status=STATUS_QUEUED,
+        requirements=requirements,
         # The dataset of the run (plan E4): the comparability guard of the
         # comparison view compares runs by dataset id and content hash.
         dataset_id=dataset.id if dataset is not None else None,
@@ -1340,8 +1662,14 @@ async def train_model_endpoint(
 
     if TRAINING_IN_API:
         # Starts the queue now: the worker takes the oldest queued run (this
-        # one, unless the process is busy - then it waits its turn).
-        background_tasks.add_task(drain_training_queue)
+        # one, unless the process is busy - then it waits its turn). A task
+        # of the event loop, not a Starlette background task: the response
+        # must not be tied to a training that may run for an hour - a client
+        # (and the test suite's client) waits for the answer, not for the
+        # model (plan B1).
+        drain = asyncio.create_task(drain_training_queue())
+        _background_tasks.add(drain)
+        drain.add_done_callback(_background_tasks.discard)
 
     return {
         "run_id": training_run.id,
@@ -1371,12 +1699,30 @@ async def drain_training_queue() -> None:
 
 
 async def _claim_next_run() -> Optional[int]:
-    """Claim the oldest queued run with one atomic UPDATE, or None.
+    """Claim the next run this worker may run, with one atomic UPDATE.
 
-    ``WHERE status = 'queued'`` is what makes the claim safe between
-    processes: of two workers that pick the same row, exactly one UPDATE
-    changes it.
+    Two rules sit on top of "oldest first" (plans B5 and B7):
+
+    * the fair share - among the queued runs, the owner with the fewest
+      running runs goes first, then the highest priority, then the oldest.
+      A user with a thousand queued runs cannot starve a newcomer;
+    * the capability routing - a run whose requirements this worker cannot
+      satisfy (a GPU model on a CPU worker) is left for a worker that can.
     """
+    capabilities = _worker_capabilities()
+    # The alias is what makes the count a *correlated* one: the running runs
+    # of the same owner the outer row belongs to.
+    running = sa.orm.aliased(TrainingRun, name="running")
+    running_of_owner = (
+        sa.select(sa.func.count())
+        .select_from(running)
+        .where(
+            running.owner_id == TrainingRun.owner_id,
+            running.status == STATUS_RUNNING,
+        )
+        .correlate(TrainingRun)
+        .scalar_subquery()
+    )
     for _ in range(5):
         async with AsyncSessionLocal() as session:
             candidate = (
@@ -1386,16 +1732,34 @@ async def _claim_next_run() -> Optional[int]:
                         TrainingRun.status == STATUS_QUEUED,
                         TrainingRun.request_payload.is_not(None),
                     )
-                    .order_by(TrainingRun.id)
-                    .limit(1)
+                    .order_by(
+                        # The owner with the least running work has the turn.
+                        running_of_owner,
+                        TrainingRun.priority.desc(),
+                        TrainingRun.id,
+                    )
+                    .limit(20)
                 )
-            ).first()
-            if candidate is None:
+            ).scalars().all()
+            # The first candidate this worker can satisfy (the ordering above
+            # decides whose turn it is; the capability check decides whether
+            # this is the machine for it).
+            chosen = None
+            for candidate_id in candidate:
+                requirements = (
+                    await session.execute(
+                        sa.select(TrainingRun.requirements).where(TrainingRun.id == candidate_id)
+                    )
+                ).scalar_one_or_none()
+                if _worker_satisfies(requirements or {}, capabilities):
+                    chosen = candidate_id
+                    break
+            if chosen is None:
                 return None
             now = _now()
             claimed = await session.execute(
                 update(TrainingRun)
-                .where(TrainingRun.id == candidate[0], TrainingRun.status == STATUS_QUEUED)
+                .where(TrainingRun.id == chosen, TrainingRun.status == STATUS_QUEUED)
                 .values(
                     status=STATUS_RUNNING,
                     worker_id=WORKER_ID,
@@ -1405,9 +1769,92 @@ async def _claim_next_run() -> Optional[int]:
             )
             await session.commit()
             if claimed.rowcount == 1:
-                return candidate[0]
+                return chosen
         # Another worker took it between the SELECT and the UPDATE: try the next one.
     return None
+
+
+_WORKER_CAPABILITIES_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _worker_capabilities() -> Dict[str, Any]:
+    """What this process can run (plan B7): computed once, cheaply."""
+    global _WORKER_CAPABILITIES_CACHE
+    if _WORKER_CAPABILITIES_CACHE is None:
+        gpu = False
+        try:
+            import torch
+
+            gpu = bool(torch.cuda.is_available())
+        except Exception:  # noqa: BLE001 - no torch: no GPU, no drama
+            gpu = False
+        memory_mb = None
+        try:
+            import psutil
+
+            memory_mb = int(psutil.virtual_memory().total / (1024 * 1024))
+        except Exception:  # noqa: BLE001
+            memory_mb = None
+        _WORKER_CAPABILITIES_CACHE = {"gpu": gpu, "cpu": True}
+        if memory_mb is not None:
+            _WORKER_CAPABILITIES_CACHE["memory_mb"] = memory_mb
+    return _WORKER_CAPABILITIES_CACHE
+
+
+def _worker_satisfies(requirements: Dict[str, Any], capabilities: Dict[str, Any]) -> bool:
+    """Whether this worker can run a run with these requirements."""
+    if requirements.get("requires_gpu") and not capabilities.get("gpu"):
+        return False
+    needed = requirements.get("min_memory_mb")
+    available = capabilities.get("memory_mb")
+    if needed and available and available < int(needed):
+        return False
+    return True
+
+
+async def _some_worker_satisfies(requirements: Dict[str, Any]) -> bool:
+    """Whether any worker that could take this run exists (plan B7).
+
+    This process counts when it trains in-process (TRAINING_IN_API=1);
+    otherwise the online workers of the table are asked, a fresh heartbeat
+    being the definition of online.
+    """
+    if TRAINING_IN_API and _worker_satisfies(requirements, _worker_capabilities()):
+        return True
+    from .models import Worker
+
+    cutoff = _now() - timedelta(seconds=TRAINING_STALE_SECONDS)
+    async with AsyncSessionLocal() as session:
+        rows = await session.execute(
+            select(Worker).where(Worker.last_seen > cutoff)
+        )
+        for worker in rows.scalars():
+            if _worker_satisfies(requirements, worker.capabilities or {}):
+                return True
+    return False
+
+
+async def register_this_worker() -> None:
+    """Write this worker's capabilities and heartbeat (plan B7)."""
+    from .models import Worker
+
+    capabilities = _worker_capabilities()
+    async with AsyncSessionLocal() as session:
+        existing = await session.get(Worker, WORKER_ID)
+        if existing is None:
+            session.add(
+                Worker(
+                    id=WORKER_ID,
+                    capabilities=capabilities,
+                    memory_mb=capabilities.get("memory_mb"),
+                    last_seen=_now(),
+                )
+            )
+        else:
+            existing.capabilities = capabilities
+            existing.memory_mb = capabilities.get("memory_mb")
+            existing.last_seen = _now()
+        await session.commit()
 
 
 async def _run_claimed(run_id: int) -> None:
@@ -1447,58 +1894,78 @@ async def _run_claimed(run_id: int) -> None:
     heartbeat = asyncio.create_task(_heartbeat(run_id))
     started = time.monotonic()
     try:
+        # The executor interface of plan B1: the queue decided *what* runs;
+        # the executor decides *how*. The events of plan B4 flow through the
+        # sink: the phases of the executor, the metrics of the trainer.
+        sink = progress.DatabaseSink(run_id)
+        limits = await _limits_for_run(run_id)
+        executor = executor_module.choose_executor()
         try:
-            metrics, dataset_source, dataset_tag, artifact = await run_in_threadpool(
-                train_model,
-                payload.model_name,
-                storage_path,
-                payload.hf_dataset_url,
-                payload.label_column,
-                payload.test_size,
-                payload.random_state,
-                payload.hyperparameters or {},
-                payload.sep,
-                payload.usecols,
-                payload.mode,
-                payload.optimize_metric,
-                payload.env_id,
-                payload.model_candidates,
-                payload.preset,
-                payload.task_type,
-                payload.cv_folds,
-                payload.preprocessing,
-                payload.split,
-                payload.time_column,
+            result = await executor.execute(
+                run_id, payload, storage_path, limits, sink
             )
         except Exception as exc:
-            # The failure is written in the run: the request was answered long
-            # ago, and the run is the only channel the client has left.
-            logger.exception("The training of the run %s failed", run_id)
+            logger.exception("The executor of the run %s failed", run_id)
+            result = executor_module.ExecResult(
+                status=STATUS_FAILED, metrics={"error": _public_error(exc)},
+                wall_seconds=time.monotonic() - started,
+            )
+        if result.status == STATUS_CANCELLED:
+            # The cancel of plan B3 already marked the row; the result of the
+            # work is discarded and the slot is free at once.
+            sink.append("phase", {"phase": "cancelled"})
+            await sink.flush()
+            return
+        if result.status == STATUS_FAILED:
+            sink.append("phase", {"phase": "failed"})
+            await sink.flush()
             await _finish_run(
-                run_id, STATUS_FAILED, metrics={"error": _public_error(exc)}
+                run_id, STATUS_FAILED, metrics=result.metrics or {"error": result.error or "failed"},
+                wall_seconds=result.wall_seconds,
             )
             return
-        # The chart data (plan E1) travels inside the metrics and moves into
-        # its own column here: the run list never returns it, GET /charts does.
-        charts = metrics.pop("_charts", None)
+        sink.append("phase", {"phase": "writing result"})
+        await sink.flush()
         await _finish_run(
             run_id,
             STATUS_COMPLETED,
-            metrics=metrics,
-            artifact=artifact,
-            charts=charts,
-            wall_seconds=time.monotonic() - started,
-            dataset_source=dataset_source,
-            # The tag of a local dataset is its name: the path the registry
-            # resolved it to is an internal detail of the server.
-            dataset_tag=dataset_name if dataset_name is not None else dataset_tag,
+            metrics=result.metrics,
+            artifact=result.artifact,
+            charts=result.charts,
+            wall_seconds=result.wall_seconds,
+            dataset_source=result.dataset_source,
+            dataset_tag=dataset_name if dataset_name is not None else result.dataset_tag,
         )
+        sink.append("phase", {"phase": "completed"})
+        await sink.flush()
     finally:
         heartbeat.cancel()
         try:
             await heartbeat
         except BaseException:
             pass
+
+
+async def _limits_for_run(run_id: int) -> "executor_module.Limits":
+    """What this run may consume: the owner's quota, the numbers of plan A3."""
+    from sqlalchemy import select as _select
+
+    from .quotas import effective_quota
+
+    async with AsyncSessionLocal() as session:
+        owner_id = (
+            await session.execute(
+                _select(TrainingRun.owner_id).where(TrainingRun.id == run_id)
+            )
+        ).scalar_one_or_none()
+        if owner_id is None:
+            return executor_module.Limits()
+        user = await session.get(User, owner_id)
+        quota = await effective_quota(session, user)
+    return executor_module.Limits(
+        max_run_seconds=quota.get("max_run_seconds"),
+        max_run_memory_mb=quota.get("max_run_memory_mb"),
+    )
 
 
 async def _run_predict_job(run_id: int, spec: dict) -> None:
@@ -1654,11 +2121,33 @@ async def reap_the_interrupted_runs() -> None:
     now = _now()
     cutoff = now - timedelta(seconds=TRAINING_STALE_SECONDS)
     async with AsyncSessionLocal() as session:
+        # The retries of plan B6: a run whose worker died is requeued while
+        # it has attempts left - an infrastructure failure costs the user
+        # nothing and fails the same way never twice. A run that *raised*
+        # (the executor's failure path) is never retried: only a dead worker
+        # gets another chance.
+        requeued = await session.execute(
+            update(TrainingRun)
+            .where(
+                TrainingRun.status == STATUS_RUNNING,
+                or_(TrainingRun.heartbeat_at.is_(None), TrainingRun.heartbeat_at < cutoff),
+                TrainingRun.attempts < TrainingRun.max_attempts,
+            )
+            .values(
+                status=STATUS_QUEUED,
+                worker_id=None,
+                started_at=None,
+                heartbeat_at=None,
+                attempts=TrainingRun.attempts + 1,
+                metrics=None,
+            )
+        )
         stopped = await session.execute(
             update(TrainingRun)
             .where(
                 TrainingRun.status == STATUS_RUNNING,
                 or_(TrainingRun.heartbeat_at.is_(None), TrainingRun.heartbeat_at < cutoff),
+                TrainingRun.attempts >= TrainingRun.max_attempts,
             )
             .values(
                 status=STATUS_FAILED,
@@ -1666,7 +2155,8 @@ async def reap_the_interrupted_runs() -> None:
                 metrics={
                     "error": (
                         "The worker stopped before the training finished (the server "
-                        "restarted or crashed). Please run it again."
+                        "restarted or crashed), and the run had no attempts left. "
+                        "Please run it again."
                     )
                 },
             )
@@ -1689,10 +2179,11 @@ async def reap_the_interrupted_runs() -> None:
             )
         )
         await session.commit()
-    if stopped.rowcount or orphaned.rowcount:
+    if stopped.rowcount or orphaned.rowcount or requeued.rowcount:
         logger.info(
-            "%s stopped runs and %s unresumable queued runs were failed",
+            "%s stopped runs were failed, %s were requeued, %s unresumable queued runs were failed",
             stopped.rowcount,
+            requeued.rowcount,
             orphaned.rowcount,
         )
 
@@ -1706,6 +2197,24 @@ async def maintenance_loop() -> None:
     while True:
         try:
             await reap_the_interrupted_runs()
+            # The worker says what it is and that it is alive (plan B7).
+            await register_this_worker()
+            # The rate events that fell out of every window: one indexed
+            # DELETE over a small range on every tick keeps the ledger from
+            # growing without bound (plan A8).
+            async with AsyncSessionLocal() as session:
+                await rate_limit_module.purge_rate_events(session)
+                # The retention of the artifacts and the janitor of plan H1:
+                # the files that no row refers to are removed, the rows whose
+                # file is gone are marked, and the profiles' retention rules
+                # retire the artifacts that fell out of them.
+                try:
+                    await cleanup.apply_retention(session)
+                    await cleanup.janitor_sweep(session)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    logger.exception("The retention or the janitor sweep failed")
             if _slots_in_use < TRAINING_CONCURRENCY:
                 task = asyncio.create_task(drain_training_queue())
                 _background_tasks.add(task)
@@ -1812,6 +2321,7 @@ def _run_summary(run: TrainingRun) -> Dict[str, Any]:
         "status": run.status,
         "job_kind": run.job_kind,
         "artifact_path": run.artifact_path,
+        "artifact_removed": run.artifact_removed_at is not None,
         "metrics": run.metrics,
         "tags": run.tags,
         "note": run.note,
@@ -1986,6 +2496,7 @@ async def get_training_run(run_id: int, current_user: User = Depends(get_current
         "metrics": run.metrics,
         "artifact_path": run.artifact_path,
         "artifact_sha256": run.artifact_sha256,
+        "artifact_removed": run.artifact_removed_at is not None,
         "status": run.status,
         "job_kind": run.job_kind,
         "mode": run.mode,
@@ -2040,6 +2551,301 @@ async def patch_run(
         run.note = note
     await db.commit()
     return {"id": run.id, "tags": run.tags, "note": run.note}
+
+
+# --- the progress events (plan B4) ---------------------------------------------
+
+
+@app.get("/api/v1/ml/runs/{run_id}/events")
+async def run_events_endpoint(
+    run_id: int,
+    after: int = 0,
+    limit: int = 500,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """What the run has been doing since the event ``after`` (plan B4).
+
+    The answer is ordered by seq and carries the highest seq it contains, so
+    the client polls with ``?after=<last seen>`` and never misses one.
+    """
+    run = (
+        await db.execute(
+            select(TrainingRun).where(
+                TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id
+            )
+        )
+    ).scalars().first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    events = await progress.events_after(db, run_id, after, limit)
+    last_seq = max([event.seq for event in events], default=after)
+    return {
+        "run_id": run_id,
+        "last_seq": last_seq,
+        "events": [
+            {
+                "seq": event.seq,
+                "kind": event.kind,
+                "payload": event.payload,
+                "ts": event.ts.isoformat() if event.ts else None,
+            }
+            for event in events
+        ],
+    }
+
+
+@app.get("/api/v1/ml/runs/{run_id}/stream")
+async def run_events_stream(
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The events of the run, streamed (plan B4, the optional SSE form).
+
+    The stream ends when the run reaches a state it does not leave. A client
+    that only wants the final answer can just poll the run itself; this is
+    for the page that shows the loss curve moving.
+    """
+    run = (
+        await db.execute(
+            select(TrainingRun).where(
+                TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id
+            )
+        )
+    ).scalars().first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Training run not found")
+
+    async def event_source():
+        last_seq = 0
+        while True:
+            fresh = await progress.events_after(db, run_id, last_seq, limit=200)
+            for event in fresh:
+                last_seq = max(last_seq, event.seq)
+                payload = json.dumps({
+                    "seq": event.seq,
+                    "kind": event.kind,
+                    "payload": event.payload,
+                }, default=str)
+                yield f"id: {event.seq}\ndata: {payload}\n\n"
+            await db.commit()  # the read transaction must not sit open
+            current = (
+                await db.execute(
+                    select(TrainingRun.status).where(TrainingRun.id == run_id)
+                )
+            ).scalar_one_or_none()
+            if current in (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED) and not fresh:
+                yield "event: done\ndata: {}\n\n"
+                return
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --- deletion and retention (plan H1) -----------------------------------------
+
+
+async def _deleteable_run(run: TrainingRun, current_user: User, db: AsyncSession) -> Optional[str]:
+    """The reason a run cannot be deleted right now, or None when it can."""
+    if run.status in (STATUS_QUEUED, STATUS_RUNNING):
+        return "The run is queued or running; cancel it first."
+    deployment = await cleanup.run_is_served_by_deployment(db, run.id)
+    if deployment is not None:
+        return f"The run is served by the deployment '{deployment}'; delete the deployment first."
+    return None
+
+
+async def _delete_run_checked(db: AsyncSession, run: TrainingRun) -> Dict[str, Any]:
+    result = await cleanup.delete_run(db, run)
+    await write_audit(
+        db, run.owner_id, "run.deleted", "run", run.id,
+        {"model_name": run.model_name, "artifact_removed": result["artifact_removed"]},
+    )
+    return result
+
+
+@app.delete("/api/v1/ml/runs/{run_id}")
+async def delete_run(
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a run of the caller (plan H1): the row, its artifact directory
+    and its charts. A run that is queued or running is refused (cancel it
+    first), and so is a run that a deployment still serves."""
+    result = await db.execute(
+        select(TrainingRun).where(
+            TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id
+        )
+    )
+    run = result.scalars().first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    reason = await _deleteable_run(run, current_user, db)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
+    summary = await _delete_run_checked(db, run)
+    await db.commit()
+    return {"deleted": [summary]}
+
+
+class _BulkDelete(BaseModel):
+    ids: List[int]
+
+
+@app.post("/api/v1/ml/runs/delete-bulk")
+async def delete_runs_bulk(
+    body: _BulkDelete,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete several runs at once (plan H1).
+
+    The answer says what happened to every id: the ones that went, and the
+    ones that were refused with the reason - a bulk action must not die on
+    the first exception, and it must not pretend the refused ones went.
+    """
+    if not body.ids:
+        return {"deleted": [], "refused": []}
+    if len(body.ids) > 100:
+        raise HTTPException(status_code=422, detail="Delete at most 100 runs at a time.")
+    runs = (
+        await db.execute(
+            select(TrainingRun).where(
+                TrainingRun.id.in_(body.ids), TrainingRun.owner_id == current_user.id
+            )
+        )
+    ).scalars().all()
+    found = {run.id: run for run in runs}
+    deleted: List[Dict[str, Any]] = []
+    refused: List[Dict[str, Any]] = []
+    for requested in body.ids:
+        run = found.get(requested)
+        if run is None:
+            refused.append({"id": requested, "reason": "No such run."})
+            continue
+        reason = await _deleteable_run(run, current_user, db)
+        if reason:
+            refused.append({"id": requested, "reason": reason})
+            continue
+        deleted.append(await _delete_run_checked(db, run))
+    await db.commit()
+    return {"deleted": deleted, "refused": refused}
+
+
+@app.delete("/api/v1/ml/datasets/{dataset_id}")
+async def delete_dataset(
+    dataset_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an uploaded dataset (plan H1): the file and the row.
+
+    The datasets that ship with the repository are refused (they are not the
+    caller's to delete), and so is a dataset an active run is reading right
+    now - the training holds the path, and pulling it would fail the run.
+    """
+    dataset = await db.get(Dataset, dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if dataset.owner_id is None:
+        raise HTTPException(
+            status_code=403,
+            detail="The datasets that ship with the repository cannot be deleted.",
+        )
+    if dataset.owner_id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    active = (
+        await db.execute(
+            select(TrainingRun.id)
+            .where(
+                TrainingRun.dataset_id == dataset.id,
+                TrainingRun.status.in_((STATUS_QUEUED, STATUS_RUNNING)),
+            )
+            .limit(1)
+        )
+    ).scalar()
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="The dataset is used by a queued or running training; cancel that run first.",
+        )
+    try:
+        path = resolve_storage_path(dataset.storage_path)
+    except DatasetError:
+        path = None
+    if path is not None and path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    elif path is not None and path.exists():
+        try:
+            path.unlink()
+        except OSError:
+            logger.warning("The file of the dataset %s could not be removed", dataset.id)
+    await write_audit(
+        db, current_user.id, "dataset.deleted", "dataset", dataset.id,
+        {"name": dataset.name},
+    )
+    await db.delete(dataset)
+    await db.commit()
+    return {"deleted": dataset_id}
+
+
+class _SelfDelete(BaseModel):
+    password: str
+
+
+@app.post("/api/v1/users/me/delete")
+async def delete_own_account(
+    body: _SelfDelete,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete the caller's own account (plan H1): the password is required,
+    the runs, the datasets, the files, the sessions and the API keys go with
+    it. A POST with the password in the body, not a DELETE: a password is a
+    payload, and several HTTP clients refuse to carry a body on DELETE. The
+    deployments of the account are refused if any is live - an endpoint other
+    callers may be using must not vanish silently."""
+    matches = await run_in_threadpool(
+        verify_pass, body.password, current_user.hashed_password
+    )
+    if not matches:
+        raise HTTPException(status_code=400, detail="The password is not correct.")
+    if current_user.role == "admin":
+        admins = (
+            await db.execute(select(func.count(User.id)).where(User.role == "admin"))
+        ).scalar() or 0
+        if admins <= 1:
+            raise HTTPException(status_code=409, detail="The last admin cannot be deleted.")
+    live_deployments = (
+        await db.execute(
+            select(func.count(Deployment.id)).where(
+                Deployment.owner_id == current_user.id,
+            )
+        )
+    ).scalar() or 0
+    if live_deployments:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{live_deployments} deployment(s) still serve this account; delete "
+                "them before deleting the account."
+            ),
+        )
+    await admin_module.purge_user(db, current_user)
+    await write_audit(
+        db, current_user.id, "user.deleted_self", "user", current_user.id, {}
+    )
+    await db.commit()
+    response = JSONResponse({"detail": "The account and its data are deleted."})
+    _clear_refresh_cookie(response)
+    return response
 
 
 @app.get("/api/v1/ml/runs/{run_id}/artifact")
@@ -2262,3 +3068,6 @@ def _include_admin_router() -> None:
 
 _include_admin_router()
 _include_inference_router()
+# The health, readiness and metrics endpoints of plan H3: deliberately
+# outside the user guard, because a monitor holds no account.
+app.include_router(observability.router)

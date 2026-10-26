@@ -98,6 +98,10 @@ QUOTA_COLUMNS = [
     "max_predict_requests_per_minute",
     "allowed_categories",
     "gpu_allowed",
+    # The retention of the artifacts (plan H1) rides the same resolution:
+    # the override wins, else the profile, else "keep everything".
+    "artifact_keep_runs",
+    "artifact_keep_days",
 ]
 
 

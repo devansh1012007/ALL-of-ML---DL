@@ -1059,6 +1059,60 @@ const CompareRuns = ({ runIds, navigate }) => {
   );
 };
 
+
+// The progress stream of a run (plan B4): the phases and the metrics the
+// trainer reports, polled from the events endpoint while the run moves.
+
+const RunEvents = ({ runId }) => {
+  const { apiFetch } = useContext(AuthContext);
+  const [events, setEvents] = useState([]);
+  const [runStatus, setRunStatus] = useState(null);
+  const afterRef = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    let timer = null;
+    const poll = () => {
+      apiFetch(`/api/v1/ml/runs/${runId}/events?after=${afterRef.current}`)
+        .then(data => {
+          if (!active) return;
+          setRunStatus(null);
+          if (data.events && data.events.length) {
+            afterRef.current = data.last_seq;
+            setEvents(prev => [...prev, ...data.events].slice(-200));
+          }
+          // The stream keeps polling until the run is over; the run status
+          // arrives from the parent, so the panel just watches the tail.
+          timer = setTimeout(poll, 1500);
+        })
+        .catch(() => { if (active) timer = setTimeout(poll, 3000); });
+    };
+    poll();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [runId, apiFetch, runStatus]);
+
+  if (!events.length) return null;
+  return (
+    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 mb-6">
+      <h3 className="text-sm font-semibold text-zinc-300 mb-3 uppercase tracking-wider">Progress</h3>
+      <div className="max-h-48 overflow-y-auto font-mono text-xs space-y-1">
+        {events.map(event => (
+          <div key={event.seq} className="flex gap-3">
+            <span className="text-zinc-600 shrink-0 w-8 text-right">{event.seq}</span>
+            <span className={event.kind === 'phase' ? 'text-blue-400' : event.kind === 'metric' ? 'text-emerald-400' : 'text-zinc-400'}>
+              {event.kind === 'phase' && event.payload && event.payload.phase
+                ? `phase: ${event.payload.phase}`
+                : event.kind === 'metric'
+                ? `metric: ${JSON.stringify(event.payload)}`
+                : (event.payload && event.payload.message) || JSON.stringify(event.payload)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const RunDetails = ({ runId, navigate }) => {
   const { apiFetch } = useContext(AuthContext);
   const [run, setRun] = useState(null);
@@ -1154,7 +1208,9 @@ const RunDetails = ({ runId, navigate }) => {
 
   if (error) {
     return (
+
       <div className="space-y-6">
+        <RunEvents runId={runId} />
         <div className="flex items-center space-x-2 text-sm text-zinc-500">
           <button onClick={() => navigate('runs')} className="hover:text-white">Runs</button>
           <ChevronRight className="w-4 h-4" />
@@ -2086,6 +2142,46 @@ const NewJob = ({ navigate }) => {
 };
 
 
+
+// --- the error boundary (plan H5) ------------------------------------------------
+// One broken panel must not blank the whole page: the boundary catches what a
+// render throws and keeps the navigation alive.
+
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error('The view failed to render:', error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-8 m-6 rounded-lg bg-red-950/40 border border-red-800 text-red-200">
+          <h2 className="text-lg font-semibold mb-2">This view could not be rendered.</h2>
+          <p className="text-sm opacity-80 mb-4">
+            {String(this.state.error && this.state.error.message || this.state.error)}
+          </p>
+          <button
+            onClick={() => { this.setState({ error: null }); this.props.onReset && this.props.onReset(); }}
+            className="bg-red-800 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm"
+          >
+            Back to the runs
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // --- MAIN APP COMPONENT ---
 
 const MainApp = () => {
@@ -2101,9 +2197,37 @@ const MainApp = () => {
     apiFetch('/api/v1/me').then(setMe).catch(() => {});
   }, [apiFetch]);
 
+  // The addressable pages of plan E4: the hash carries the view and its
+  // parameter, so a run page and a comparison survive a reload and can be
+  // sent as a link (#/run-details/3, #/compare/3+5+8).
   const navigate = useCallback((view, params = null) => {
+    const hash = params === null || params === undefined || params === ''
+      ? `#/${view}`
+      : `#/${view}/${encodeURIComponent(Array.isArray(params) ? params.join('+') : params)}`;
+    if (window.location.hash !== hash) {
+      window.location.hash = hash;
+    }
     setCurrentView(view);
     setActiveParams(params);
+  }, []);
+
+  useEffect(() => {
+    const readHash = () => {
+      const raw = window.location.hash.replace(/^#\//, '');
+      if (!raw) return;
+      const [view, encoded] = raw.split('/');
+      let params = null;
+      if (encoded) {
+        const decoded = decodeURIComponent(encoded);
+        params = decoded.includes('+') ? decoded.split('+').map(Number).filter(n => !isNaN(n)) : decoded;
+        if (view === 'run-details') params = decoded;
+      }
+      setCurrentView(view || 'runs');
+      setActiveParams(params);
+    };
+    readHash();
+    window.addEventListener('hashchange', readHash);
+    return () => window.removeEventListener('hashchange', readHash);
   }, []);
 
   const renderView = () => {

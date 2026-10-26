@@ -38,6 +38,7 @@ import functools
 import hashlib
 import io
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -549,6 +550,28 @@ async def deployment_stats(name: str, request: Request, db: AsyncSession = Depen
 
 
 async def run_prediction(
+    db: AsyncSession,
+    user: User,
+    run: TrainingRun,
+    body: PredictRequest,
+    deployment: Optional[Deployment] = None,
+) -> Dict[str, Any]:
+    """Answer a prediction for any bundle kind (plans D4, D5, D6).
+
+    The dispatch is on the bundle's ``request_kind``; the quota of the owner
+    applies (a key is not a bypass); ``explain=true`` adds the features that
+    moved the prediction; a deployment records its hourly counters.
+    """
+    from .observability import record_predict_latency
+
+    started = time.perf_counter()
+    try:
+        return await _run_prediction_inner(db, user, run, body, deployment)
+    finally:
+        record_predict_latency(time.perf_counter() - started)
+
+
+async def _run_prediction_inner(
     db: AsyncSession,
     user: User,
     run: TrainingRun,

@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 import uuid
 import random
 import tempfile
@@ -1418,8 +1419,50 @@ def parse_hugging_face_reference(value: str) -> str:
     return value
 
 
+# A hub dataset identifier: ``name`` or ``owner/name``, the characters the hub
+# itself allows. Everything else - an arbitrary URL, a local path, a scheme
+# the datasets library happens to support (``csv://``, ``hf://``), a relative
+# path that climbs out - is refused. This is the G3 fix: ``load_dataset`` with
+# a client-supplied string must never become "the server fetches whatever this
+# string points at".
+_HF_DATASET_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(/[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$"
+)
+
+
+def validate_hf_dataset_reference(value: str) -> str:
+    """Return the hub identifier, or raise ``ValueError`` with the reason.
+
+    Accepts a hub identifier (``squad``, ``owner/name``) or a hub *dataset*
+    URL (``https://huggingface.co/datasets/owner/name``), which is reduced to
+    its identifier first. A file path, an arbitrary URL, a repository id with
+    a revision pin (``owner/name@rev``) or anything else is refused.
+    """
+    if value is None:
+        raise ValueError("No Hugging Face dataset was named.")
+    candidate = parse_hugging_face_reference(value.strip())
+    if not candidate or candidate != candidate.strip():
+        raise ValueError("The Hugging Face dataset reference is empty or malformed.")
+    if "://" in candidate or candidate.startswith("/") or "\\" in candidate:
+        raise ValueError(
+            f"'{value}' is not a Hugging Face dataset identifier. "
+            "Use a hub reference such as 'owner/name' or "
+            "'https://huggingface.co/datasets/owner/name'."
+        )
+    if ".." in candidate or "@" in candidate or any(part in ("", ".", "..") for part in candidate.split("/")):
+        raise ValueError(
+            f"'{value}' is not a valid Hugging Face dataset identifier."
+        )
+    if not _HF_DATASET_ID_PATTERN.match(candidate):
+        raise ValueError(
+            f"'{value}' is not a valid Hugging Face dataset identifier "
+            "(expected 'name' or 'owner/name')."
+        )
+    return candidate
+
+
 def load_huggingface_dataset(dataset_ref: str) -> Path:
-    dataset_id = parse_hugging_face_reference(dataset_ref.strip())
+    dataset_id = validate_hf_dataset_reference(dataset_ref)
     dataset = load_dataset(dataset_id)
     split_name = next(iter(dataset.keys()))
     df = dataset[split_name].to_pandas()

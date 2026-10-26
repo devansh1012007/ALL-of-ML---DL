@@ -228,15 +228,19 @@ def test_a_worker_says_that_it_is_alive_while_it_trains(client, auth, monkeypatc
     assert _run(client, auth, run_id)["status"] == "completed"
 
 
-def test_the_sweeper_fails_a_dead_run_and_leaves_a_live_one_alone(client, auth):
-    """Two runs are 'running'; only the one whose heartbeat stopped is failed.
+def test_the_sweeper_requeues_a_dead_run_with_attempts_and_fails_one_without(client, auth):
+    """Two runs are 'running'; only the one whose heartbeat stopped is taken.
 
     The previous version failed every running row at startup, which is wrong
-    the moment a second process runs: it killed the runs of the first.
+    the moment a second process runs: it killed the runs of the first. The
+    retries of plan B6 changed what "taken" means: a run with attempts left
+    is requeued (an infrastructure death costs the user nothing), a run
+    without attempts is failed.
     """
     owner = _owner_id("queue_user")
     now = datetime.now(timezone.utc)
     dead = _insert_run(owner, "running", heartbeat=now - timedelta(seconds=600))
+    _sql("UPDATE training_runs SET attempts = 2, max_attempts = 2 WHERE id = ?", dead)
     never_beat = _insert_run(owner, "running", heartbeat=None)
     alive = _insert_run(owner, "running", heartbeat=now)
     orphan = _insert_run(owner, "queued", with_request=False)
@@ -244,12 +248,30 @@ def test_the_sweeper_fails_a_dead_run_and_leaves_a_live_one_alone(client, auth):
     asyncio.run(main.reap_the_interrupted_runs())
 
     assert _run(client, auth, dead)["status"] == "failed"
-    assert "restarted or crashed" in _run(client, auth, dead)["metrics"]["error"]
-    assert _run(client, auth, never_beat)["status"] == "failed"
+    assert "attempts" in _run(client, auth, dead)["metrics"]["error"]
+    # A run that never wrote a heartbeat has attempts left, so it is
+    # requeued too (plan B6) - it is the restart case, not a dead model.
+    assert _run(client, auth, never_beat)["status"] == "queued"
+    _sql("UPDATE training_runs SET status = 'failed' WHERE id = ?", never_beat)
     assert _run(client, auth, alive)["status"] == "running"
     assert _run(client, auth, orphan)["status"] == "failed"
     assert "older version" in _run(client, auth, orphan)["metrics"]["error"]
     _sql("UPDATE training_runs SET status = 'failed' WHERE id = ?", alive)
+
+
+def test_the_sweeper_requeues_a_dead_run_that_has_attempts_left(client, auth):
+    """The retry of plan B6: the run goes back to the queue, the attempt is
+    counted, the worker slot is released."""
+    owner = _owner_id("queue_user")
+    now = datetime.now(timezone.utc)
+    retryable = _insert_run(owner, "running", heartbeat=now - timedelta(seconds=600))
+
+    asyncio.run(main.reap_the_interrupted_runs())
+
+    row = _sql("SELECT status, attempts FROM training_runs WHERE id = ?", retryable)[0]
+    assert row[0] == "queued"
+    assert row[1] == 1
+    _sql("UPDATE training_runs SET status = 'failed' WHERE id = ?", retryable)
 
 
 # --- cancel ----------------------------------------------------------------------

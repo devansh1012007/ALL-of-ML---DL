@@ -129,15 +129,17 @@ def isolated_model_dir(tmp_path, monkeypatch):
 def clean_rate_limits():
     """Start every test with an empty rate-limit budget.
 
-    The limiter counts the attempts of a client, and every test client shares
-    the same address, so without this a test that fails a login would spend
-    the budget of the tests that follow it.
+    The limiter counts the attempts of a client in the ``rate_events`` table
+    (plan A8), and every test client shares the same address, so without this
+    a test that fails a login would spend the budget of the tests that follow
+    it. The reset runs synchronously, on its own engine, because the fixture
+    lives outside the event loop of the application.
     """
-    from backend.app.main import reset_rate_limits
+    from backend.app.main import reset_rate_limits_sync
 
-    reset_rate_limits()
+    reset_rate_limits_sync()
     yield
-    reset_rate_limits()
+    reset_rate_limits_sync()
 
 
 @pytest.fixture(scope="session")

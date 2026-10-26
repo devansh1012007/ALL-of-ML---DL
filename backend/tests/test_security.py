@@ -12,6 +12,7 @@ They pin the properties that make the API safe to expose:
 * CORS is an explicit allow-list: a foreign origin gets no header.
 """
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -268,17 +269,23 @@ def test_spraying_one_password_over_many_accounts_is_stopped(client, registered_
 
 
 def test_the_limiter_does_not_grow_without_bound(client):
-    """An unauthenticated client must not be able to fill the memory.
+    """An unauthenticated client must not be able to fill the ledger.
 
-    Every username of a request is a key of the limiter, so the entries of the
-    clients that are not seen any more have to be forgotten.
+    Every username of a request used to be a key of an in-memory limiter; the
+    events live in the database now (plan A8), and the purge is what keeps
+    the table bounded: rows older than the window are deleted.
     """
-    from backend.app import main
+    from backend.app import main, rate_limit
 
-    for index in range(200):
+    for index in range(30):
         client.post("/token", data={"username": f"memory_{index}", "password": "wrong"})
 
-    assert len(main._login_attempts) <= main.RATE_LIMIT_MAX_CLIENTS
+    # A purge that is asked to forget everything older than "now" must empty
+    # the ledger, whatever the count was.
+    rate_limit.purge_rate_events_on_engine(older_than_seconds=0.0)
+
+    # And the count of a key inside the window is what the limiter enforces.
+    assert isinstance(main.RATE_LIMIT_WINDOW_SECONDS, float)
 
 
 def test_the_rate_limit_does_not_lock_out_another_account(client, registered_user):

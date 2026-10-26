@@ -17,6 +17,7 @@ itself. These tests pin that contract:
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app import main
 from backend.app.main import app
 
 
@@ -236,6 +237,17 @@ def test_a_run_that_a_restart_interrupted_is_failed_at_the_next_start(client, au
                 hyperparameters={},
                 mode="manual",
                 status="running",
+                # A real interrupted run carries its stored request: without
+                # it the row is a legacy leftover the sweeper fails on sight.
+                request_payload={
+                    "request": {
+                        "model_name": "Logistic_Regression",
+                        "test_size": 0.2,
+                        "label_column": "churned",
+                    },
+                    "storage_path": "data/sample_customer_churn.csv",
+                    "dataset_name": "sample_customer_churn.csv",
+                },
             )
             session.add(run)
             await session.commit()
@@ -249,8 +261,15 @@ def test_a_run_that_a_restart_interrupted_is_failed_at_the_next_start(client, au
     response = client.get(f"/api/v1/ml/runs/{run_id}", headers=reaper_auth)
     assert response.status_code == 200, response.text
     run = response.json()
-    assert run["status"] == "failed", run
-    assert "restarted" in run["metrics"]["error"].lower()
+    # Plan B6: the first death of a run is a requeue, not a failure - only a
+    # run that has no attempts left is failed. The run the restart
+    # interrupted goes back to the queue and is drained again at once.
+    assert run["status"] == "queued", run
+    assert run["metrics"] is None
+
+    asyncio.run(main.drain_training_queue())
+    drained = client.get(f"/api/v1/ml/runs/{run_id}", headers=reaper_auth).json()
+    assert drained["status"] == "completed", drained.get("metrics")
 
 
 def test_two_runs_in_the_same_second_get_different_artifacts(client, auth, wait_for_run):

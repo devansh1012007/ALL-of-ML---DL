@@ -1,4 +1,4 @@
-"""Authentication: the signing key, the password hashing and the token.
+"""Authentication: the signing keys, the password hashing and the token.
 
 The signing key is the most important value in this module. The token's "sub"
 claim is the only thing that is verified, so anybody who knows the key can
@@ -12,20 +12,33 @@ therefore never has a published default:
   ``<repo>/.secret_key`` (git-ignored), so restarts and multiple workers agree
   on it. If the file cannot be written, the key is random per process, which
   invalidates the tokens of the previous run on every restart.
+
+Key rotation (plan G1): changing the key used to log every session out, which
+made a rotation a maintenance window. ``SECRET_KEYS`` (a comma-separated list)
+is the rotation story: the *first* key signs new tokens, and every key in the
+list still verifies old ones. A token carries the id of its key in the ``kid``
+header, so verification picks the right key instead of trying them all.
 """
 
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 import bcrypt
+import hashlib
 import os
 import secrets
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from .settings import REPO_ROOT
 
 ALGORITHM = "HS256"
+
+# How long an access token lives (plan A2). The refresh token of the session
+# is the long-lived credential; the access token only has to outlive a page
+# of activity, and a short window limits what a stolen copy is worth. The
+# variable exists for deployments that cannot run a refresh loop yet.
+ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
 
 # The file the development key is persisted in. It lives in the repository
 # root, next to the application, and is git-ignored. The location can be
@@ -128,6 +141,86 @@ def _load_secret_key() -> str:
 SECRET_KEY = _load_secret_key()
 
 
+# --- key rotation (plan G1) --------------------------------------------------
+# ``SECRET_KEYS`` is a comma-separated list of accepted signing keys, current
+# first. ``SECRET_KEY`` (one value) is still honoured: it becomes a list of
+# one. An empty entry in the list is skipped, so "a, b," does not introduce a
+# blank key.
+def _accepted_keys() -> List[str]:
+    raw = os.getenv("SECRET_KEYS", "")
+    keys = [key.strip() for key in raw.split(",") if key.strip()]
+    if keys:
+        return keys
+    return [SECRET_KEY]
+
+
+SECRET_KEYS: List[str] = _accepted_keys()
+
+# Every key gets a short, stable id (the first 16 hex characters of its
+# sha256): enough to pick the key out of a small list, short enough to sit in
+# a JWT header without bloat.
+_KEY_IDS = {hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]: key for key in SECRET_KEYS}
+
+
+def key_id(key: str) -> str:
+    """The ``kid`` value that names this signing key."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def create_token(data: dict, signing_key: Optional[str] = None):
+    """Sign a token with the current key (or an explicit one, for tests).
+
+    The ``kid`` header names the key that signed the token, so a verification
+    that holds several keys (a rotation) picks the right one instead of
+    trying every key on every token.
+
+    The access token is deliberately short (plan A2): it is replaced by the
+    refresh token of the session, which is the credential that lives long.
+    ``ACCESS_TOKEN_MINUTES`` keeps a deployment in control of the window a
+    stolen access token is good for.
+    """
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_MINUTES)
+    to_encode.update({"exp": expire})
+    key = signing_key or SECRET_KEYS[0]
+    return jwt.encode(to_encode, key, algorithm=ALGORITHM, headers={"kid": key_id(key)})
+
+
+def decode_token(token: str) -> dict:
+    """Verify a token against the accepted keys (plan G1).
+
+    The ``kid`` header picks the key when it names one of ours. A token
+    without a ``kid`` (one issued before the rotation support existed) is
+    tried against every accepted key, current first, so such a token survives
+    a rotation for as long as its key does. A token whose ``kid`` names a key
+    we do not accept - or whose signature does not verify - is rejected like
+    any other invalid token.
+
+    Raises ``jose.JWTError`` (any ``JOSEError``) on failure.
+    """
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception:  # noqa: BLE001 - a malformed token is an invalid token
+        raise jwt.JWTError("Invalid token") from None
+    kid = header.get("kid") if isinstance(header, dict) else None
+    candidates: List[str] = []
+    if kid:
+        if kid in _KEY_IDS:
+            candidates = [_KEY_IDS[kid]]
+        # An unknown kid is not fatal by itself: the list below still holds the
+        # current key, and the verification of the signature decides. A forged
+        # kid cannot make a wrong key verify.
+    if not candidates:
+        candidates = list(SECRET_KEYS)
+    last_error: Optional[Exception] = None
+    for key in candidates:
+        try:
+            return jwt.decode(token, key, algorithms=[ALGORITHM])
+        except Exception as exc:  # noqa: BLE001 - try the next accepted key
+            last_error = exc
+    raise last_error if last_error is not None else jwt.JWTError("Invalid token")
+
+
 def _bcrypt_secret(password: str) -> bytes:
     """Return the exact bytes that are hashed for a password.
 
@@ -174,12 +267,6 @@ def dummy_password_hash() -> str:
     if _dummy_password_hash is None:
         _dummy_password_hash = hash_pass("this-password-is-never-valid")
     return _dummy_password_hash
-
-def create_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(hours=2)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def validate_credentials(username: str, password: str) -> Optional[str]:

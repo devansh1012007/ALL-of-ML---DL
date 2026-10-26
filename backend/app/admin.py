@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import getpass
 import os
 import secrets
@@ -28,7 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import hash_pass
@@ -312,6 +313,53 @@ async def suspend_user(user_id: int, request: Request, db: AsyncSession = Depend
     return _user_dict(user)
 
 
+async def purge_user(db: AsyncSession, user: User) -> int:
+    """Delete a user with their runs, datasets and files (plan A1/A6/H1).
+
+    Shared by the admin route and the self-service deletion: the runs cascade
+    with the row, the files are removed first (the rows are the registry),
+    and the sessions, the API keys and the deployments of the account go
+    through their own deletes. Returns the number of files removed.
+    """
+    from .cleanup import remove_artifact_files
+    from .datasets import resolve_storage_path, DatasetError
+    from .models import RefreshToken
+
+    removed_files = 0
+    runs = (
+        await db.execute(select(TrainingRun).where(TrainingRun.owner_id == user.id))
+    ).scalars().all()
+    for run in runs:
+        if run.artifact_path and remove_artifact_files(run.artifact_path):
+            removed_files += 1
+    datasets = (
+        await db.execute(select(Dataset).where(Dataset.owner_id == user.id))
+    ).scalars().all()
+    for dataset in datasets:
+        try:
+            path = resolve_storage_path(dataset.storage_path)
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+                removed_files += 1
+            elif path.exists():
+                path.unlink()
+                removed_files += 1
+        except (DatasetError, OSError):
+            pass
+        # The rows are deleted here and not by the cascade: the datasets of a
+        # user are related by the owner_id column only.
+        await db.delete(dataset)
+
+    # Everything that names the user outside the cascade: the sessions of
+    # plan A2, the predict keys and the deployments of plan D.
+    await db.execute(delete(RefreshToken).where(RefreshToken.user_id == user.id))
+    await db.execute(delete(ApiKey).where(ApiKey.user_id == user.id))
+    await db.execute(delete(Deployment).where(Deployment.owner_id == user.id))
+
+    await db.delete(user)  # the runs and the datasets cascade
+    return removed_files
+
+
 @router.delete("/users/{user_id}")
 async def delete_user(user_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete a user with their runs, datasets and files (plan A6).
@@ -319,8 +367,6 @@ async def delete_user(user_id: int, request: Request, db: AsyncSession = Depends
     Refuses to delete the last admin: a lock-out that would need a database
     edit to undo is worse than refusing the click.
     """
-    from pathlib import Path
-
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -333,45 +379,7 @@ async def delete_user(user_id: int, request: Request, db: AsyncSession = Depends
                 status_code=409, detail="The last admin cannot be deleted."
             )
 
-    # The files first (the rows are the registry): the artifacts of the runs
-    # and the files of the uploaded datasets. A missing file is not an error.
-    removed_files = 0
-    runs = (
-        await db.execute(select(TrainingRun).where(TrainingRun.owner_id == user.id))
-    ).scalars().all()
-    for run in runs:
-        if run.artifact_path:
-            path = Path(run.artifact_path)
-            try:
-                if path.is_dir():
-                    import shutil
-
-                    shutil.rmtree(path, ignore_errors=True)
-                elif path.exists():
-                    path.unlink()
-                removed_files += 1
-            except OSError:
-                pass
-    datasets = (
-        await db.execute(select(Dataset).where(Dataset.owner_id == user.id))
-    ).scalars().all()
-    for dataset in datasets:
-        from .datasets import resolve_storage_path
-        from .datasets import DatasetError
-
-        try:
-            path = resolve_storage_path(dataset.storage_path)
-            if path.is_dir():
-                import shutil
-
-                shutil.rmtree(path, ignore_errors=True)
-            elif path.exists():
-                path.unlink()
-            removed_files += 1
-        except (DatasetError, OSError):
-            pass
-
-    await db.delete(user)  # the runs cascade
+    removed_files = await purge_user(db, user)
     await db.commit()
     await audit(
         db,

@@ -52,6 +52,70 @@ except ImportError:  # pragma: no cover - torch is optional for the tabular mode
 MAX_NODES = 50000
 MAX_EDGES = 500000
 
+# The limits of a zip *archive* (plan G3): a zip is the one upload format whose
+# declared size says nothing about what it unpacks to. The caps are checked on
+# the archive's own metadata, before a single member is read, so a decompression
+# bomb costs the server a stat and not its memory.
+MAX_ZIP_MEMBERS = 64
+MAX_ZIP_UNCOMPRESSED_BYTES = 256 * 1024 * 1024  # 256 MiB unpacked
+
+
+def _safe_zip_members(dataset_path: Path) -> List[str]:
+    """Validate a zip's members and return their names, or raise ``ValueError``.
+
+    Three things are refused before anything is read (plan G3):
+
+    * a member whose name leaves the archive - an absolute path or a ``..``
+      segment (zip-slip). This loader reads members through ``archive.open``
+      and never extracts to disk, but the check makes the archive safe for any
+      future caller that extracts, and refuses a name that was not honest.
+    * a symlink member: its target is outside the archive by definition, and
+      extracting one would place a link that climbs out.
+    * an archive of too many members or too many unpacked bytes: the counts
+      come from the central directory, which is read either way, so the
+      refusal happens before the memory is spent.
+    """
+    import stat as stat_module
+
+    try:
+        archive = zipfile.ZipFile(dataset_path)
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"'{dataset_path.name}' is not a readable zip archive.") from exc
+    with archive:
+        infos = archive.infolist()
+        if len(infos) > MAX_ZIP_MEMBERS:
+            raise ValueError(
+                f"The archive holds {len(infos)} files; the limit is {MAX_ZIP_MEMBERS}."
+            )
+        total = 0
+        for info in infos:
+            name = info.filename
+            if name.startswith("/") or name.startswith("\\") or ":" in name.split("/")[0]:
+                raise ValueError(
+                    f"The archive holds a member with an absolute path ({name!r}); "
+                    "archives with absolute member paths are refused."
+                )
+            parts = [part for part in name.replace("\\", "/").split("/") if part]
+            if ".." in parts:
+                raise ValueError(
+                    f"The archive holds a member whose path climbs out of it "
+                    f"({name!r}); such archives are refused."
+                )
+            mode = info.external_attr >> 16
+            if stat_module.S_ISLNK(mode):
+                raise ValueError(
+                    f"The archive holds a symlink member ({name!r}); archives "
+                    "with symlink members are refused."
+                )
+            total += info.file_size
+            if total > MAX_ZIP_UNCOMPRESSED_BYTES:
+                raise ValueError(
+                    "The archive unpacks to more than "
+                    f"{MAX_ZIP_UNCOMPRESSED_BYTES // (1024 * 1024)} MiB, which is "
+                    "more than a dataset may hold."
+                )
+        return [info.filename for info in infos]
+
 
 def _load_graph(dataset_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Read nodes.csv and edges.csv out of the dataset zip (plan F1/F4)."""
@@ -60,13 +124,13 @@ def _load_graph(dataset_path: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         raise FileNotFoundError(f"The graph dataset '{dataset_path.name}' was not found.")
     if dataset_path.suffix != ".zip":
         raise ValueError("A graph dataset is a zip with nodes.csv and edges.csv.")
+    names = set(_safe_zip_members(dataset_path))
+    if "nodes.csv" not in names or "edges.csv" not in names:
+        raise ValueError(
+            "A graph dataset is a zip with nodes.csv and edges.csv; "
+            f"this one holds {sorted(names)}."
+        )
     with zipfile.ZipFile(dataset_path) as archive:
-        names = set(archive.namelist())
-        if "nodes.csv" not in names or "edges.csv" not in names:
-            raise ValueError(
-                "A graph dataset is a zip with nodes.csv and edges.csv; "
-                f"this one holds {sorted(names)}."
-            )
         nodes = pd.read_csv(archive.open("nodes.csv"))
         edges = pd.read_csv(archive.open("edges.csv"))
     if "node_id" not in nodes.columns:

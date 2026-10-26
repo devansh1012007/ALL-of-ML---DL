@@ -114,8 +114,21 @@ class TrainingRun(Base):
     # manifest, verified before every load.
     artifact_sha256 = Column(String, nullable=True)
     artifact_bytes = Column(Integer, nullable=True)
+    # The moment the artifact was removed while the run stayed (plan H1): a
+    # retention rule or the janitor dropped the file, the metrics stay. NULL
+    # means the artifact (or the lack of one) is exactly as it was written.
+    artifact_removed_at = Column(DateTime(timezone=True), nullable=True)
     # "train" (a training) or "predict" (a queued batch prediction, plan D3).
     job_kind = Column(String, nullable=False, default="train", server_default="train")
+    # The fair share and the routing of the execution layer (plans B5-B7):
+    # the claim prefers the owners with the fewest running runs, then the
+    # highest priority, then the oldest; ``requirements`` records what the
+    # model needs (gpu, memory) so a worker that cannot satisfy it does not
+    # take it, and ``max_attempts`` bounds the retries of an infrastructure
+    # death (B6).
+    priority = Column(Integer, nullable=False, default=0, server_default="0")
+    requirements = Column(JSON, nullable=True)
+    max_attempts = Column(Integer, nullable=False, default=2, server_default="2")
     # queued -> running -> completed | failed | cancelled. Indexed: the worker
     # asks for the oldest queued run.
     status = Column(String, nullable=False, default="pending", index=True)
@@ -171,6 +184,11 @@ class QuotaProfile(Base):
     # compute-heavy families default to off until an admin enables them.
     allowed_categories = Column(JSON, nullable=True)
     gpu_allowed = Column(Boolean, nullable=True)
+    # The retention of the artifacts (plan H1): the artifacts of the runs that
+    # fall out of either rule are removed while the run keeps its metrics and
+    # shows ``artifact_removed``. NULL on both means "keep everything".
+    artifact_keep_runs = Column(Integer, nullable=True)
+    artifact_keep_days = Column(Integer, nullable=True)
 
 
 class UserQuotaOverride(Base):
@@ -197,6 +215,11 @@ class UserQuotaOverride(Base):
     max_predict_requests_per_minute = Column(Integer, nullable=True)
     allowed_categories = Column(JSON, nullable=True)
     gpu_allowed = Column(Boolean, nullable=True)
+    # The retention of the artifacts (plan H1): the artifacts of the runs that
+    # fall out of either rule are removed while the run keeps its metrics and
+    # shows ``artifact_removed``. NULL on both means "keep everything".
+    artifact_keep_runs = Column(Integer, nullable=True)
+    artifact_keep_days = Column(Integer, nullable=True)
 
 
 class Invite(Base):
@@ -311,3 +334,92 @@ class DeploymentStat(Base):
     # and the reference the drift flag is computed against.
     prediction_histogram = Column(JSON, nullable=True)
     drift_flag = Column(Boolean, nullable=False, default=False, server_default="false")
+
+
+class RefreshToken(Base):
+    """A refresh token of a browser session (plan A2).
+
+    The long-lived credential never travels in the response body of a browser
+    login: it goes into an httpOnly cookie. The row stores the *hash* of the
+    token, so a stolen database does not hold a usable session.
+
+    Rotation with reuse detection: refreshing marks the row revoked and names
+    its replacement (``replaced_by``). Presenting a token that was already
+    rotated means the family leaked, and every member of the family
+    (``family_id``) is revoked at once - the attacker's copy included.
+    """
+
+    __tablename__ = "refresh_tokens"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    # sha256 hex of the raw token. Unique: one row per issued token.
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+    # All tokens of one login chain share the family id; a reuse revokes it.
+    family_id = Column(String, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    replaced_by = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class RateEvent(Base):
+    """One counted attempt of the rate limiter (plan A8).
+
+    The limiter used to live in the memory of one process, which made it a
+    lie the moment a second worker started: every process had its own budget.
+    The events live in the database now, so the budget is shared by every
+    worker, and a fixed-window (sliding, in fact) count in SQL is enough at
+    this scale. A purge in the maintenance loop keeps the table small.
+    """
+
+    __tablename__ = "rate_events"
+    id = Column(Integer, primary_key=True, index=True)
+    # The limiter key: "login:1.2.3.4", "login:1.2.3.4:alice",
+    # "register:1.2.3.4", "upload:user:17", "predict:user:17".
+    key = Column(String, nullable=False, index=True)
+    at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class RunEvent(Base):
+    """One progress event of a run (plan B4).
+
+    A run that trains for ten minutes must be able to say what it is doing:
+    the phase it entered, the epoch it finished, the metric it just measured,
+    the log line worth keeping. The child process writes the events as JSON
+    lines on its standard output and the parent batches them into this table
+    once a second; the thread executor writes them directly.
+
+    The table is capped per run: the last ``MAX_EVENTS_PER_RUN`` events stay,
+    the older ones are deleted as new ones arrive, so a chatty trainer cannot
+    fill the disk with progress.
+    """
+
+    __tablename__ = "run_events"
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(Integer, ForeignKey("training_runs.id"), nullable=False, index=True)
+    # The position of the event in the run's stream: the client asks for
+    # everything after the seq it has seen (plan B4).
+    seq = Column(Integer, nullable=False, index=True)
+    ts = Column(DateTime(timezone=True), server_default=func.now())
+    # phase | epoch | step | metric | log | result
+    kind = Column(String, nullable=False)
+    payload = Column(JSON, nullable=True)
+
+
+class Worker(Base):
+    """A process that claims runs, with what it can do (plan B7).
+
+    Every worker registers itself in the maintenance loop: its id, the
+    capabilities of the machine (a GPU? how much memory?), and the last
+    seen time. The claim of a run checks the run's ``requirements`` against
+    the claiming worker's capabilities - a GPU model never waits silently on
+    a machine that cannot run it, and the submit answers 409 when no online
+    worker could.
+    """
+
+    __tablename__ = "workers"
+    # The id the worker writes into ``training_runs.worker_id``.
+    id = Column(String, primary_key=True)
+    capabilities = Column(JSON, nullable=False, default=dict)
+    memory_mb = Column(Integer, nullable=True)
+    last_seen = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
