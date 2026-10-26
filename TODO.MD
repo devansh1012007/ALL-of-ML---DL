@@ -26,3 +26,13 @@
 +- [ ] A frontend test setup (the display components were checked by server-side rendering during development, but no test of the suite does it).
 
  Not recoverable, nothing to do: the `notes` data of a database created by the previous project (the table is dropped by revision `c4a9e2b17d3f`).
+
+- **Mislabelled boosters:** the three `*_timeseries` boosters are tabular models on a shuffled split, not forecasters.
+- **ResNet:** it reports accuracy on its own training batches.
+- **Checkpoint downloads:** a client can make the server download any Hugging Face repository by overriding `model_name`. This is the most serious exposure, and the fix is small.
+- **Storage:** nothing can be deleted, so a storage quota can’t work yet.
+- **Queue fairness:** one user can fill the queue and starve everyone else.
+- **Models:** of the 12, I’d build 10, make LLaMA conditional on a GPU worker, and retire UL2. It has 20 billion parameters, and renaming a small T5 as “UL2” would be the same dishonesty the catalog work removed.
+- **Checkpoint:** I recommend a hard stop after the first three phases (users and quotas, then the execution layer), which is about 20 to 25 focused days. Before building the model tiers, which are 38 to 50 days, put the product in front of five real users. The plan has no evidence yet that anyone wants it.
+- **Rust:** the executor interface in section B is what makes it possible later, one model at a time, so it’s a reason to build that section first. Profile one real run before committing.
+- **Verification limits:** I can’t run any torch, transformers or gymnasium path in my environment. Those parts of the plan rely on your CI, and the day counts are estimates (plus or minus 50 percent).
