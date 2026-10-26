@@ -302,7 +302,8 @@ def test_run_history_exposes_the_mode_and_the_environment(
 
     listing = client.get("/api/v1/ml/runs", headers=auth)
     assert listing.status_code == 200
-    runs = listing.json()
+    # The list is paginated (plan E5): {items, total, limit, offset}.
+    runs = listing.json()["items"]
     run = next(item for item in runs if item["id"] == run_id)
     assert PRE_EXISTING_LIST_KEYS <= set(run)
     assert "mode" in run

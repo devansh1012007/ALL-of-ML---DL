@@ -93,7 +93,7 @@ def test_train_model_auto_fine_tune_tabular():
     assert source == "local"
     assert tag == relative_path
     assert metrics.get("accuracy") is not None
-    assert Path(artifact).exists()
+    assert Path(artifact["artifact_path"]).exists()
 
 
 def test_train_resnet50_missing_dataset():

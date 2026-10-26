@@ -90,14 +90,15 @@ EXPECTED_CATEGORY_BY_MODEL = {
 # routing categories.
 IMPLEMENTED = frozenset(
     {
-        "BERT",
         "Autoencoder",
+        "BERT",
         "BERT2BERT",
         "CATboost_timeseries",
         "DBSCAN",
         "DQN",
         "DistilBERT",
         "GMM",
+        "GNN",
         "GPT",
         "HDBSCAN",
         "HMM_timeseries",
@@ -105,17 +106,22 @@ IMPLEMENTED = frozenset(
         "K-Mean",
         "KNN",
         "LLaMA",
+        "LSTM",
         "Logistic_Regression",
         "MLR",
         "MiniLM",
         "PCA",
         "PPO",
+        "Q-Learning",
+        "RNN",
         "Random_Forest",
         "ResNet",
         "ResNet50",
+        "SSM_timeseries",
         "SVM",
-        "UL2",
+        "TCN_timeseries",
         "UMAP",
+        "ViT",
         "XGboost_timeseries",
         "lightGBM_timeseries",
         "self-attenetion_transformer",
@@ -123,39 +129,60 @@ IMPLEMENTED = frozenset(
         "t-SNE",
     }
 )
+# UL2 is retired with a permanent reason (plan F6): it is the one entry that
+# is not implemented and not coming back.
+RETIRED = frozenset({"UL2"})
 
 # Catalog models that are advertised but not implemented: ``train_model()``
 # fails fast for them before any trainer runs and before any artifact is
 # written. The complement of ``IMPLEMENTED`` within the catalog.
 NOT_IMPLEMENTED = set(MODEL_CATALOG) - IMPLEMENTED
 
-# The trainer each category has to select. "time-series" is the category of the
-# boosting models: they train as tabular models through build_model(), while
-# "timeseries" (LSTM/RNN/SSM/TCN) selects the torch trainer.
+# The trainer each category selects, after the phases 3 to 5 plan: every
+# family has its own module, and "time-series" (the boosters) trains as a
+# tabular model through build_model() unless the request asks for the
+# forecasting mode.
 CATEGORY_TO_TRAINER = {
-    "classification": "build_model",
-    "regression": "build_model",
-    "time-series": "build_model",
-    "clustering": "_train_clustering",
-    "timeseries": "_train_torch_regression_or_classification",
-    "graph": "_train_torch_regression_or_classification",
-    "autoencoder": "_train_autoencoder",
-    "reinforcement-learning": "_train_rl_model",
-    "nlp": "_train_transformer_text_classifier",
-    "vision": "_train_resnet_image_model",
+    "classification": "model_training.build_model",
+    "regression": "model_training.build_model",
+    "time-series": "model_training.build_model",
+    "clustering": "clustering.train_clustering_model",
+    "timeseries": "forecasting.train_forecaster",
+    "graph": "graph_models.train_gnn",
+    "autoencoder": "model_training._train_autoencoder",
+    "reinforcement-learning": "rl.train_q_learning|rl.train_deep_rl",
+    "nlp": "textmodels.train_*",
+    "vision": "vision.train_image_model",
 }
 
-# The trainers that are monkeypatched with a recorder, so the test can see which
-# one ``train_model`` dispatched to.
+# (module attribute path, recorder name) monkeypatched so the test can see
+# which trainer ``train_model`` dispatched to.
 RECORDED_TRAINERS = (
-    "build_model",
-    "_train_clustering",
-    "_train_rl_model",
-    "_train_transformer_text_classifier",
-    "_train_torch_regression_or_classification",
-    "_train_resnet_image_model",
-    "_train_autoencoder",
+    ("model_training", "build_model"),
+    ("model_training", "_train_autoencoder"),
+    ("clustering", "train_clustering_model"),
+    ("forecasting", "train_forecaster"),
+    ("graph_models", "train_gnn"),
+    ("rl", "train_q_learning"),
+    ("rl", "train_deep_rl"),
+    ("textmodels", "train_text_classifier"),
+    ("textmodels", "train_language_model"),
+    ("textmodels", "train_seq2seq"),
+    ("textmodels", "train_llama_lora"),
+    ("vision", "train_image_model"),
 )
+
+# The trainer a specific model is expected to reach (the NLP entries route by
+# their declared task; Q-Learning is its own trainer).
+TRAINER_BY_MODEL = {
+    "Q-Learning": "rl.train_q_learning",
+    "PPO": "rl.train_deep_rl",
+    "DQN": "rl.train_deep_rl",
+    "GPT": "textmodels.train_language_model",
+    "LLaMA": "textmodels.train_llama_lora",
+    "seq2seq": "textmodels.train_seq2seq",
+    "BERT2BERT": "textmodels.train_seq2seq",
+}
 
 # Models that only need scikit-learn (or the boosting libraries) and therefore
 # have to train end to end on the synthetic dataset.
@@ -258,16 +285,25 @@ def _expected_estimator(model_name: str, task_type: str):
 
 @pytest.fixture
 def recorded_trainers(monkeypatch):
-    """Record which trainer ``train_model`` dispatches to."""
-    calls = []
-    for name in RECORDED_TRAINERS:
-        original = getattr(model_training, name)
+    """Record which trainer ``train_model`` dispatches to.
 
-        def recorder(*args, _name=name, _original=original, **kwargs):
+    The trainers live in their own modules since the phases 3 to 5 plan; the
+    recorder patches the module attribute ``train_model`` calls, so the
+    dispatch is observed exactly where it happens.
+    """
+    import importlib
+
+    calls = []
+    for module_name, attribute in RECORDED_TRAINERS:
+        module = importlib.import_module(f"backend.app.{module_name}")
+        recorder_name = f"{module_name}.{attribute}"
+        original = getattr(module, attribute)
+
+        def recorder(*args, _name=recorder_name, _original=original, **kwargs):
             calls.append(_name)
             return _original(*args, **kwargs)
 
-        monkeypatch.setattr(model_training, name, recorder)
+        monkeypatch.setattr(module, attribute, recorder)
     return calls
 
 
@@ -286,7 +322,8 @@ def _image_folder():
     for class_name in ("cat", "dog"):
         class_dir = folder / class_name
         class_dir.mkdir(parents=True, exist_ok=True)
-        (class_dir / f"{class_name}.png").write_bytes(ONE_PIXEL_RGB_PNG)
+        for index in (1, 2):
+            (class_dir / f"{class_name}{index}.png").write_bytes(ONE_PIXEL_RGB_PNG)
     return relative_path
 
 
@@ -353,13 +390,18 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
     )
 
     if expected_category == "nlp":
-        pytest.skip("the NLP trainer downloads pretrained checkpoints")
+        # The text trainers download their checkpoint; the smoke tests of the
+        # catalog (test_model_smoke.py) cover them with tiny configurations.
+        pytest.skip("the NLP trainers download pretrained checkpoints")
 
     # Some trainers (catboost) write scratch files into the working directory.
     monkeypatch.chdir(tmp_path)
 
+    env_id = "CartPole-v1"
     if expected_category == "vision":
         dataset = _image_folder()
+    elif expected_category == "graph":
+        dataset = _graph_zip(tmp_path)
     elif expected_category == "regression":
         # MLR is a regressor: it needs a continuous label, a classification label
         # would be scored with a classification metric.
@@ -375,9 +417,22 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         # The catalog asks for the pretrained weights, and downloading them is
         # not something a unit test does: the suite stays offline, as the
         # module promises. The trainer itself runs exactly the same way.
-        hyperparameters = {"pretrained": False}
+        hyperparameters = {"pretrained": False, "image_size": 64, "epochs": 1}
+    elif expected_category == "timeseries":
+        # A short series with a small window: the routing test is about where
+        # the call goes, not about the forecast quality.
+        hyperparameters = {"window": 3, "horizon": 1, "epochs": 1}
+    elif model_name == "Q-Learning":
+        # The Q-table contract: a discrete environment (plan F2). CartPole is
+        # refused with the supported environments named.
+        env_id = "FrozenLake-v1"
+        hyperparameters = {"training_steps": 400}
+    elif expected_category == "reinforcement-learning":
+        hyperparameters = {"training_steps": 200}
     try:
-        metrics, _source, _tag, artifact = _train(model_name, dataset, hyperparameters)
+        metrics, _source, _tag, artifact = _train(
+            model_name, dataset, hyperparameters, env_id=env_id
+        )
     except Exception as exc:  # noqa: BLE001 - the error is inspected below
         error = exc
 
@@ -395,9 +450,10 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         assert artifact is None, f"{model_name} wrote an artifact although it is a placeholder"
         return
 
-    assert recorded_trainers == [expected_trainer], (
+    expected_for_model = TRAINER_BY_MODEL.get(model_name, expected_trainer)
+    assert recorded_trainers == [expected_for_model], (
         f"{model_name} (category {expected_category}) was routed to {recorded_trainers}, "
-        f"but {expected_trainer} is expected"
+        f"but {expected_for_model} is expected"
     )
     if error is not None:
         assert not any(marker in str(error) for marker in UNSUPPORTED_MODEL_MARKERS), (
@@ -412,20 +468,37 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         return
 
     if expected_category == "vision":
-        # The vision trainer really ran: it read the images of the folder, one
-        # per class, and it wrote the artifact of the network it trained.
+        # The vision trainer really ran (plan C3): a stratified split with a
+        # validation part, the metrics measured on it and a baseline.
         assert metrics["task_type"] == "classification"
         assert metrics["classes"] == 2
-        # Every image of the folder was seen in every epoch.
-        assert metrics["sample_count"] == metrics["epochs"] * 2
-        assert metrics["train_accuracy"] is not None
-        assert Path(artifact).exists()
+        assert metrics["val_accuracy"] is not None
+        assert metrics["baseline_accuracy"] is not None
+        assert metrics["train_size"] + metrics["test_size"] == 4
+        assert Path(artifact["artifact_path"]).exists()
+    elif expected_category == "timeseries":
+        # The forecasting contract (plan F3): the naive baselines are reported
+        # next to the model's error, on a chronological split.
+        assert metrics["task_type"] == "timeseries"
+        assert metrics["baseline_naive_mae"] is not None
+        assert metrics["beats_naive"] in (True, False)
+        assert Path(artifact["artifact_path"]).exists()
+    elif expected_category == "reinforcement-learning":
+        # The honest evaluation (plan C5/F2): fresh episodes with fixed seeds
+        # and a random-policy baseline.
+        assert metrics["task_type"] == "reinforcement-learning"
+        assert metrics["mean_return"] is not None
+        assert metrics["baseline_mean_return"] is not None
+        assert Path(artifact["artifact_path"]).exists()
     elif model_name in OFFLINE_TRAINABLE_MODELS:
         if expected_category == "autoencoder":
             assert metrics["task_type"] == "autoencoder"
             assert metrics["reconstruction_mse"] < metrics["baseline_mse"]
         elif expected_category == "clustering":
-            assert metrics["sample_count"] == 60
+            # The clustering metrics of plan C2: the sizes and (where the
+            # model is not the density kind) the honest scores.
+            assert metrics["cluster_count"] >= 1
+            assert metrics["train_size"] + metrics["test_size"] == 60
         elif expected_category == "regression":
             # A regressor must not be scored with a classification metric.
             assert metrics["task_type"] == "regression"
@@ -434,7 +507,49 @@ def test_catalog_model_is_routed_to_the_expected_trainer(
         else:
             assert metrics["task_type"] == "classification"
             assert metrics["accuracy"] is not None
-        assert Path(artifact).exists()
+        assert Path(artifact["artifact_path"]).exists()
+
+
+def _graph_zip(tmp_path):
+    """A graph dataset of plan F4: a zip with nodes.csv and edges.csv.
+
+    Two communities with informative structure: the features are noise, the
+    label comes from the community, so the graph is what carries the signal.
+    """
+    import io
+    import zipfile
+
+    rng = pd.Series(range(40)).apply(lambda _: __import__("numpy").random.default_rng(_))
+    import numpy as np
+
+    generator = np.random.default_rng(0)
+    n = 40
+    labels = ["a", "b"] * (n // 2)
+    nodes = pd.DataFrame(
+        {
+            "node_id": [f"n{i}" for i in range(n)],
+            "x": generator.normal(size=n),
+            "label": labels,
+        }
+    )
+    edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            same = labels[i] == labels[j]
+            if generator.random() < (0.4 if same else 0.02):
+                edges.append((f"n{i}", f"n{j}"))
+    edge_frame = pd.DataFrame(edges, columns=["source", "target"])
+    zip_path = tmp_path / "graph.zip"
+    with zipfile.ZipFile(zip_path, "w") as archive:
+        archive.writestr("nodes.csv", nodes.to_csv(index=False))
+        archive.writestr("edges.csv", edge_frame.to_csv(index=False))
+    # The trainer resolves the dataset through the registry root.
+    import shutil as _shutil
+
+    destination = Path(os.environ["DATASETS_ROOT"]) / "data" / "graph.zip"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _shutil.copy(zip_path, destination)
+    return "data/graph.zip"
 
 
 def _feature_count(dataset):
@@ -443,35 +558,36 @@ def _feature_count(dataset):
     return len([column for column in frame.columns if column != "label"])
 
 
-def test_the_artifact_of_the_torch_trainer_can_be_loaded_back(classification_dataset):
-    """The artifact of the torch trainer has to be loadable and usable.
+def test_the_artifact_of_a_torch_trainer_is_a_bundle_that_loads(
+    classification_dataset, regression_dataset
+):
+    """A torch artifact is a bundle directory that loads back and predicts.
 
-    The network used to be a class defined *inside* the trainer. Pickle stores a
-    class by reference, so an artifact of a function-local class can never be
-    loaded again: the training "succeeded", the run reported an artifact and the
-    artifact was useless. ``SimpleNet`` now lives at module level on purpose, so
-    an artifact built from it can be loaded back and run.
-
-    ``LSTM`` is now a placeholder and no longer reaches the torch trainer through
-    ``train_model()``, so the artifact contract is exercised on ``SimpleNet``
-    directly.
+    The torch trainers used to pickle the module (which breaks the moment the
+    class moves). Since the bundle contract (plan C1) the artifact is a
+    directory with a ``state_dict``, a ``config.json`` and the manifest, and
+    the loader rebuilds the architecture from the registry. The round trip is
+    exercised on the RNN forecaster, trained tiny on the synthetic dataset.
     """
     if model_training.torch is None:
         pytest.skip("torch is not installed")
 
-    input_dim = _feature_count(classification_dataset)
-    model = model_training.SimpleNet(input_dim=input_dim, output_dim=1)
-    artifact = model_training.write_artifact("SimpleNet", model)
-    assert Path(artifact).exists()
-
-    loaded = joblib.load(artifact)
-    assert isinstance(loaded, model_training.SimpleNet), (
-        f"the artifact holds a {type(loaded).__name__}, but the module level "
-        "SimpleNet is expected"
+    metrics, _source, _tag, artifact = _train(
+        "RNN",
+        regression_dataset,
+        {"window": 4, "horizon": 2, "epochs": 2, "hidden_size": 8},
     )
-    # The loaded network has to be usable: a forward pass on a batch of rows.
-    outputs = loaded(model_training.torch.zeros(2, input_dim))
-    assert tuple(outputs.shape) == (2, 1)
+    from backend.app.bundles import load_any_artifact
+
+    bundle = load_any_artifact(Path(artifact["artifact_path"]), artifact["artifact_sha256"])
+    assert bundle.kind == "timeseries"
+
+    # The loaded bundle forecasts: the last window rows, in the trained order.
+    frame = pd.read_csv(Path(os.environ["DATASETS_ROOT"]) / regression_dataset)
+    schema = bundle.schema()
+    rows = frame[schema["features"]].tail(schema["window"]).to_numpy().tolist()
+    answer = bundle.infer({"window_rows": rows})
+    assert len(answer["predictions"]) == schema["horizon"]
 
 
 @pytest.mark.parametrize("task_type", ["classification", "regression"])
@@ -500,7 +616,15 @@ def test_catalog_params_construct_estimator(model_name, task_type):
 @pytest.mark.parametrize("model_name", TABULAR_MODELS)
 def test_regression_branch_uses_the_catalog_params(model_name, task_type):
     """The estimator has to be built from the params of its catalog entry."""
-    params = dict(MODEL_CATALOG[model_name].get("params", {}))
+    from backend.app.model_training import _TRAINER_OWNED_PARAMS
+
+    params = {
+        name: value
+        for name, value in MODEL_CATALOG[model_name].get("params", {}).items()
+        # The trainer-owned keys (the forecasting contract of plan F3) steer
+        # the training loop, never the estimator constructor.
+        if name not in _TRAINER_OWNED_PARAMS
+    }
     estimator = build_model(model_name, task_type, params)
     expected_class = _expected_estimator(model_name, task_type)
     if expected_class is None:
@@ -538,8 +662,8 @@ def test_client_supplied_test_size_does_not_break_a_clustering_model(classificat
     metrics, _source, _tag, artifact = _train(
         "K-Mean", classification_dataset, {"test_size": 0.3}
     )
-    assert metrics["sample_count"] == 60
-    assert Path(artifact).exists()
+    assert metrics["train_size"] + metrics["test_size"] == 60
+    assert Path(artifact["artifact_path"]).exists()
 
 
 def test_training_writes_the_artifact_into_the_temporary_model_dir(
@@ -547,7 +671,9 @@ def test_training_writes_the_artifact_into_the_temporary_model_dir(
 ):
     """The suite must not write artifacts into the repository's models/ directory."""
     _metrics, _source, _tag, artifact = _train("Logistic_Regression", classification_dataset)
-    artifact_path = Path(artifact)
+    # The artifact is a bundle directory since plan C1; it still has to land
+    # in the redirected models/ directory, never in the repository.
+    artifact_path = Path(artifact["artifact_path"])
     assert artifact_path.exists()
     assert artifact_path.parent == isolated_model_dir
     assert artifact_path.parent != REPO_MODEL_DIR
@@ -564,8 +690,8 @@ def test_train_model_tabular_modes(mode, classification_dataset, isolated_model_
     assert metrics.get("accuracy") is not None
     # The hyperparameter of the request has to be applied in every mode.
     assert metrics["model_parameters"]["C"] == 2.0
-    assert Path(artifact).exists()
-    assert Path(artifact).parent == isolated_model_dir
+    assert Path(artifact["artifact_path"]).exists()
+    assert Path(artifact["artifact_path"]).parent == isolated_model_dir
 
 
 def test_auto_fine_tune_changes_the_applied_parameters(classification_dataset):
@@ -628,8 +754,8 @@ def built_models(monkeypatch):
     built = []
     original = model_training.build_model
 
-    def recorder(model_name, task_type, params):
-        estimator = original(model_name, task_type, params)
+    def recorder(model_name, task_type, params, **kwargs):
+        estimator = original(model_name, task_type, params, **kwargs)
         built.append({"model": model_name, "params": dict(params)})
         return estimator
 

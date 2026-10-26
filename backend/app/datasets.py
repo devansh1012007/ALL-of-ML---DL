@@ -445,6 +445,40 @@ def _holds_class_directories(path: Path) -> bool:
         return False
 
 
+def content_sha256(path: Path) -> str:
+    """The content hash of a dataset file (plans E4, F1).
+
+    It identifies the data itself: two names for one file are one dataset,
+    and the comparison guard of plan E4 compares runs by it.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def infer_dataset_kind(path: Path, columns: Optional[List[str]] = None) -> str:
+    """The kind of data a file holds (plan F1).
+
+    A zip of nodes.csv and edges.csv is a graph; a CSV with a 'source' and a
+    'target' column is text_pairs; a CSV with a 'text' column is text; a CSV
+    whose suggested label is a date-like or 'value' column next to a
+    date-like column is a timeseries; everything else is tabular.
+    """
+    name = path.name.lower()
+    if name.endswith(".zip"):
+        return "graph"
+    names = [str(column) for column in (columns or [])]
+    if "source" in names and "target" in names:
+        return "text_pairs"
+    if "text" in names:
+        return "text"
+    return "tabular"
+
+
 def dataset_to_dict(dataset) -> Dict[str, Any]:
     """The representation of a dataset in the API.
 
@@ -457,6 +491,8 @@ def dataset_to_dict(dataset) -> Dict[str, Any]:
         "id": dataset.id,
         "name": dataset.name,
         "source": dataset.source,
+        "kind": dataset.kind or "tabular",
+        "content_sha256": dataset.content_sha256,
         "size_bytes": dataset.size_bytes,
         "row_count": dataset.row_count,
         "columns": columns[:MAX_REPORTED_COLUMNS],

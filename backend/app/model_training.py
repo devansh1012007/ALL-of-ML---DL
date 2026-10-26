@@ -111,10 +111,25 @@ try:
 except ImportError:
     genai = None
 
+from . import clustering as clustering_module
+from . import forecasting as forecasting_module
+from . import graph_models as graph_module
+from . import rl as rl_module
+from . import textmodels as text_module
+from . import vision as vision_module
+from .bundles import write_bundle
+from .charts import (
+    build_classification_charts,
+    build_regression_charts,
+    cap_charts,
+    cv_fold_chart,
+    permutation_importances,
+)
 from .tabular import (
     SCALE_SENSITIVE_MODELS,
     AutoencoderBundle,
     FeaturePlan,
+    FeatureInputError,
     TabularModelBundle,
     analyze_features,
     build_preprocessor,
@@ -122,6 +137,8 @@ from .tabular import (
     cross_validate_pipeline,
     describe_features,
     evaluate_holdout,
+    parse_preprocessing_options,
+    parse_split_options,
     preprocessing_report,
     split_data,
 )
@@ -147,7 +164,19 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 # them) and again in build_model() / _train_clustering() as defence in depth. Unknown
 # parameter names are deliberately NOT filtered - a typo must still raise TypeError from
 # the constructor.
-_TRAINER_OWNED_PARAMS = {"test_size"}
+# The keys of the shared forecasting contract (plan F3): they configure the
+# training loop, never an estimator constructor. Without them here, a
+# catalog entry that carries "forecasting" or "window" would hand them to
+# CatBoostClassifier.
+_TRAINER_OWNED_PARAMS = {
+    "test_size",
+    "forecasting",
+    "window",
+    "horizon",
+    "seasonality",
+    "patience",
+    "time_column",
+}
 
 # Keys that only one branch of a shared catalog entry accepts: SVC has "probability" and
 # "random_state", SVR has neither. A catalog entry shared by two estimators can only hold
@@ -397,7 +426,14 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "XGboost_timeseries": {
         "category": "time-series",
-        "description": "XGBoost model for tabular and time-series prediction.",
+        "description": (
+            "XGBoost for tabular regression. In forecasting mode "
+            "(hyperparameter forecasting=true) it uses the shared time-series "
+            "contract: lag features over the window, rolling statistics, a "
+            "chronological split and the naive baselines. Without that mode it "
+            "is an ordinary tabular regressor on a shuffled split, which is what "
+            "the old name hid."
+        ),
         "params": {
             "n_estimators": 100,
             "learning_rate": 0.1,
@@ -405,6 +441,9 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "gamma": 0,
+            "forecasting": False,
+            "window": 24,
+            "horizon": 1,
             "random_state": 42,
         },
         "search_space": {
@@ -417,16 +456,27 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "optimization": ["n_estimators", "learning_rate", "max_depth"],
         "implemented": True,
+        "dataset_kind": "tabular",
+        "bundle_kind": "tabular",
+        "requires_gpu": False,
+        "min_memory_mb": 512,
+        "downloads_checkpoint": False,
         "test_results": {
             "expected_accuracy": (0.80, 0.95),
-            "best_for": ["time_series_forecasting", "gradient_boosting", "feature_interactions"],
+            "best_for": ["gradient_boosting", "feature_interactions", "forecasting_baseline"],
             "typical_training_time_sec": 6,
             "scalability": "high",
         },
     },
     "lightGBM_timeseries": {
         "category": "time-series",
-        "description": "LightGBM model for fast time-series and tabular training.",
+        "description": (
+            "LightGBM for fast tabular training. In forecasting mode "
+            "(hyperparameter forecasting=true) it uses the shared time-series "
+            "contract with lag features and a chronological split, next to the "
+            "naive baselines. On small series the boosters often beat the neural "
+            "networks, which is why they are the honest baseline family."
+        ),
         "params": {
             "boosting_type": "gbdt",
             "n_estimators": 100,
@@ -434,6 +484,9 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
             "num_leaves": 31,
             "subsample": 0.8,
             "max_depth": -1,
+            "forecasting": False,
+            "window": 24,
+            "horizon": 1,
             "random_state": 42,
         },
         "search_space": {
@@ -445,22 +498,35 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "optimization": ["n_estimators", "learning_rate", "num_leaves"],
         "implemented": True,
+        "dataset_kind": "tabular",
+        "bundle_kind": "tabular",
+        "requires_gpu": False,
+        "min_memory_mb": 512,
+        "downloads_checkpoint": False,
         "test_results": {
             "expected_accuracy": (0.80, 0.96),
-            "best_for": ["fast_training", "large_datasets", "memory_efficiency"],
+            "best_for": ["fast_training", "large_datasets", "memory_efficient"],
             "typical_training_time_sec": 3,
             "scalability": "high",
         },
     },
     "CATboost_timeseries": {
         "category": "time-series",
-        "description": "CatBoost model for robust time-series and tabular training.",
+        "description": (
+            "CatBoost for robust tabular training. In forecasting mode "
+            "(hyperparameter forecasting=true) it uses the shared time-series "
+            "contract with lag features and a chronological split, next to the "
+            "naive baselines."
+        ),
         "params": {
             "iterations": 100,
             "learning_rate": 0.1,
             "depth": 6,
             "l2_leaf_reg": 3,
             "border_count": 32,
+            "forecasting": False,
+            "window": 24,
+            "horizon": 1,
             "random_state": 42,
         },
         "search_space": {
@@ -472,6 +538,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
         },
         "optimization": ["iterations", "learning_rate", "depth"],
         "implemented": True,
+        "dataset_kind": "tabular",
+        "bundle_kind": "tabular",
+        "requires_gpu": False,
+        "min_memory_mb": 512,
+        "downloads_checkpoint": False,
         "test_results": {
             "expected_accuracy": (0.78, 0.94),
             "best_for": ["categorical_features", "robustness", "automatic_feature_interaction"],
@@ -520,16 +591,29 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "Q-Learning": {
         "category": "reinforcement-learning",
-        "description": "Classic Q-learning for discrete environments.",
+        "description": (
+            "Tabular Q-learning, the textbook algorithm, for environments with a "
+            "discrete state and action space (FrozenLake, Taxi, CliffWalking, "
+            "Blackjack). Evaluated on fresh episodes with fixed seeds next to a "
+            "uniformly random policy."
+        ),
         "params": {
             "learning_rate": 0.1,
             "discount_factor": 0.99,
-            "epsilon": 0.1,
+            "epsilon": 1.0,
+            "epsilon_min": 0.05,
+            "epsilon_decay": 0.9995,
             "training_steps": 10000,
+            "random_state": 42,
         },
         "optimization": ["learning_rate", "discount_factor"],
-        "implemented": False,
-        "planned_test_results": {
+        "implemented": True,
+        "dataset_kind": "environment",
+        "bundle_kind": "q_table",
+        "requires_gpu": False,
+        "min_memory_mb": 256,
+        "downloads_checkpoint": False,
+        "test_results": {
             "expected_reward": (30, 200),
             "best_for": ["tabular_environments", "simple_mdp", "convergence_guarantee"],
             "typical_training_time_sec": 10,
@@ -567,23 +651,60 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "BERT2BERT": {
         "category": "nlp",
-        "description": "Encoder-decoder text modeling using BERT2BERT.",
-        "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "bert-base-uncased"},
+        "task": "seq2seq",
+        "description": (
+            "An EncoderDecoderModel warm-started from two BERT checkpoints, "
+            "fine-tuned on source and target columns with ROUGE-1/2/L and exact "
+            "match against the copy-the-source baseline. It learns its "
+            "cross-attention from scratch, so it is weaker than T5 on small "
+            "data; a GPU is recommended for anything real."
+        ),
+        "params": {
+            "epochs": 1,
+            "batch_size": 8,
+            "learning_rate": 2e-5,
+            "max_length": 128,
+            "model_name": "bert-base-uncased",
+        },
         "optimization": ["learning_rate"],
         "implemented": True,
+        "dataset_kind": "text_pairs",
+        "bundle_kind": "text_seq2seq",
+        "requires_gpu": "recommended",
+        "min_memory_mb": 4096,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["bert-base-uncased"],
         "test_results": {
-            "expected_accuracy": (0.82, 0.96),
-            "best_for": ["seq2seq_tasks", "text_generation", "multilingual_support"],
+            "best_for": ["seq2seq_tasks", "encoder_decoder_pretraining"],
             "typical_training_time_sec": 30,
             "scalability": "medium",
         },
     },
     "self-attenetion_transformer": {
         "category": "nlp",
-        "description": "Self-attention transformer for sequence tasks.",
-        "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "distilbert-base-uncased"},
+        "task": "classification",
+        "description": (
+            "DistilBERT text classification (the entry name is a historical "
+            "alias; the architecture is DistilBERT, a distilled BERT with the "
+            "same attention mechanism). Measured on a stratified held-out split: "
+            "accuracy, macro F1 and the majority baseline, with the truncation "
+            "rate of max_length."
+        ),
+        "params": {
+            "epochs": 1,
+            "batch_size": 8,
+            "learning_rate": 2e-5,
+            "max_length": 128,
+            "model_name": "distilbert-base-uncased",
+        },
         "optimization": ["learning_rate"],
         "implemented": True,
+        "dataset_kind": "text",
+        "bundle_kind": "text_classifier",
+        "requires_gpu": False,
+        "min_memory_mb": 2048,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["distilbert-base-uncased"],
         "test_results": {
             "expected_accuracy": (0.85, 0.95),
             "best_for": ["text_classification", "attention_mechanisms", "efficient_models"],
@@ -593,12 +714,30 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "seq2seq": {
         "category": "nlp",
-        "description": "Sequence-to-sequence training for text generation.",
-        "params": {"epochs": 1, "batch_size": 8, "learning_rate": 2e-5, "model_name": "t5-small"},
+        "task": "seq2seq",
+        "description": (
+            "Sequence-to-sequence fine-tuning of t5-small on source and target "
+            "columns: held-out loss, ROUGE-1/2/L and exact match, against the "
+            "copy-the-source and first-sentence baselines. Generation uses beam "
+            "search (default 4)."
+        ),
+        "params": {
+            "epochs": 1,
+            "batch_size": 8,
+            "learning_rate": 2e-5,
+            "max_length": 128,
+            "task_prefix": "",
+            "model_name": "t5-small",
+        },
         "optimization": ["learning_rate"],
         "implemented": True,
+        "dataset_kind": "text_pairs",
+        "bundle_kind": "text_seq2seq",
+        "requires_gpu": False,
+        "min_memory_mb": 2048,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["t5-small"],
         "test_results": {
-            "expected_accuracy": (0.80, 0.92),
             "best_for": ["translation", "summarization", "paraphrase_generation"],
             "typical_training_time_sec": 35,
             "scalability": "medium",
@@ -606,48 +745,85 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "UL2": {
         "category": "nlp",
-        "description": "UL2-based language fine-tuning.",
-        "params": {"epochs": 1, "batch_size": 4, "learning_rate": 2e-5, "model_name": "google/ul2"},
-        "optimization": ["learning_rate"],
-        "implemented": True,
-        "test_results": {
-            "expected_accuracy": (0.83, 0.93),
-            "best_for": ["unified_text_tasks", "multitask_learning", "versatile_models"],
-            "typical_training_time_sec": 40,
-            "scalability": "medium",
-        },
+        "description": (
+            "Retired: the UL2 checkpoint has 20 billion parameters (about 40 GB "
+            "in half precision before any training state), and no hardware this "
+            "product targets can train or serve it. Renaming a small T5 as "
+            "UL2-style would claim a thing it is not, which is the dishonesty "
+            "the catalog work removed. Hidden by default; revisit only with a "
+            "worker that has two 80 GB GPUs."
+        ),
+        "params": {},
+        "optimization": [],
+        "implemented": False,
+        "not_supported": (
+            "20 billion parameters cannot be trained or served on the hardware "
+            "this product targets (about 40 GB of weights in half precision)."
+        ),
+        "hidden": True,
+        "dataset_kind": "text",
+        "bundle_kind": None,
+        "requires_gpu": True,
+        "min_memory_mb": 80000,
+        "downloads_checkpoint": True,
     },
     "GNN": {
         "category": "graph",
-        "description": "Graph neural network training.",
+        "description": (
+            "Semi-supervised node classification with a two-layer graph "
+            "convolutional network over a sparse, symmetrically normalised "
+            "adjacency with self-loops (no PyTorch Geometric). The metrics sit "
+            "next to a majority baseline and a feature-only MLP baseline, which "
+            "is the honest test of whether the graph helps. Full-batch."
+        ),
         "params": {
-            "epochs": 3,
-            "batch_size": 16,
-            "learning_rate": 1e-3,
-            "weight_decay": 0.0,
+            "epochs": 200,
+            "hidden_size": 32,
+            "layer": "gcn",
+            "dropout": 0.5,
+            "weight_decay": 0.0005,
+            "learning_rate": 0.01,
+            "symmetrise": True,
+            "random_state": 42,
         },
-        "optimization": ["learning_rate"],
-        "implemented": False,
-        "planned_test_results": {
+        "optimization": ["hidden_size", "learning_rate"],
+        "implemented": True,
+        "dataset_kind": "graph",
+        "bundle_kind": "graph",
+        "requires_gpu": False,
+        "min_memory_mb": 1024,
+        "downloads_checkpoint": False,
+        "test_results": {
             "expected_accuracy": (0.75, 0.92),
-            "best_for": ["graph_classification", "node_embedding", "knowledge_graphs"],
+            "best_for": ["node_classification", "graph_learning", "semi_supervised"],
             "typical_training_time_sec": 20,
             "scalability": "medium",
         },
     },
     "BERT": {
         "category": "nlp",
-        "description": "BERT text classification.",
+        "task": "classification",
+        "description": (
+            "BERT text classification, measured on a stratified held-out split: "
+            "accuracy, macro F1 and the majority baseline, with the truncation "
+            "rate of max_length."
+        ),
         "params": {
             "epochs": 1,
             "batch_size": 16,
             "learning_rate": 2e-5,
             "weight_decay": 0.01,
-            "warmup_steps": 0,
+            "max_length": 128,
             "model_name": "bert-base-uncased",
         },
         "optimization": ["learning_rate", "weight_decay"],
         "implemented": True,
+        "dataset_kind": "text",
+        "bundle_kind": "text_classifier",
+        "requires_gpu": False,
+        "min_memory_mb": 2048,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["bert-base-uncased"],
         "test_results": {
             "expected_accuracy": (0.88, 0.96),
             "best_for": ["text_classification", "sentiment_analysis", "nli_tasks"],
@@ -657,17 +833,27 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "DistilBERT": {
         "category": "nlp",
-        "description": "DistilBERT text classification.",
+        "task": "classification",
+        "description": (
+            "DistilBERT text classification, measured on a stratified held-out "
+            "split: accuracy, macro F1 and the majority baseline."
+        ),
         "params": {
             "epochs": 1,
             "batch_size": 16,
             "learning_rate": 2e-5,
             "weight_decay": 0.01,
-            "warmup_steps": 0,
+            "max_length": 128,
             "model_name": "distilbert-base-uncased",
         },
         "optimization": ["learning_rate", "weight_decay"],
         "implemented": True,
+        "dataset_kind": "text",
+        "bundle_kind": "text_classifier",
+        "requires_gpu": False,
+        "min_memory_mb": 2048,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["distilbert-base-uncased"],
         "test_results": {
             "expected_accuracy": (0.85, 0.94),
             "best_for": ["lightweight_models", "mobile_deployment", "fast_inference"],
@@ -677,19 +863,33 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "GPT": {
         "category": "nlp",
-        "description": "GPT-style text fine-tuning.",
+        "task": "generation",
+        "description": (
+            "Causal language-model fine-tuning of distilgpt2 (gpt2 is also "
+            "allow-listed): the text is packed into blocks of block_size tokens "
+            "and the model learns to continue them. The report has the held-out "
+            "cross-entropy and perplexity, the perplexity of the pretrained "
+            "model before the fine-tuning (so the gain is visible) and a "
+            "unigram baseline. Training is capped by max_train_tokens. This is "
+            "generation, not classification."
+        ),
         "params": {
             "epochs": 1,
-            "batch_size": 8,
+            "batch_size": 4,
             "learning_rate": 2e-5,
-            "weight_decay": 0.01,
-            "warmup_steps": 0,
+            "block_size": 128,
+            "max_train_tokens": 200000,
             "model_name": "distilgpt2",
         },
-        "optimization": ["learning_rate", "weight_decay"],
+        "optimization": ["learning_rate"],
         "implemented": True,
+        "dataset_kind": "text",
+        "bundle_kind": "text_generation",
+        "requires_gpu": False,
+        "min_memory_mb": 2048,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["distilgpt2", "gpt2"],
         "test_results": {
-            "expected_accuracy": (0.82, 0.92),
             "best_for": ["text_generation", "language_modeling", "autoregressive_tasks"],
             "typical_training_time_sec": 25,
             "scalability": "high",
@@ -697,38 +897,71 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "LLaMA": {
         "category": "nlp",
-        "description": "LLaMA-based fine-tuning.",
+        "task": "generation",
+        "description": (
+            "LoRA fine-tuning of a Llama-architecture checkpoint from an "
+            "allow-list: TinyLlama-1.1B-Chat (ungated, fits a 12 GB GPU) by "
+            "default; the 7B model only when an administrator sets a Hugging "
+            "Face token and accepts the licence. The artifact is the adapter "
+            "(a few megabytes) plus the base model id, which keeps the storage "
+            "quota small. 4-bit loading exists only on CUDA. Requires a GPU "
+            "worker; on a CPU-only deployment this entry is unavailable and "
+            "says why."
+        ),
         "params": {
             "epochs": 1,
-            "batch_size": 4,
-            "learning_rate": 2e-5,
-            "weight_decay": 0.01,
-            "warmup_steps": 0,
-            "model_name": "meta-llama/Llama-2-7b",
+            "batch_size": 2,
+            "learning_rate": 0.0002,
+            "r": 8,
+            "alpha": 16,
+            "lora_dropout": 0.05,
+            "block_size": 128,
+            "max_train_tokens": 100000,
+            "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         },
-        "optimization": ["learning_rate", "weight_decay"],
+        "optimization": ["learning_rate", "r"],
         "implemented": True,
+        "dataset_kind": "text",
+        "bundle_kind": "text_generation",
+        "requires_gpu": True,
+        "min_memory_mb": 12000,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"],
         "test_results": {
-            "expected_accuracy": (0.87, 0.97),
-            "best_for": ["instruction_following", "dialogue", "code_generation"],
+            "best_for": ["instruction_following", "dialogue", "adapter_finetuning"],
             "typical_training_time_sec": 60,
             "scalability": "medium",
         },
     },
     "LSTM": {
         "category": "timeseries",
-        "description": "LSTM for sequential prediction.",
+        "description": (
+            "LSTM forecaster on the shared time-series contract: a chronological "
+            "split (never shuffled), direct multi-step prediction, MAE/RMSE/sMAPE/"
+            "MASE next to the naive and seasonal-naive baselines. A model that "
+            "does not beat the naive forecast is flagged."
+        ),
         "params": {
-            "epochs": 5,
-            "batch_size": 32,
-            "learning_rate": 1e-3,
+            "window": 24,
+            "horizon": 1,
             "hidden_size": 64,
+            "num_layers": 1,
             "dropout": 0.0,
+            "epochs": 10,
+            "batch_size": 32,
+            "learning_rate": 0.001,
+            "patience": 5,
+            "random_state": 42,
         },
         "optimization": ["hidden_size", "learning_rate"],
-        "implemented": False,
-        "planned_test_results": {
-            "expected_accuracy": (0.70, 0.90),
+        "implemented": True,
+        "dataset_kind": "timeseries",
+        "bundle_kind": "timeseries",
+        "requires_gpu": False,
+        "min_memory_mb": 1024,
+        "downloads_checkpoint": False,
+        "test_results": {
+            "expected_mae_skill": (0.0, 1.0),
             "best_for": ["time_series", "sequence_modeling", "long_dependencies"],
             "typical_training_time_sec": 18,
             "scalability": "medium",
@@ -736,17 +969,27 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "MiniLM": {
         "category": "nlp",
-        "description": "MiniLM text representation and classification.",
+        "task": "classification",
+        "description": (
+            "MiniLM text classification, measured on a stratified held-out split: "
+            "accuracy, macro F1 and the majority baseline."
+        ),
         "params": {
             "epochs": 1,
             "batch_size": 16,
             "learning_rate": 2e-5,
             "weight_decay": 0.01,
-            "warmup_steps": 0,
+            "max_length": 128,
             "model_name": "sentence-transformers/all-MiniLM-L6-v2",
         },
         "optimization": ["learning_rate", "weight_decay"],
         "implemented": True,
+        "dataset_kind": "text",
+        "bundle_kind": "text_classifier",
+        "requires_gpu": False,
+        "min_memory_mb": 2048,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["sentence-transformers/all-MiniLM-L6-v2"],
         "test_results": {
             "expected_accuracy": (0.82, 0.93),
             "best_for": ["semantic_similarity", "embedding_tasks", "fast_models"],
@@ -802,12 +1045,32 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "RNN": {
         "category": "timeseries",
-        "description": "RNN for sequential and time-series prediction.",
-        "params": {"epochs": 5, "batch_size": 32, "learning_rate": 1e-3, "hidden_size": 64},
+        "description": (
+            "Elman RNN (tanh) forecaster on the shared time-series contract: a "
+            "chronological split, direct multi-step prediction and the naive "
+            "baselines, so the number means what it says."
+        ),
+        "params": {
+            "window": 24,
+            "horizon": 1,
+            "hidden_size": 64,
+            "num_layers": 1,
+            "dropout": 0.0,
+            "epochs": 10,
+            "batch_size": 32,
+            "learning_rate": 0.001,
+            "patience": 5,
+            "random_state": 42,
+        },
         "optimization": ["hidden_size", "learning_rate"],
-        "implemented": False,
-        "planned_test_results": {
-            "expected_accuracy": (0.65, 0.85),
+        "implemented": True,
+        "dataset_kind": "timeseries",
+        "bundle_kind": "timeseries",
+        "requires_gpu": False,
+        "min_memory_mb": 1024,
+        "downloads_checkpoint": False,
+        "test_results": {
+            "expected_mae_skill": (0.0, 1.0),
             "best_for": ["sequential_data", "basic_recurrence", "educational_purposes"],
             "typical_training_time_sec": 15,
             "scalability": "medium",
@@ -815,12 +1078,35 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "SSM_timeseries": {
         "category": "timeseries",
-        "description": "State-space model inspired sequence modeling.",
-        "params": {"epochs": 5, "batch_size": 32, "learning_rate": 1e-3, "hidden_size": 64},
+        "description": (
+            "A diagonal state-space forecaster in the style of S4D and LRU: a "
+            "complex diagonal state matrix with a magnitude below one (kept "
+            "below one by construction), learned input and output maps, a skip "
+            "term, stacked with normalisation, gating and residual connections. "
+            "Not Mamba, and not full S4 - a diagonal SSM on the shared "
+            "forecasting contract."
+        ),
+        "params": {
+            "window": 24,
+            "horizon": 1,
+            "hidden_size": 64,
+            "state_dim": 32,
+            "num_layers": 2,
+            "epochs": 10,
+            "batch_size": 32,
+            "learning_rate": 0.001,
+            "patience": 5,
+            "random_state": 42,
+        },
         "optimization": ["hidden_size"],
-        "implemented": False,
-        "planned_test_results": {
-            "expected_accuracy": (0.72, 0.88),
+        "implemented": True,
+        "dataset_kind": "timeseries",
+        "bundle_kind": "timeseries",
+        "requires_gpu": False,
+        "min_memory_mb": 1024,
+        "downloads_checkpoint": False,
+        "test_results": {
+            "expected_mae_skill": (0.0, 1.0),
             "best_for": ["structured_state_modeling", "efficient_sequences", "long_range"],
             "typical_training_time_sec": 16,
             "scalability": "high",
@@ -828,12 +1114,35 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "TCN_timeseries": {
         "category": "timeseries",
-        "description": "Temporal convolutional network for sequences.",
-        "params": {"epochs": 5, "batch_size": 32, "learning_rate": 1e-3, "num_channels": 16},
+        "description": (
+            "Temporal convolutional forecaster: a stack of residual blocks of "
+            "dilated causal one-dimensional convolutions (left padding only, "
+            "the dilation doubling per level). The trainer checks that the "
+            "receptive field covers the window and reports it. Shared "
+            "forecasting contract with the naive baselines."
+        ),
+        "params": {
+            "window": 24,
+            "horizon": 1,
+            "num_channels": 16,
+            "levels": 3,
+            "kernel_size": 3,
+            "dropout": 0.1,
+            "epochs": 10,
+            "batch_size": 32,
+            "learning_rate": 0.001,
+            "patience": 5,
+            "random_state": 42,
+        },
         "optimization": ["num_channels", "learning_rate"],
-        "implemented": False,
-        "planned_test_results": {
-            "expected_accuracy": (0.75, 0.90),
+        "implemented": True,
+        "dataset_kind": "timeseries",
+        "bundle_kind": "timeseries",
+        "requires_gpu": False,
+        "min_memory_mb": 1024,
+        "downloads_checkpoint": False,
+        "test_results": {
+            "expected_mae_skill": (0.0, 1.0),
             "best_for": ["temporal_patterns", "parallel_processing", "long_sequences"],
             "typical_training_time_sec": 17,
             "scalability": "high",
@@ -841,11 +1150,30 @@ MODEL_CATALOG: Dict[str, Dict[str, Any]] = {
     },
     "ViT": {
         "category": "vision",
-        "description": "Vision Transformer for image classification.",
-        "params": {"epochs": 3, "batch_size": 16, "learning_rate": 1e-4, "model_name": "google/vit-base-patch16-224"},
+        "description": (
+            "Vision Transformer image classification from the allow-listed "
+            "checkpoint google/vit-base-patch16-224 with a new head. Linear "
+            "probe by default (freeze_backbone=true); unfreezing the last "
+            "blocks needs a GPU. On a CPU worker only the linear-probe mode is "
+            "offered, and only up to 2000 images."
+        ),
+        "params": {
+            "epochs": 3,
+            "batch_size": 16,
+            "learning_rate": 0.0001,
+            "freeze_backbone": True,
+            "image_size": 224,
+            "model_name": "google/vit-base-patch16-224",
+        },
         "optimization": ["learning_rate"],
-        "implemented": False,
-        "planned_test_results": {
+        "implemented": True,
+        "dataset_kind": "image_folder",
+        "bundle_kind": "vision",
+        "requires_gpu": "recommended",
+        "min_memory_mb": 4096,
+        "downloads_checkpoint": True,
+        "allowed_checkpoints": ["google/vit-base-patch16-224"],
+        "test_results": {
             "expected_accuracy": (0.86, 0.96),
             "best_for": ["modern_architectures", "attention_based_vision", "large_scale_data"],
             "typical_training_time_sec": 40,
@@ -939,58 +1267,143 @@ def normalize_model_name(name: str) -> str:
     return name
 
 
+# What a catalog entry declares about its needs (plan F0/F8). The defaults are
+# the values of a plain tabular model; an entry that needs more says so
+# explicitly. "implemented" (the code exists and is tested) is separate from
+# "available" (this deployment has the packages and the hardware), and the
+# interface shows the reason an unavailable model is disabled.
+_DECLARED_NEEDS_DEFAULTS = {
+    "requires_gpu": False,
+    "min_memory_mb": None,
+    "downloads_checkpoint": False,
+    "allowed_checkpoints": [],
+    "dataset_kind": "tabular",
+    "bundle_kind": None,
+    "task": "classification",
+    "hidden": False,
+}
+
+# Which category needs which optional package: the availability check of F8.
+_CATEGORY_REQUIREMENTS = {
+    "vision": ("torchvision", "Vision models need torch and torchvision."),
+    "timeseries": ("torch", "The neural forecasters need torch."),
+    "graph": ("torch", "The graph models need torch."),
+    "nlp": ("transformers", "The text models need transformers and torch."),
+}
+
+
+def _package_installed(name: str) -> bool:
+    import importlib
+
+    try:
+        importlib.import_module(name)
+        return True
+    except ImportError:
+        return False
+
+
+def model_availability(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Whether this deployment can run an entry, and why not (plan F8).
+
+    "implemented" says the code exists and is tested; "available" says this
+    deployment has the packages and the hardware. A GPU is only "recommended"
+    for some entries (ViT, BERT2BERT): they run on CPU within the documented
+    limits. An entry whose ``requires_gpu`` is True (LLaMA) is unavailable on
+    a CPU-only worker, and the interface says why instead of queueing it
+    forever.
+    """
+    if not entry.get("implemented", True):
+        reason = entry.get("not_supported") or "this model is not implemented yet"
+        return {"available": False, "reason": reason}
+    category = entry.get("category", "custom")
+    requirement = _CATEGORY_REQUIREMENTS.get(category)
+    if requirement and not _package_installed(requirement[0]):
+        return {"available": False, "reason": requirement[1]}
+    if category == "reinforcement-learning" and not _package_installed("gymnasium"):
+        return {"available": False, "reason": "The reinforcement-learning models need gymnasium."}
+    requires_gpu = entry.get("requires_gpu", False)
+    if requires_gpu is True:
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return {
+                    "available": False,
+                    "reason": "This model needs a GPU worker; this deployment has none.",
+                }
+        except ImportError:
+            return {"available": False, "reason": "This model needs torch and a GPU worker."}
+    return {"available": True, "reason": None}
+
+
 def get_model_entry(model_name: str) -> Dict[str, Any]:
     normalized = normalize_model_name(model_name)
     if normalized in MODEL_CATALOG:
-        return copy.deepcopy(MODEL_CATALOG[normalized])
+        entry = copy.deepcopy(MODEL_CATALOG[normalized])
+        # Every implemented entry declares what it needs (plan F0): the
+        # defaults below are what a plain tabular model needs, so an entry
+        # that needs more has to say so explicitly.
+        for key, default in _DECLARED_NEEDS_DEFAULTS.items():
+            entry.setdefault(key, default)
+        return entry
     return {
         "category": "custom",
         "description": "A model available in the repository.",
         "params": {},
         "optimization": [],
+        **copy.deepcopy(_DECLARED_NEEDS_DEFAULTS),
     }
 
 
 def list_available_models() -> List[Dict[str, Any]]:
-    available = []
+    """The catalog, with the computed availability of every entry (plan F8).
+
+    ``implemented`` says the code exists and is tested; ``available`` says
+    this deployment has the packages and the hardware, and ``reason`` says
+    why not when it does not. The hidden entries (the retired UL2) are not
+    listed.
+    """
+    listed = []
     directories = [ROOT / "ML_models", ROOT / "DL_models", ROOT / "Encoder_Decoder"]
     seen = set()
+    names: List[str] = []
     for directory in directories:
         if directory.exists():
             for file in sorted(directory.iterdir()):
                 if file.suffix == ".py":
-                    name = file.stem
-                    normalized = normalize_model_name(name)
-                    if normalized in seen:
-                        continue
-                    seen.add(normalized)
-                    info = get_model_entry(normalized)
-                    available.append({
-                        "name": normalized,
-                        "description": info.get("description", "Available model from repository."),
-                        "parameters": info.get("params", {}),
-                        "category": info.get("category", "custom"),
-                        "optimization": info.get("optimization", []),
-                        "test_results": info.get("test_results", {}),
-                        "planned_test_results": info.get("planned_test_results", {}),
-                        "implemented": info.get("implemented", True),
-                        "supported": normalized in MODEL_CATALOG,
-                    })
-    if not available:
-        # Fallback to the built-in catalog when the repository scan does not locate any model files.
-        for normalized, info in MODEL_CATALOG.items():
-            available.append({
-                "name": normalized,
-                "description": info.get("description", "Available model from repository."),
-                "parameters": info.get("params", {}),
-                "category": info.get("category", "custom"),
-                "optimization": info.get("optimization", []),
-                "test_results": info.get("test_results", {}),
-                "planned_test_results": info.get("planned_test_results", {}),
-                "implemented": info.get("implemented", True),
-                "supported": True,
-            })
-    return available
+                    normalized = normalize_model_name(file.stem)
+                    if normalized not in seen:
+                        seen.add(normalized)
+                        names.append(normalized)
+    if not names:
+        names = list(MODEL_CATALOG.keys())
+    for normalized in names:
+        if normalized not in MODEL_CATALOG:
+            continue
+        info = get_model_entry(normalized)
+        if info.get("hidden"):
+            continue
+        availability = model_availability(info)
+        listed.append({
+            "name": normalized,
+            "description": info.get("description", "Available model from repository."),
+            "parameters": info.get("params", {}),
+            "category": info.get("category", "custom"),
+            "optimization": info.get("optimization", []),
+            "test_results": info.get("test_results", {}),
+            "planned_test_results": info.get("planned_test_results", {}),
+            "implemented": info.get("implemented", True),
+            "available": availability["available"],
+            "unavailable_reason": availability["reason"],
+            "requires_gpu": info.get("requires_gpu", False),
+            "min_memory_mb": info.get("min_memory_mb"),
+            "downloads_checkpoint": info.get("downloads_checkpoint", False),
+            "dataset_kind": info.get("dataset_kind", "tabular"),
+            "bundle_kind": info.get("bundle_kind"),
+            "task": info.get("task", "classification"),
+            "supported": True,
+        })
+    return listed
 
 
 def list_model_categories() -> List[str]:
@@ -1192,10 +1605,16 @@ def suggest_hyperparameters(
     return base_params
 
 
-def build_model(model_name: str, task_type: str, params: Dict[str, Any]):
+def build_model(model_name: str, task_type: str, params: Dict[str, Any], class_weight: str = "none"):
     # Trainer-owned keys (e.g. test_size) are removed before the constructor call; every
     # other key is forwarded as-is so invalid names still raise TypeError.
     estimator_params = {k: v for k, v in params.items() if k not in _TRAINER_OWNED_PARAMS}
+    if class_weight == "balanced" and task_type == "classification":
+        # Only the estimators that accept the option receive it (plan C6):
+        # a regressor has no class weights, and the boosters handle the
+        # rare classes differently.
+        if model_name in ("Random_Forest", "Logistic_Regression", "SVM"):
+            estimator_params = {**estimator_params, "class_weight": "balanced"}
     if model_name == "Random_Forest":
         if task_type == "classification":
             return RandomForestClassifier(**estimator_params)
@@ -1255,221 +1674,6 @@ def build_model(model_name: str, task_type: str, params: Dict[str, Any]):
             return cb.CatBoostClassifier(**cb_params)
         return cb.CatBoostRegressor(**cb_params)
     raise ValueError(f"Unsupported model: {model_name}")
-
-
-def _train_clustering(model_name: str, X: pd.DataFrame, params: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
-    # Defence in depth: the trainer-owned keys (e.g. test_size) belong to the training
-    # loop and are never valid estimator arguments. train_model() already strips them
-    # from the client-supplied hyperparameters, this filter keeps the function safe
-    # for every caller. Every other key is forwarded as-is, so a typo still raises.
-    estimator_params = {k: v for k, v in params.items() if k not in _TRAINER_OWNED_PARAMS}
-    is_embedding = False
-    model = None
-    if model_name == "K-Mean":
-        model = KMeans(**estimator_params)
-    elif model_name == "GMM":
-        model = GaussianMixture(**estimator_params)
-    elif model_name == "Hierarchical_Clustering":
-        model = AgglomerativeClustering(**estimator_params)
-    elif model_name == "DBSCAN":
-        model = DBSCAN(**estimator_params)
-    elif model_name == "HDBSCAN":
-        if hdbscan is None:
-            raise RuntimeError("hdbscan is not installed")
-        model = hdbscan.HDBSCAN(**estimator_params)
-    elif model_name == "PCA":
-        model = PCA(**estimator_params)
-        is_embedding = True
-    elif model_name == "t-SNE":
-        model = TSNE(**estimator_params)
-        is_embedding = True
-    elif model_name == "UMAP":
-        if umap is None:
-            raise RuntimeError("umap is not installed")
-        model = umap.UMAP(**estimator_params)
-        is_embedding = True
-    elif model_name == "HMM_timeseries":
-        if hmm is None:
-            raise RuntimeError("hmmlearn is not installed")
-        model = hmm.GaussianHMM(**estimator_params)
-    else:
-        raise ValueError(f"Unsupported clustering model: {model_name}")
-
-    # Handle dimensionality-reduction style models (produce embeddings)
-    if is_embedding:
-        embedding = model.fit_transform(X)
-        try:
-            setattr(model, "_embedding", embedding)
-        except Exception:
-            pass
-        metrics = {"embedding_shape": tuple(embedding.shape), "sample_count": int(embedding.shape[0])}
-        return metrics, model
-
-    # For clustering models, try common prediction patterns
-    labels = None
-    if hasattr(model, "fit_predict"):
-        labels = model.fit_predict(X)
-    else:
-        model.fit(X)
-        if hasattr(model, "labels_"):
-            labels = getattr(model, "labels_")
-        elif hasattr(model, "predict"):
-            try:
-                labels = model.predict(X)
-            except Exception:
-                labels = None
-
-    if labels is None:
-        labels = np.array([-1] * len(X))
-
-    labels_arr = np.asarray(labels)
-    noise_count = int((labels_arr == -1).sum())
-    # The silhouette score is only defined for two or more clusters and cannot
-    # use DBSCAN's noise label (-1): it is excluded from the computation.
-    silhouette = None
-    non_noise = labels_arr[labels_arr != -1]
-    if len(np.unique(non_noise)) >= 2 and len(non_noise) >= 2:
-        try:
-            # silhouette_score compares samples that share the same feature
-            # matrix: X is filtered to the non-noise points, exactly like
-            # non_noise, so a run with noise points still gets a silhouette.
-            silhouette = float(silhouette_score(X[labels_arr != -1], non_noise))
-        except Exception:
-            silhouette = None
-
-    metrics = {
-        "cluster_count": int(pd.Series(labels).nunique()),
-        "sample_count": int(len(labels)),
-        "noise_count": noise_count,
-        "silhouette": silhouette,
-    }
-    try:
-        setattr(model, "_labels", labels)
-    except Exception:
-        pass
-    return metrics, model
-
-
-def _train_rl_model(model_name: str, env_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    if gym is None:
-        raise RuntimeError("gymnasium is not installed")
-    if not env_id:
-        raise ValueError("env_id is required for reinforcement learning models.")
-    env = gym.make(env_id)
-    if model_name == "PPO":
-        if PPO is None:
-            raise RuntimeError("stable-baselines3 is not installed")
-        agent = PPO("MlpPolicy", env, verbose=0, learning_rate=params.get("learning_rate", 2.5e-4), n_steps=params.get("n_steps", 2048), batch_size=params.get("batch_size", 64))
-    elif model_name == "DQN":
-        if DQN is None:
-            raise RuntimeError("stable-baselines3 is not installed")
-        agent = DQN("MlpPolicy", env, verbose=0, learning_rate=params.get("learning_rate", 1e-4), buffer_size=params.get("buffer_size", 100000), learning_starts=params.get("learning_starts", 1000))
-    elif model_name == "Q-Learning":
-        return {"status": "Q-Learning is supported as a discrete prototype only."}
-    else:
-        raise ValueError(f"Unsupported RL model: {model_name}")
-    agent.learn(total_timesteps=params.get("training_steps", 10000))
-    mean_reward = None
-    try:
-        observation, _ = env.reset()
-        total_reward = 0.0
-        for _ in range(100):
-            action, _ = agent.predict(observation)
-            observation, reward, terminated, truncated, _ = env.step(action)
-            total_reward += reward
-            if terminated or truncated:
-                break
-        mean_reward = float(total_reward)
-    except Exception:
-        mean_reward = None
-    return {"mean_reward": mean_reward, "training_steps": params.get("training_steps", 10000)}
-
-
-def _train_transformer_text_classifier(
-    model_name: str,
-    model_def: Dict[str, Any],
-    dataset: pd.DataFrame,
-    label_column: str,
-    hyperparameters: Dict[str, Any],
-) -> Tuple[Dict[str, Any], Any]:
-    if AutoTokenizer is None or AutoModelForSequenceClassification is None or Trainer is None or TrainingArguments is None:
-        raise RuntimeError("transformers is not installed")
-    if label_column not in dataset.columns:
-        raise ValueError(f"label column '{label_column}' not found in dataset.")
-    text_cols = [c for c in dataset.columns if c != label_column]
-    if not text_cols:
-        raise ValueError("No text feature column found for transformer training.")
-    text_column = text_cols[0]
-    dataset = dataset[[text_column, label_column]].dropna()
-    tokenizer = AutoTokenizer.from_pretrained(model_def.get("params", {}).get("model_name", "bert-base-uncased"))
-    label_values = dataset[label_column].astype(str).tolist()
-    unique_labels = sorted(set(label_values))
-    label_map = {label: i for i, label in enumerate(unique_labels)}
-    labels = [label_map[label] for label in label_values]
-    texts = dataset[text_column].astype(str).tolist()
-    encodings = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-    class TextDataset(Dataset):
-        def __init__(self, encodings, labels):
-            self.encodings = encodings
-            self.labels = labels
-        def __len__(self):
-            return len(self.labels)
-        def __getitem__(self, idx):
-            item = {k: v[idx] for k, v in self.encodings.items()}
-            item["labels"] = torch.tensor(self.labels[idx])
-            return item
-    train_dataset = TextDataset(encodings, labels)
-    model = AutoModelForSequenceClassification.from_pretrained(model_def.get("params", {}).get("model_name", "bert-base-uncased"), num_labels=len(unique_labels))
-    args = TrainingArguments(
-        output_dir=str(MODEL_DIR / f"{model_name}_transformer"),
-        num_train_epochs=int(hyperparameters.get("epochs", 1)),
-        per_device_train_batch_size=int(hyperparameters.get("batch_size", 8)),
-        learning_rate=float(hyperparameters.get("learning_rate", 2e-5)),
-        logging_steps=10,
-        save_steps=500,
-        no_cuda=not torch.cuda.is_available() if torch is not None else True,
-        disable_tqdm=True,
-    )
-    trainer = Trainer(model=model, args=args, train_dataset=train_dataset)
-    trainer.train()
-    final_loss = None
-    if trainer.state.log_history:
-        final_loss = trainer.state.log_history[-1].get("loss")
-    return {"train_loss": float(final_loss) if final_loss is not None else None, "labels": unique_labels}, model
-
-
-if nn is not None:
-
-    class SimpleNet(nn.Module):
-        """The small multilayer perceptron of the torch trainer.
-
-        The class lives at the module level on purpose: ``write_artifact()``
-        pickles the trained model with joblib, and pickle stores a class *by
-        reference*. A class that is defined inside a function cannot be found
-        again, so the artifact of every model of the torch trainer could not be
-        loaded back - the training succeeded and the artifact was useless.
-
-        The dimensions are arguments of the constructor because they are only
-        known when the training starts: the input dimension comes from the
-        data, the output dimension from the label and the width from the
-        hyperparameters.
-        """
-
-        def __init__(self, input_dim: int, output_dim: int, hidden_size: int = 64):
-            super().__init__()
-            self.network = nn.Sequential(
-                nn.Linear(input_dim, hidden_size),
-                nn.ReLU(),
-                nn.Linear(hidden_size, output_dim),
-            )
-
-        def forward(self, x):
-            return self.network(x)
-
-else:
-    # torch is an optional dependency: the module has to import without it, and
-    # the trainer refuses to run with a clear message when it is missing.
-    SimpleNet = None
 
 
 _AUTOENCODER_PARAMS = frozenset(
@@ -1589,48 +1793,16 @@ def _train_autoencoder(
     return metrics, bundle, plan
 
 
-def _train_torch_regression_or_classification(
-    model_name: str,
-    dataset: pd.DataFrame,
-    label_column: str,
-    hyperparameters: Dict[str, Any],
-) -> Tuple[Dict[str, Any], Any]:
-    if torch is None:
-        raise RuntimeError("torch is not installed")
-    if label_column not in dataset.columns:
-        raise ValueError(f"label column '{label_column}' not found in dataset.")
-    features = dataset.drop(columns=[label_column]).astype(float).fillna(0.0).to_numpy(dtype=np.float32)
-    labels = dataset[label_column].astype(float).to_numpy(dtype=np.float32)
-    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=hyperparameters.get("test_size", 0.2), random_state=int(hyperparameters.get("random_state", 42)))
-    input_dim = X_train.shape[1]
-    output_dim = 1 if len(y_train.shape) == 1 else y_train.shape[1]
-    hidden_size = int(hyperparameters.get("hidden_size", 64))
-    model = SimpleNet(input_dim, output_dim, hidden_size)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(hyperparameters.get("learning_rate", 1e-3)))
-    X_train_t = torch.from_numpy(X_train)
-    y_train_t = torch.from_numpy(y_train).float().view(-1, 1)
-    for _ in range(int(hyperparameters.get("epochs", 5))):
-        model.train()
-        optimizer.zero_grad()
-        outputs = model(X_train_t)
-        loss = criterion(outputs, y_train_t)
-        loss.backward()
-        optimizer.step()
-    metrics = {"final_loss": float(loss.detach().item())}
-    return metrics, model
+def write_artifact(model_name: str, bundle: Any) -> Dict[str, Any]:
+    """Write the artifact of a run through the bundle contract (plan C1).
 
-
-def write_artifact(model_name: str, model: Any) -> str:
-    # The name has to be unique: two runs that start in the same second would
-    # write over each other's artifact otherwise.
-    artifact_name = (
-        f"{model_name}_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}_"
-        f"{uuid.uuid4().hex[:8]}.joblib"
-    )
-    artifact_path = MODEL_DIR / artifact_name
-    joblib.dump(model, artifact_path)
-    return str(artifact_path)
+    The artifact is a directory with a ``bundle.json`` manifest (the kind,
+    the format version, the schema, the sha256 of every file), and the
+    answer is the record the run row stores: the path, the checksum that is
+    verified before every load, and the size. ``MODEL_DIR`` is read at call
+    time, so the test suite can redirect it.
+    """
+    return write_bundle(model_name, bundle, model_dir=MODEL_DIR)
 
 
 def _prepare_dataset(
@@ -1680,80 +1852,6 @@ def _prepare_dataset(
     if label_column and label_column not in df.columns:
         raise ValueError(f"label column '{label_column}' not found in dataset.")
     return df, dataset_source, dataset_tag
-
-
-def _train_resnet_image_model(model_name: str, dataset_name: str, hyperparameters: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
-    if torchvision is None or ImageFolder is None or transforms is None or (resnet18 is None and resnet50 is None):
-        raise RuntimeError("torchvision is required for ResNet image training.")
-    dataset_path = resolve_dataset_path(dataset_name)
-    if not dataset_path.exists() or not dataset_path.is_dir():
-        raise FileNotFoundError(f"Image dataset folder '{dataset_path}' not found.")
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    image_dataset = ImageFolder(str(dataset_path), transform=transform)
-    if len(image_dataset) == 0:
-        raise ValueError("The image dataset contains no labeled samples. Ensure class subdirectories exist.")
-    loader = DataLoader(
-        image_dataset,
-        batch_size=int(hyperparameters.get("batch_size", 16)),
-        shuffle=True,
-        num_workers=0,
-    )
-    num_classes = len(image_dataset.classes)
-    architecture = resnet50 if model_name == "ResNet50" else resnet18
-    if architecture is None:
-        raise RuntimeError("Desired ResNet architecture is unavailable.")
-    model = architecture(pretrained=bool(hyperparameters.get("pretrained", True)))
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    optimizer_name = str(hyperparameters.get("optimizer", "adam")).lower()
-    learning_rate = float(hyperparameters.get("learning_rate", 1e-3))
-    weight_decay = float(hyperparameters.get("weight_decay", 0.0))
-    if optimizer_name == "sgd":
-        optimizer = torch.optim.SGD(
-            model.parameters(),
-            lr=learning_rate,
-            momentum=float(hyperparameters.get("momentum", 0.9)),
-            weight_decay=weight_decay,
-        )
-    else:
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-        )
-    criterion = nn.CrossEntropyLoss()
-    epochs = int(hyperparameters.get("epochs", 3))
-    total_samples = 0
-    correct = 0
-    running_loss = 0.0
-    for _ in range(epochs):
-        model.train()
-        for inputs, labels in loader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item() * inputs.size(0)
-            _, preds = torch.max(outputs, 1)
-            correct += (preds == labels).sum().item()
-            total_samples += labels.size(0)
-    metrics = {
-        "task_type": "classification",
-        "train_accuracy": safe_json(correct / total_samples if total_samples else None),
-        "train_loss": safe_json(running_loss / total_samples if total_samples else None),
-        "sample_count": total_samples,
-        "classes": num_classes,
-        "epochs": epochs,
-    }
-    return metrics, model
 
 
 def _searchable_space(model_def: Dict[str, Any], client_values: Dict[str, Any]) -> Dict[str, Any]:
@@ -1933,7 +2031,16 @@ def train_model(
     preset: str = "balanced",
     task_type: Optional[str] = None,
     cv_folds: int = 5,
-) -> Tuple[Dict[str, Any], str, str, str]:
+    preprocessing: Optional[Dict[str, Any]] = None,
+    split: Optional[Dict[str, Any]] = None,
+    time_column: Optional[str] = None,
+) -> Tuple[Dict[str, Any], str, str, Dict[str, Any]]:
+    # ``task_type`` overrides the guess made from the label column, and
+    # ``cv_folds`` (< 2 disables it) sets the cross-validation of the tabular
+    # models. ``preprocessing`` and ``split`` are the user-steerable options of
+    # plans C6 and C7, and ``time_column`` names the time column of a
+    # chronological split or a forecast. All are optional and trailing, so
+    # existing callers are unaffected.
     # ``task_type`` overrides the guess made from the label column, and
     # ``cv_folds`` (< 2 disables it) sets the cross-validation of the tabular
     # models. Both are optional and trailing, so existing callers are unaffected.
@@ -1991,40 +2098,67 @@ def train_model(
     # The category of the catalog entry selects the training path - see the routing
     # table in backend/app/README.md.
     
-    # REINFORCEMENT LEARNING MODELS
+    # REINFORCEMENT LEARNING MODELS (plan F2 and C5): Q-Learning is the
+    # textbook table; PPO and DQN are evaluated on fresh episodes with fixed
+    # seeds, next to a uniformly random policy.
     if model_def["category"] == "reinforcement-learning":
         if env_id is None:
             raise ValueError("env_id is required for reinforcement learning models.")
-        metrics = _train_rl_model(model_name, env_id, _effective_params())
-        artifact_path = write_artifact(model_name, metrics)
-        return metrics, "rl", env_id, artifact_path
+        if model_name == "Q-Learning":
+            metrics, bundle = rl_module.train_q_learning(env_id, _effective_params())
+        else:
+            metrics, bundle = rl_module.train_deep_rl(model_name, env_id, _effective_params())
+        artifact = write_artifact(model_name, bundle)
+        return metrics, "rl", env_id, artifact
     
-    # VISION MODELS (ResNet, ViT, etc.)
+    # VISION MODELS (plan C3 and F5): a stratified split, augmentation only
+    # on the training transform, validation metrics with a baseline, early
+    # stopping, and an artifact that carries the exact transform.
     if model_def["category"] == "vision":
         if not dataset_name or not is_image_dataset_path(dataset_name):
             raise ValueError(
                 "Vision models require a dataset that is a folder with one subdirectory per class. "
                 "Pick one of the datasets of the list whose source is 'folder'."
             )
-        
-        # The mode's own suggestions for this model. They are merged into the base
-        # by _effective_params() below, they never overwrite the client's values.
         vision_suggested: Dict[str, Any] = {}
-        if mode == "auto_tune":
-            # Auto-tune: Try different learning rates and batch sizes
-            vision_suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=False)
-        elif mode == "auto_fine_tune":
-            # Auto fine-tune: Adaptive tuning with smaller initial LR for fine-tuning
-            vision_suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=False)
-            vision_suggested["learning_rate"] = vision_suggested.get("learning_rate", 1e-3) * 0.1  # Smaller for fine-tuning
-        elif mode == "llm_fine_tune":
-            # LLM-guided fine-tuning
-            vision_suggested = suggest_hyperparameters(model_name, "classification", optimize_metric, dataset_name, hf_dataset_url, use_llm=True)
-        
-        metrics, model = _train_resnet_image_model(model_name, dataset_name, _effective_params(vision_suggested))
-        artifact_path = write_artifact(model_name, model)
-        return metrics, "local", dataset_name, artifact_path
-    
+        if mode in {"auto_tune", "auto_fine_tune", "llm_fine_tune"}:
+            vision_suggested = suggest_hyperparameters(
+                model_name, "classification", optimize_metric, dataset_name, hf_dataset_url,
+                use_llm=(mode == "llm_fine_tune"),
+            )
+            if mode == "auto_fine_tune" and "learning_rate" in vision_suggested:
+                vision_suggested["learning_rate"] = vision_suggested["learning_rate"] * 0.1
+        architecture = "vit" if model_name == "ViT" else ("resnet50" if model_name == "ResNet50" else "resnet18")
+        metrics, bundle = vision_module.train_image_model(
+            model_name,
+            resolve_dataset_path(dataset_name),
+            _effective_params(vision_suggested),
+            architecture,
+            list(model_def.get("allowed_checkpoints") or []),
+        )
+        artifact = write_artifact(model_name, bundle)
+        return metrics, "local", dataset_name, artifact
+
+    # THE GRAPH MODELS (plan F4): the dataset is a zip of nodes.csv and
+    # edges.csv; the GNN is full-batch with a feature-only baseline.
+    if model_def["category"] == "graph":
+        if not dataset_name:
+            raise ValueError("The graph models need a dataset (a zip of nodes.csv and edges.csv).")
+        # The mode's suggestions are resolved here (this branch runs before
+        # the shared dataset preparation, which is where mode_suggested is
+        # normally built).
+        graph_suggested: Dict[str, Any] = {}
+        if mode in {"auto_tune", "auto_fine_tune", "llm_fine_tune"}:
+            graph_suggested = suggest_hyperparameters(
+                model_name, "classification", optimize_metric, dataset_name, hf_dataset_url,
+                use_llm=(mode == "llm_fine_tune"),
+            )
+        metrics, bundle = graph_module.train_gnn(
+            model_name, resolve_dataset_path(dataset_name), _effective_params(graph_suggested)
+        )
+        artifact = write_artifact(model_name, bundle)
+        return metrics, "local", dataset_name, artifact
+
     # Load and validate dataset for non-vision models
     dataset, dataset_source, dataset_tag = _prepare_dataset(dataset_name, hf_dataset_url, label_column, sep, usecols)
     
@@ -2128,24 +2262,47 @@ def train_model(
             use_llm=True,
         )
     
-    # CLUSTERING MODELS
+    # CLUSTERING MODELS (plan C2): the preprocessing of the tabular path,
+    # held-out scoring where the model has an out-of-sample step, honest
+    # metrics with a baseline, and prediction only where the model can.
     if model_def["category"] == "clustering":
-        X = dataset.drop(columns=[label_column]) if label_column in dataset.columns else dataset
-        metrics, model = _train_clustering(model_name, X, _effective_params(mode_suggested))
-        artifact_path = write_artifact(model_name, model)
-        return metrics, dataset_source, dataset_tag, artifact_path
-    
-    # NLP MODELS (BERT, GPT, etc.)
-    if model_def["category"] == "nlp":
-        metrics, model = _train_transformer_text_classifier(
+        metrics, bundle = clustering_module.train_clustering_model(
             model_name,
-            model_def,
             dataset,
             label_column,
             _effective_params(mode_suggested),
+            test_size=test_size,
+            random_state=random_state,
         )
-        artifact_path = write_artifact(model_name, model)
-        return metrics, dataset_source, dataset_tag, artifact_path
+        artifact = write_artifact(model_name, bundle)
+        return metrics, dataset_source, dataset_tag, artifact
+    
+    # NLP MODELS (plan C4 and F6): the classifiers get a stratified held-out
+    # split; the generation family (GPT, seq2seq, BERT2BERT, LLaMA) trains on
+    # the text or text-pairs columns and reports held-out perplexity or ROUGE
+    # against real baselines. Every checkpoint comes from the allow-list.
+    if model_def["category"] == "nlp":
+        task = model_def.get("task", "classification")
+        effective = _effective_params(mode_suggested)
+        if task == "generation":
+            if model_name == "LLaMA":
+                metrics, bundle = text_module.train_llama_lora(
+                    model_name, dataset, label_column, effective, model_def
+                )
+            else:
+                metrics, bundle = text_module.train_language_model(
+                    model_name, dataset, label_column, effective, model_def
+                )
+        elif task == "seq2seq":
+            metrics, bundle = text_module.train_seq2seq(
+                model_name, dataset, label_column, effective, model_def
+            )
+        else:
+            metrics, bundle = text_module.train_text_classifier(
+                model_name, model_def, dataset, label_column, effective
+            )
+        artifact = write_artifact(model_name, bundle)
+        return metrics, dataset_source, dataset_tag, artifact
     
     # AUTOENCODER: a real encoder-bottleneck-decoder (unsupervised)
     if model_def["category"] == "autoencoder":
@@ -2156,20 +2313,44 @@ def train_model(
             test_size,
             random_state,
         )
-        artifact_path = write_artifact(model_name, bundle)
-        return metrics, dataset_source, dataset_tag, artifact_path
+        artifact = write_artifact(model_name, bundle)
+        return metrics, dataset_source, dataset_tag, artifact
 
-    # SPECIALIZED MODELS: Timeseries, Graph
-    if model_def["category"] in {"timeseries", "graph"}:
-        metrics, model = _train_torch_regression_or_classification(
-            model_name,
-            dataset,
-            label_column,
-            {**_effective_params(mode_suggested), "test_size": test_size, "random_state": random_state},
+    # THE FORECASTING FAMILY (plan F3): RNN, LSTM, TCN and SSM share one
+    # contract - a chronological split, direct multi-step prediction and the
+    # naive baselines - so the comparison view is meaningful.
+    if model_def["category"] == "timeseries":
+        effective = _effective_params(mode_suggested)
+        effective.setdefault("test_size", test_size)
+        effective.setdefault("random_state", random_state)
+        if time_column:
+            effective["time_column"] = time_column
+        metrics, bundle = forecasting_module.train_forecaster(
+            model_name, dataset, label_column, effective,
+            time_column=effective.get("time_column"),
         )
-        artifact_path = write_artifact(model_name, model)
-        return metrics, dataset_source, dataset_tag, artifact_path
+        artifact = write_artifact(model_name, bundle)
+        return metrics, dataset_source, dataset_tag, artifact
+
+
     
+    # THE BOOSTERS IN FORECASTING MODE (plan F3): the same shared contract as
+    # the neural forecasters - lag features, a chronological split and the
+    # naive baselines - behind a hyperparameter, because these three entries
+    # are ordinary tabular regressors otherwise.
+    if bool(hyperparameters.get("forecasting")) and model_def["category"] == "time-series":
+        effective = _effective_params(mode_suggested)
+        effective.setdefault("test_size", test_size)
+        effective.setdefault("random_state", random_state)
+        if time_column:
+            effective["time_column"] = time_column
+        metrics, bundle = forecasting_module.train_forecaster(
+            model_name, dataset, label_column, effective,
+            time_column=effective.get("time_column"),
+        )
+        artifact = write_artifact(model_name, bundle)
+        return metrics, dataset_source, dataset_tag, artifact
+
     # STANDARD TABULAR MODELS (Random Forest, SVM, LR, etc.)
     if label_column not in dataset.columns:
         raise ValueError(f"label column '{label_column}' not found in dataset.")
@@ -2187,10 +2368,17 @@ def train_model(
     _check_task_fits_model(model_name, task_type, y)
 
     # Preprocessing: what is done to every column is decided here (from the
-    # columns alone), and fitted inside the pipeline below.
-    plan = analyze_features(X_raw)
+    # columns alone), and fitted inside the pipeline below. The options of
+    # plan C6 steer it; their defaults equal the behaviour the requests
+    # without options always had.
+    preprocessing_options = parse_preprocessing_options(preprocessing)
+    split_options = parse_split_options(split)
+    plan = analyze_features(X_raw, preprocessing_options)
     X = coerce_features(X_raw, plan)
-    scale = model_name in SCALE_SENSITIVE_MODELS
+    scale = (
+        preprocessing_options.scale == "on"
+        or (preprocessing_options.scale == "auto" and model_name in SCALE_SENSITIVE_MODELS)
+    )
 
     label_encoder: Optional[LabelEncoder] = None
     if task_type == "classification":
@@ -2211,8 +2399,9 @@ def train_model(
                 f"(task_type is '{task_type}')."
             )
 
-    X_train, X_test, y_train, y_test, stratified = split_data(
-        X, y_model, task_type, test_size, random_state
+    X_train, X_test, y_train, y_test, stratified, split_warnings = split_data(
+        X, y_model, task_type, test_size, random_state,
+        options=split_options, split_frame=dataset,
     )
 
     search_results: List[Dict[str, Any]] = []
@@ -2236,7 +2425,7 @@ def train_model(
             space,
             optimize_metric,
             random_state,
-            preprocessor=build_preprocessor(plan, scale),
+            preprocessor=build_preprocessor(plan, scale, preprocessing_options),
         )
         # The search found the best values over the searchable space; the client's
         # values still win when they are merged below by _effective_params().
@@ -2245,8 +2434,8 @@ def train_model(
     effective = _effective_params(mode_suggested)
     pipeline = Pipeline(
         [
-            ("prep", build_preprocessor(plan, scale)),
-            ("model", build_model(model_name, task_type, effective)),
+            ("prep", build_preprocessor(plan, scale, preprocessing_options)),
+            ("model", build_model(model_name, task_type, effective, class_weight=preprocessing_options.class_weight)),
         ]
     )
     pipeline.fit(X_train, y_train)
@@ -2269,6 +2458,28 @@ def train_model(
     except Exception:
         encoded_feature_count = None
 
+    report = preprocessing_report(
+        X_raw,
+        plan,
+        scale,
+        rows_without_label,
+        stratified=stratified if task_type == "classification" else None,
+        task_type_source="request" if task_type_override else "inferred",
+    )
+    # The options that were applied (plan C6) and the warnings of the split
+    # (plan C7) travel with the report, so the run page can show them.
+    report["options"] = {
+        "scale": preprocessing_options.scale,
+        "numeric_impute": preprocessing_options.numeric_impute,
+        "categorical": preprocessing_options.categorical,
+        "max_categories": preprocessing_options.max_categories,
+        "drop_columns": preprocessing_options.drop_columns,
+        "class_weight": preprocessing_options.class_weight,
+        "split_method": split_options.method,
+    }
+    if split_warnings:
+        report["warnings"] = split_warnings
+
     metrics: Dict[str, Any] = {
         "task_type": task_type,
         # The keys every consumer already reads stay present (and None when they
@@ -2287,14 +2498,7 @@ def train_model(
         # The parameters that were really used: the catalog defaults, the mode's
         # suggestions and the client's values, with the preset applied once.
         "model_parameters": safe_json(effective),
-        "preprocessing": preprocessing_report(
-            X_raw,
-            plan,
-            scale,
-            rows_without_label,
-            stratified=stratified if task_type == "classification" else None,
-            task_type_source="request" if task_type_override else "inferred",
-        ),
+        "preprocessing": report,
     }
 
     cv = cross_validate_pipeline(pipeline, X_train, y_train.to_numpy(), task_type, cv_folds, random_state)
@@ -2309,6 +2513,47 @@ def train_model(
         metrics["search_results"] = search_results
         metrics["search_cv"] = cv_used
 
+    # --- the chart data (plan E1), computed here from the held-out rows the
+    # trainer already holds; the runner moves "_charts" into the charts column.
+    try:
+        confusion = None
+        raw_confusion = (held_out.get("confusion_matrix") or {}).get("matrix")
+        if raw_confusion:
+            confusion = np.asarray(raw_confusion)
+        if task_type == "classification":
+            charts = build_classification_charts(
+                y_test.to_numpy(),
+                np.asarray(predictions),
+                probabilities,
+                list(label_encoder.classes_) if label_encoder is not None else None,
+                confusion=confusion,
+            )
+        else:
+            charts = build_regression_charts(y_test.to_numpy(), np.asarray(predictions))
+        fold_chart = cv_fold_chart(cv)
+        if fold_chart:
+            charts["cv_folds"] = fold_chart
+        # The top-20 permutation importances on the held-out rows (plan D5):
+        # a prediction with no reason is hard to trust, and this costs one
+        # prediction per feature.
+        importances = permutation_importances(
+            lambda frame: pipeline.predict(frame),
+            X_test,
+            y_test.to_numpy(),
+            (lambda truth, preds: accuracy_score(truth, preds))
+            if task_type == "classification"
+            else (lambda truth, preds: r2_score(truth, preds)),
+            plan,
+            seed=random_state,
+        )
+        if importances:
+            charts["importances"] = importances
+        metrics["_charts"] = cap_charts(charts)
+    except Exception:
+        # The charts are a view on the run, never a part of its result: a
+        # failure to draw must not fail the training.
+        pass
+
     bundle = TabularModelBundle(
         pipeline=pipeline,
         plan=plan,
@@ -2318,8 +2563,8 @@ def train_model(
         feature_schema=describe_features(X_train, plan),
         label_encoder=label_encoder,
     )
-    artifact_path = write_artifact(model_name, bundle)
-    return metrics, dataset_source, dataset_tag, artifact_path
+    artifact = write_artifact(model_name, bundle)
+    return metrics, dataset_source, dataset_tag, artifact
 
 
 def build_train_payload(run_id: int, model_name: str, dataset_source: str, dataset_tag: str, hyperparameters: Dict[str, Any], metrics: Dict[str, Any], artifact_path: str) -> Dict[str, Any]:

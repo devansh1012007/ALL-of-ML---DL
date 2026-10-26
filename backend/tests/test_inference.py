@@ -127,7 +127,10 @@ def test_the_prediction_matches_what_the_artifact_gives_directly(
     client, auth, churn_run
 ):
     """The endpoint adds no logic of its own: it is the bundle, over HTTP."""
-    bundle = joblib.load(churn_run["artifact_path"])
+    bundle = joblib.load(churn_run["artifact_path"].rstrip("/") + "/model.joblib")
+    bundle = __import__("backend.app.bundles", fromlist=["load_any_artifact"]).load_any_artifact(
+        __import__("pathlib").Path(churn_run["artifact_path"])
+    )
     row = {
         "tenure_months": 2,
         "monthly_charges": 95.0,
@@ -264,7 +267,8 @@ def _point_the_run_at(run_id, artifact_path):
     connection = sqlite3.connect(make_url(DATABASE_URL).database)
     try:
         connection.execute(
-            "UPDATE training_runs SET artifact_path = ? WHERE id = ?", (str(artifact_path), run_id)
+            "UPDATE training_runs SET artifact_path = ?, artifact_sha256 = NULL WHERE id = ?",
+            (str(artifact_path), run_id),
         )
         connection.commit()
     finally:

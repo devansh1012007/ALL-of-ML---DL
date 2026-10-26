@@ -55,7 +55,12 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import KFold, StratifiedKFold, cross_validate, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import (
+    LabelEncoder,
+    OneHotEncoder,
+    OrdinalEncoder,
+    StandardScaler,
+)
 
 # A categorical column with more distinct values than this *and* mostly unique
 # values is an identifier or free text: one-hot encoding it would add one
@@ -74,6 +79,103 @@ SCALE_SENSITIVE_MODELS = frozenset({"Logistic_Regression", "MLR", "KNN", "SVM"})
 
 # A cross-validation fold has to be able to hold both a training and a test part.
 MIN_ROWS_PER_FOLD = 2
+
+
+class PreprocessingOptions:
+    """The user-steerable preparation of plan C6.
+
+    Every default equals the behaviour before the option existed: a request
+    without the ``preprocessing`` object trains exactly as it did.
+    """
+
+    __slots__ = ("scale", "numeric_impute", "categorical", "max_categories", "drop_columns", "class_weight")
+
+    def __init__(
+        self,
+        scale: str = "auto",
+        numeric_impute: str = "median",
+        categorical: str = "onehot",
+        max_categories: Optional[int] = None,
+        drop_columns: Optional[List[str]] = None,
+        class_weight: str = "none",
+    ):
+        if scale not in ("auto", "on", "off"):
+            raise ValueError(f"preprocessing.scale must be auto, on or off; got {scale!r}.")
+        if numeric_impute not in ("median", "mean"):
+            raise ValueError(
+                f"preprocessing.numeric_impute must be median or mean; got {numeric_impute!r}."
+            )
+        if categorical not in ("onehot", "ordinal"):
+            raise ValueError(
+                f"preprocessing.categorical must be onehot or ordinal; got {categorical!r}."
+            )
+        if class_weight not in ("none", "balanced"):
+            raise ValueError(
+                f"preprocessing.class_weight must be none or balanced; got {class_weight!r}."
+            )
+        self.scale = scale
+        self.numeric_impute = numeric_impute
+        self.categorical = categorical
+        self.max_categories = max_categories
+        self.drop_columns = list(drop_columns or [])
+        self.class_weight = class_weight
+
+
+def parse_preprocessing_options(raw: Optional[Dict[str, Any]]) -> PreprocessingOptions:
+    """Read the ``preprocessing`` object of a request (plan C6).
+
+    Unknown keys are refused: a silently ignored option is worse than a loud
+    failure, exactly like a hyperparameter typo.
+    """
+    if not raw:
+        return PreprocessingOptions()
+    if not isinstance(raw, dict):
+        raise ValueError("preprocessing must be an object.")
+    allowed = set(PreprocessingOptions.__slots__)
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown preprocessing option(s): {unknown}")
+    return PreprocessingOptions(**raw)
+
+
+class SplitOptions:
+    """The split and leakage guards of plan C7."""
+
+    __slots__ = ("method", "time_column", "group_column", "dedupe")
+
+    def __init__(
+        self,
+        method: str = "auto",
+        time_column: Optional[str] = None,
+        group_column: Optional[str] = None,
+        dedupe: bool = False,
+    ):
+        if method not in ("auto", "stratified", "random", "chronological", "group"):
+            raise ValueError(
+                f"split.method must be auto, stratified, random, chronological or "
+                f"group; got {method!r}."
+            )
+        if method == "chronological" and not time_column:
+            raise ValueError("split.method 'chronological' needs split.time_column.")
+        if method == "group" and not group_column:
+            raise ValueError("split.method 'group' needs split.group_column.")
+        self.method = method
+        self.time_column = time_column
+        self.group_column = group_column
+        self.dedupe = dedupe
+
+
+def parse_split_options(raw: Optional[Dict[str, Any]]) -> SplitOptions:
+    """Read the ``split`` object of a request (plan C7)."""
+    if not raw:
+        return SplitOptions()
+    if not isinstance(raw, dict):
+        raise ValueError("split must be an object.")
+    allowed = set(SplitOptions.__slots__)
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown split option(s): {unknown}")
+    return SplitOptions(**raw)
 
 
 class FeatureInputError(ValueError):
@@ -107,10 +209,23 @@ def _is_numeric(series: pd.Series) -> bool:
     )
 
 
-def analyze_features(X: pd.DataFrame) -> FeaturePlan:
-    """Decide, from the columns alone (never from the label), how to treat them."""
+def analyze_features(
+    X: pd.DataFrame, options: Optional[PreprocessingOptions] = None
+) -> FeaturePlan:
+    """Decide, from the columns alone (never from the label), how to treat them.
+
+    The options of plan C6 steer it: ``drop_columns`` removes columns by
+    name, ``max_categories`` overrides the one-hot cut, and ``categorical``
+    chooses the encoding. Their defaults equal the behaviour before the
+    options existed.
+    """
+    options = options or PreprocessingOptions()
     plan = FeaturePlan()
+    dropped_by_user = {str(name) for name in options.drop_columns}
     for column in X.columns:
+        if str(column) in dropped_by_user:
+            plan.dropped.append({"column": str(column), "reason": "dropped by the request"})
+            continue
         series = X[column]
         non_null = series.dropna()
         if non_null.empty:
@@ -174,29 +289,46 @@ def coerce_features(X: pd.DataFrame, plan: FeaturePlan) -> pd.DataFrame:
     return out[plan.columns]
 
 
-def build_preprocessor(plan: FeaturePlan, scale: bool) -> ColumnTransformer:
-    """The unfitted preprocessor of a plan. It is fitted inside the pipeline."""
-    numeric_steps: List[Tuple[str, Any]] = [("impute", SimpleImputer(strategy="median"))]
+def build_preprocessor(
+    plan: FeaturePlan,
+    scale: bool,
+    options: Optional[PreprocessingOptions] = None,
+) -> ColumnTransformer:
+    """The unfitted preprocessor of a plan. It is fitted inside the pipeline.
+
+    The options of plan C6 steer the imputation strategy (median or mean)
+    and the categorical encoding (one-hot or ordinal). A categorical column
+    with more values than ``max_categories`` falls back to ordinal: one-hot
+    would add one column per row and teach the model to memorise it.
+    """
+    options = options or PreprocessingOptions()
+    numeric_steps: List[Tuple[str, Any]] = [
+        ("impute", SimpleImputer(strategy=options.numeric_impute))
+    ]
     if scale:
         numeric_steps.append(("scale", StandardScaler()))
     transformers: List[Tuple[str, Any, List[str]]] = []
     if plan.numeric:
         transformers.append(("numeric", Pipeline(numeric_steps), list(plan.numeric)))
     if plan.categorical:
-        transformers.append(
-            (
-                "categorical",
-                Pipeline(
-                    [
-                        ("impute", SimpleImputer(strategy="most_frequent")),
-                        (
-                            "onehot",
-                            OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-                        ),
-                    ]
+        if options.categorical == "ordinal":
+            categorical_steps: List[Tuple[str, Any]] = [
+                ("impute", SimpleImputer(strategy="most_frequent")),
+                (
+                    "ordinal",
+                    OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1),
                 ),
-                list(plan.categorical),
-            )
+            ]
+        else:
+            categorical_steps = [
+                ("impute", SimpleImputer(strategy="most_frequent")),
+                (
+                    "onehot",
+                    OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                ),
+            ]
+        transformers.append(
+            ("categorical", Pipeline(categorical_steps), list(plan.categorical))
         )
     return ColumnTransformer(transformers, sparse_threshold=0.0)
 
@@ -270,16 +402,67 @@ def split_data(
     task_type: str,
     test_size: float,
     random_state: int,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, bool]:
-    """A hold-out split, stratified on the label whenever that is possible.
+    options: Optional[SplitOptions] = None,
+    split_frame: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, bool, List[str]]:
+    """A hold-out split with the leakage guards of plan C7.
 
-    An unstratified split of an imbalanced label can leave a class out of the
-    test rows, which makes every metric meaningless. Stratifying needs at least
-    two rows per class and room for every class in both parts; when that does
-    not hold the split is a plain one, and the report says so.
+    The methods: ``stratified`` (the classification default), ``random``,
+    ``chronological`` (the rows are ordered by ``time_column`` and the test
+    rows are the *latest*: a time series never leaks the future into the
+    training rows) and ``group`` (the rows of one group never straddle the
+    split - the same customer, the same patient). ``dedupe`` removes exact
+    duplicate feature rows across the split, which is how a random split of
+    correlated rows overstates performance.
     """
+    options = options or SplitOptions()
+    warnings_list: List[str] = []
+
+    if options.dedupe and split_frame is not None:
+        before = len(X)
+        duplicated = X.duplicated(keep="first")
+        if duplicated.any():
+            X = X[~duplicated]
+            y = y[~duplicated]
+            split_frame = split_frame.loc[X.index]
+            warnings_list.append(
+                f"{before - len(X)} duplicate feature row(s) were removed (split.dedupe)."
+            )
+
+    method = options.method
+    if method == "auto":
+        method = "stratified" if task_type == "classification" else "random"
+    if method == "chronological":
+        if split_frame is None or options.time_column not in split_frame.columns:
+            raise ValueError(
+                f"The chronological split needs the column '{options.time_column}'."
+            )
+        order = split_frame[options.time_column].rank(method="first").astype(int)
+        n_test = max(1, int(round(test_size * len(y))))
+        test_positions = order > (len(y) - n_test)
+        # The test rows are the latest: no test timestamp precedes a
+        # training timestamp, which a test asserts.
+        X_train, X_test = X[~test_positions], X[test_positions]
+        y_train, y_test = y[~test_positions], y[test_positions]
+        return X_train, X_test, y_train, y_test, False, warnings_list
+    if method == "group":
+        if split_frame is None or options.group_column not in split_frame.columns:
+            raise ValueError(
+                f"The group split needs the column '{options.group_column}'."
+            )
+        groups = split_frame[options.group_column]
+        unique_groups = groups.drop_duplicates().tolist()
+        rng = np.random.RandomState(random_state)
+        rng.shuffle(unique_groups)
+        n_test_groups = max(1, int(round(test_size * len(unique_groups))))
+        test_groups = set(unique_groups[:n_test_groups])
+        in_test = groups.isin(test_groups)
+        X_train, X_test = X[~in_test], X[in_test]
+        y_train, y_test = y[~in_test], y[in_test]
+        return X_train, X_test, y_train, y_test, False, warnings_list
+
     stratify = None
-    if task_type == "classification":
+    if method == "stratified" and task_type == "classification":
         counts = y.value_counts()
         n_test = int(np.ceil(test_size * len(y)))
         n_train = len(y) - n_test
@@ -289,7 +472,23 @@ def split_data(
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=test_size, random_state=random_state, stratify=stratify
     )
-    return X_train, X_test, y_train, y_test, stratify is not None
+
+    # The duplicate guard of plan C7: exact duplicate feature rows across the
+    # train and the test part overstate performance; above one percent it is
+    # a warning the user can act on (split.dedupe removes them).
+    if split_frame is not None and len(X_train) and len(X_test):
+        try:
+            overlap = X_train.merge(X_test.drop_duplicates(), how="inner").shape[0]
+            fraction = overlap / max(1, len(X_test))
+            if fraction > 0.01:
+                warnings_list.append(
+                    f"{fraction:.1%} of the test rows are exact duplicates of "
+                    "training rows: the score is probably overstated. "
+                    "split.dedupe removes them, or use a group/chronological split."
+                )
+        except Exception:
+            pass
+    return X_train, X_test, y_train, y_test, stratify is not None, warnings_list
 
 
 def _json(value: Any) -> Any:
@@ -478,6 +677,9 @@ def prepare_rows(
 
 
 class TabularModelBundle:
+    # The bundle contract of plan C1/D4: a tabular model takes rows.
+    request_kind = "rows"
+
     """A fitted pipeline together with everything needed to use it on new rows.
 
     This is what ``write_artifact`` stores for a supervised tabular run. The
@@ -528,8 +730,13 @@ class TabularModelBundle:
     def _frame(self, rows: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, List[str]]:
         return prepare_rows(self.plan, self.feature_schema, rows)
 
-    def infer(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Predict every row. Raises ``FeatureInputError`` for an unusable value."""
+    def infer(self, request):
+        """Answer a prediction.
+
+        Accepts the request of the v2 dispatch (``{"rows": [...]}``) and the
+        bare list of the v1 callers: the contract grew, the callers did not.
+        """
+        rows = request.get("rows") if isinstance(request, dict) else request
         frame, warnings = self._frame(rows)
         raw = self.pipeline.predict(frame)
         result: Dict[str, Any] = {"task_type": self.task_type, "warnings": warnings}
@@ -559,6 +766,9 @@ class TabularModelBundle:
 
 
 class AutoencoderBundle:
+    # The bundle contract of plan C1/D4: an autoencoder takes rows.
+    request_kind = "rows"
+
     """A fitted autoencoder with its preprocessing and its anomaly threshold.
 
     The network is an encoder-bottleneck-decoder that was trained to reproduce
@@ -630,7 +840,14 @@ class AutoencoderBundle:
             "anomaly_threshold": _json(self.threshold),
         }
 
-    def infer(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def infer(self, request):
+        """Answer a prediction.
+
+        Accepts the request of the v2 dispatch (``{"rows": [...]}``) and the
+        bare list of the v1 callers: the contract grew, the callers did not.
+        """
+        rows = request.get("rows") if isinstance(request, dict) else request
+
         frame, warnings = prepare_rows(self.plan, self.feature_schema, rows)
         matrix = self.preprocessor.transform(frame)
         errors = self.reconstruction_error(matrix)

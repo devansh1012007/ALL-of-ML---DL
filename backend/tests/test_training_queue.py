@@ -173,7 +173,13 @@ def test_a_process_never_trains_more_runs_than_its_concurrency(client, auth, mon
         time.sleep(0.2)
         with lock:
             active[0] -= 1
-        return {"accuracy": 1.0}, "local", "x.csv", "/nonexistent/artifact.joblib"
+        # The artifact record of plan C1 (path, checksum, bytes).
+        return (
+            {"accuracy": 1.0},
+            "local",
+            "x.csv",
+            {"artifact_path": "/nonexistent/artifact.joblib", "artifact_sha256": None, "artifact_bytes": 1},
+        )
 
     monkeypatch.setattr(main, "train_model", slow_training)
 
@@ -197,7 +203,13 @@ def test_a_worker_says_that_it_is_alive_while_it_trains(client, auth, monkeypatc
     def blocked_training(*args, **kwargs):
         started.set()
         release.wait(10)
-        return {"accuracy": 1.0}, "local", "x.csv", "/nonexistent/artifact.joblib"
+        # The artifact record of plan C1 (path, checksum, bytes).
+        return (
+            {"accuracy": 1.0},
+            "local",
+            "x.csv",
+            {"artifact_path": "/nonexistent/artifact.joblib", "artifact_sha256": None, "artifact_bytes": 1},
+        )
 
     monkeypatch.setattr(main, "train_model", blocked_training)
     worker = threading.Thread(target=lambda: asyncio.run(main.drain_training_queue()))
@@ -269,7 +281,12 @@ def test_a_running_run_is_marked_cancelled_and_its_result_is_discarded(
         started.set()
         release.wait(10)
         artifact.write_bytes(b"the artifact of a cancelled run")
-        return {"accuracy": 1.0}, "local", "x.csv", str(artifact)
+        return (
+            {"accuracy": 1.0},
+            "local",
+            "x.csv",
+            {"artifact_path": str(artifact), "artifact_sha256": None, "artifact_bytes": artifact.stat().st_size},
+        )
 
     monkeypatch.setattr(main, "train_model", blocked_training)
     worker = threading.Thread(target=lambda: asyncio.run(main.drain_training_queue()))

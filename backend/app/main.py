@@ -13,9 +13,11 @@ from starlette.datastructures import Headers
 from starlette.datastructures import UploadFile as StarletteUploadFile
 import asyncio
 import functools
+import io
 import json
 import logging
 import os
+import shutil
 import socket
 import time
 import uuid
@@ -55,10 +57,26 @@ from .datasets import (
     unique_dataset_name,
 )
 from . import model_training as model_training_module
-from .tabular import AutoencoderBundle, FeatureInputError, TabularModelBundle
+from . import admin as admin_module
+from . import inference as inference_module
+from .admin import audit as write_audit
+from .admin import REGISTRATION_MODE
+from .bundles import BundleError
+from .inference import PredictRequest, load_bundle_of_run, run_prediction
+from .quotas import (
+    QuotaRefusal,
+    check_predict_rate,
+    check_submit_quota,
+    check_upload_quota,
+    effective_quota,
+    seed_quota_profiles,
+    user_usage,
+)
+from .tabular import FeatureInputError
 from .model_training import (
     TRAINING_MODES,
     TRAINING_PRESETS,
+    get_model_entry,
     list_available_models,
     list_model_categories,
     suggest_hyperparameters,
@@ -88,6 +106,13 @@ async def lifespan(app: FastAPI):
     await verify_schema()
     await reap_the_interrupted_runs()
     await seed_builtin_datasets()
+    # The quota profiles of plan A3 and the first admin of plan A1 (the
+    # bootstrap environment pair, when no admin exists). The manual database
+    # edit for the first admin is gone.
+    try:
+        await admin_module.ensure_admin_and_profiles()
+    except Exception:
+        logger.exception("The startup seeding of the quota profiles failed")
     _slots_in_use = 0
     maintenance = None
     if TRAINING_IN_API:
@@ -162,6 +187,11 @@ async def seed_builtin_datasets() -> None:
                         row_count=rows,
                         columns=columns,
                         label_column=label,
+                        # The content hash (plan E4) and the kind (plan F1)
+                        # of the file: two names for one file are one
+                        # dataset, and the kind says which family trains on it.
+                        content_sha256=datasets_registry.content_sha256(path),
+                        kind=datasets_registry.infer_dataset_kind(path, [c["name"] for c in columns]),
                     )
                 )
             else:
@@ -596,6 +626,11 @@ async def get_current_user(
     user = result.scalars().first()
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
+    # The lifecycle state of the account (plan A1): a suspended or unapproved
+    # account stops working at the next request, because the row is read from
+    # the database every time - the token itself never has to expire.
+    if getattr(user, "status", "active") != "active":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token", headers={"WWW-Authenticate": "Bearer"})
     return user
 
 class UserCreate(BaseModel):
@@ -630,6 +665,15 @@ class TrainRequest(BaseModel):
     # Overrides the guess made from the label column ("classification" or
     # "regression"); None keeps the guess.
     task_type: Optional[str] = None
+    # The user-steerable preprocessing options of plan C6 (scale,
+    # numeric_impute, categorical, max_categories, drop_columns, class_weight).
+    # Every default equals the behaviour before the option existed.
+    preprocessing: Optional[Dict[str, Any]] = None
+    # The split and leakage guards of plan C7: method (auto | stratified |
+    # random | chronological | group), time_column, group_column, dedupe.
+    split: Optional[Dict[str, Any]] = None
+    # The time column of a chronological split or a forecast (plan F3).
+    time_column: Optional[str] = None
     # Folds of the cross-validation of the tabular models; 0 turns it off.
     cv_folds: int = Field(5, ge=0, le=20)
 
@@ -639,7 +683,19 @@ async def get_current_admin(current_user: User = Depends(get_current_user)):
     return current_user
 
 @app.post("/api/v1/register")
-async def register(user: UserCreate, request: Request, db=Depends(get_db)):
+async def register(
+    user: UserCreate,
+    request: Request,
+    invite_code: Optional[str] = None,
+    db=Depends(get_db),
+):
+    """The registration, under the mode of the deployment (plan A1).
+
+    "open" is today's behaviour; "approval" creates the account as ``pending``
+    until an admin approves it; "invite" needs a one-time code an admin
+    created. The status of an account is never an oracle: a pending or
+    suspended login gets the same generic message as a wrong password.
+    """
     address = _client_address(request)
     _check_rate_limit(f"register:{address}", REGISTER_RATE_LIMIT)
     reason = validate_credentials(user.username, user.password)
@@ -647,13 +703,32 @@ async def register(user: UserCreate, request: Request, db=Depends(get_db)):
         logger.warning(f"Registration rejected for '{user.username}': {reason}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
     logger.info(f"Registration attempt for new user: '{user.username}'")
+
+    initial_status = "active"
+    if REGISTRATION_MODE == "approval":
+        initial_status = "pending"
+    elif REGISTRATION_MODE == "invite":
+        if not invite_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Registration is invitation-only: an invite code is required.",
+            )
+        consumed = await _consume_invite(db, invite_code)
+        if not consumed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The invite code is invalid, expired or already used.",
+            )
+
     safe_password = user.password[:72]
     # bcrypt is a CPU-bound hash: running it in the event loop blocks every
     # other request for the duration of the hash.
     hashed = await run_in_threadpool(hash_pass, safe_password)
-    # The role is always 'user': a client-supplied role is never trusted, promoting
-    # an account to admin is a manual database operation.
-    new_user = User(username=user.username, hashed_password=hashed, role="user")
+    # The role is always 'user': a client-supplied role is never trusted; an
+    # admin is created by an admin (plan A1), never by a signup.
+    new_user = User(
+        username=user.username, hashed_password=hashed, role="user", status=initial_status
+    )
     db.add(new_user)
     try:
         await db.commit()
@@ -661,9 +736,35 @@ async def register(user: UserCreate, request: Request, db=Depends(get_db)):
         await db.rollback()
         logger.warning(f"Registration rejected: username '{user.username}' is already taken")
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Username '{user.username}' is already taken")
-    logger.info(f"Success: User '{user.username}' registered with role 'user'.")
+    logger.info(f"Success: User '{user.username}' registered with status '{initial_status}'.")
+    if initial_status != "active":
+        await write_audit(db, new_user.id, "user.registered_pending", "user", new_user.id, {})
     _record_rate_limit(f"register:{address}")
-    return {"message": "User registered successfully"}
+    return {
+        "message": "User registered successfully",
+        "status": initial_status,
+        "note": (
+            "The account waits for an approval before it can log in."
+            if initial_status == "pending"
+            else None
+        ),
+    }
+
+
+async def _consume_invite(db, code: str) -> bool:
+    """Use a one-time registration code (plan A1): hashed, expiring, counted."""
+    import hashlib
+    from .models import Invite
+
+    code_hash = hashlib.sha256(code.strip().encode()).hexdigest()
+    invite = (
+        await db.execute(select(Invite).where(Invite.code_hash == code_hash))
+    ).scalars().first()
+    if invite is None or invite.expires_at < _now() or invite.use_count >= invite.max_uses:
+        return False
+    invite.use_count += 1
+    await db.commit()
+    return True
 
 @app.post("/token")
 async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
@@ -698,16 +799,46 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         _record_rate_limit(account_key)
         _record_rate_limit(address_key)
         raise HTTPException(status_code=400, detail="Incorrect username or password")
+    # The same generic message for a pending or suspended account, so the
+    # status of an account is not an oracle (plan A1).
+    if getattr(user, "status", "active") != "active":
+        _record_rate_limit(account_key)
+        _record_rate_limit(address_key)
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
     logger.info(f"Success: User '{user.username}' logged in successfully.")
+    user.last_login_at = _now()
+    await db.commit()
     access_token = create_token(data={"sub": user.username, "role": user.role})
     _forget_rate_limit(account_key)
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user.role,
+        "registration_mode": REGISTRATION_MODE,
+    }
 
 @app.get("/api/v1/admin/all-users")
 async def get_all_users(admin_user: User = Depends(get_current_admin), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User))
     users = result.scalars().all()
     return [{"id": u.id, "username": u.username, "role": u.role} for u in users]
+
+@app.get("/api/v1/me")
+async def who_am_i(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Who the caller is, with the usage panel of plan A7.
+
+    A quota the user cannot see is experienced as a bug: showing the limit
+    and the reset time turns a refusal into information.
+    """
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "role": current_user.role,
+        "status": current_user.status,
+        "registration_mode": REGISTRATION_MODE,
+        "usage": await user_usage(db, current_user),
+    }
+
 
 @app.get("/api/v1/ml/models")
 async def get_ml_models(current_user: User = Depends(get_current_user)):
@@ -812,6 +943,30 @@ async def get_datasets(current_user: User = Depends(get_current_user), db: Async
     return {"datasets": [dataset_to_dict(dataset) for dataset in datasets]}
 
 
+@app.get("/api/v1/ml/datasets/{dataset_id}/profile")
+async def get_dataset_profile(
+    dataset_id: int,
+    label_column: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Look at the data before training (plan C6): per-column statistics,
+    the label distribution, the duplicate fraction, the correlated pairs, a
+    time-order hint, and the leakage suspects. Cached by the file hash."""
+    dataset = await _dataset_for_user(dataset_id, current_user, db)
+    path = resolve_storage_path(dataset.storage_path)
+    if not path.exists() or path.is_dir():
+        raise HTTPException(status_code=422, detail="The profile needs a tabular CSV dataset.")
+    from .dataset_profile import compute_profile
+
+    label = label_column or dataset.label_column
+    try:
+        profile = await run_in_threadpool(compute_profile, path, label)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=_public_error(exc)) from None
+    return {"dataset_id": dataset.id, "name": dataset.name, **profile}
+
+
 @app.get("/api/v1/ml/datasets/{dataset_id}")
 async def get_dataset(
     dataset_id: int,
@@ -857,6 +1012,9 @@ async def upload_dataset(
     _check_rate_limit(f"upload:{_client_address(request)}", UPLOAD_RATE_LIMIT)
     _record_rate_limit(f"upload:{_client_address(request)}")
 
+    # The upload checks of plan A4 (bytes, dataset count, storage headroom)
+    # run before the body is parsed: the refusal answers immediately.
+
     # The values of the session are read before the first commit: a rollback
     # expires them, and reading them afterwards is an error.
     owner_id = current_user.id
@@ -868,6 +1026,17 @@ async def upload_dataset(
             raise HTTPException(
                 status_code=400, detail="The request has no file."
             )
+        # The per-user upload quota of plan A4: the size of the body that
+        # arrived, against the limits of the caller's profile.
+        upload.file.seek(0, os.SEEK_END)
+        upload_size = upload.file.tell()
+        upload.file.seek(0)
+        try:
+            await check_upload_quota(db, current_user, upload_size)
+        except QuotaRefusal as refusal:
+            raise HTTPException(
+                status_code=refusal.status_code, detail=refusal.detail
+            ) from None
         filename = upload.filename or ""
 
         # The file is inspected and written in a thread: a file of fifty
@@ -904,6 +1073,13 @@ async def upload_dataset(
                 row_count=rows,
                 columns=columns,
                 label_column=label,
+                content_sha256=datasets_registry.content_sha256(
+                    datasets_registry.resolve_storage_path(storage_path)
+                ),
+                kind=datasets_registry.infer_dataset_kind(
+                    datasets_registry.resolve_storage_path(storage_path),
+                    [c["name"] for c in columns],
+                ),
             )
             db.add(dataset)
             try:
@@ -1100,6 +1276,32 @@ async def train_model_endpoint(
         # no data.
         dataset, storage_path = None, None
 
+    # The submit-time quota checks of plan A4: refusing here gives the user
+    # the answer immediately, before a run exists. The error body carries the
+    # quota object (name, limit, used, resets_at), so the interface can show
+    # the reason and the reset time instead of an opaque refusal.
+    entry = get_model_entry(payload.model_name)
+    if not entry.get("implemented", True):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Model '{payload.model_name}' is not implemented: it does not train "
+                "what the catalog advertises."
+            ),
+        )
+    availability = model_training_module.model_availability(entry)
+    if not availability["available"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=availability["reason"])
+    try:
+        await check_submit_quota(
+            db, current_user, entry.get("category", "custom"),
+            dataset.row_count if dataset is not None else None,
+        )
+    except QuotaRefusal as refusal:
+        raise HTTPException(
+            status_code=refusal.status_code, detail=refusal.detail
+        ) from None
+
     if dataset is not None:
         dataset_source, dataset_tag = "local", dataset.name
     elif payload.hf_dataset_url:
@@ -1119,6 +1321,9 @@ async def train_model_endpoint(
         optimize_metric=payload.optimize_metric,
         model_candidates=payload.model_candidates,
         status=STATUS_QUEUED,
+        # The dataset of the run (plan E4): the comparability guard of the
+        # comparison view compares runs by dataset id and content hash.
+        dataset_id=dataset.id if dataset is not None else None,
         # Everything a worker needs: the run no longer depends on the memory
         # of this request, so it survives a restart.
         request_payload={
@@ -1232,10 +1437,18 @@ async def _run_claimed(run_id: int) -> None:
     storage_path = stored.get("storage_path")
     dataset_name = stored.get("dataset_name")
 
+    # A batch prediction above the synchronous limit is a job in this same
+    # queue (plan D3): it reuses the queue, so it gets cancel, limits and
+    # quotas for free.
+    if (stored.get("predict")) is not None:
+        await _run_predict_job(run_id, stored["predict"])
+        return
+
     heartbeat = asyncio.create_task(_heartbeat(run_id))
+    started = time.monotonic()
     try:
         try:
-            metrics, dataset_source, dataset_tag, artifact_path = await run_in_threadpool(
+            metrics, dataset_source, dataset_tag, artifact = await run_in_threadpool(
                 train_model,
                 payload.model_name,
                 storage_path,
@@ -1253,6 +1466,9 @@ async def _run_claimed(run_id: int) -> None:
                 payload.preset,
                 payload.task_type,
                 payload.cv_folds,
+                payload.preprocessing,
+                payload.split,
+                payload.time_column,
             )
         except Exception as exc:
             # The failure is written in the run: the request was answered long
@@ -1262,11 +1478,16 @@ async def _run_claimed(run_id: int) -> None:
                 run_id, STATUS_FAILED, metrics={"error": _public_error(exc)}
             )
             return
+        # The chart data (plan E1) travels inside the metrics and moves into
+        # its own column here: the run list never returns it, GET /charts does.
+        charts = metrics.pop("_charts", None)
         await _finish_run(
             run_id,
             STATUS_COMPLETED,
             metrics=metrics,
-            artifact_path=artifact_path,
+            artifact=artifact,
+            charts=charts,
+            wall_seconds=time.monotonic() - started,
             dataset_source=dataset_source,
             # The tag of a local dataset is its name: the path the registry
             # resolved it to is an internal detail of the server.
@@ -1278,6 +1499,58 @@ async def _run_claimed(run_id: int) -> None:
             await heartbeat
         except BaseException:
             pass
+
+
+async def _run_predict_job(run_id: int, spec: dict) -> None:
+    """A queued batch prediction (plan D3): the artifact is the result CSV."""
+    import csv as _csv
+
+    from .inference import _require_predicting_bundle, load_bundle_of_run
+
+    input_path = Path(spec.get("input_path", ""))
+    source_run_id = spec.get("source_run_id")
+    try:
+        run = None
+        async with AsyncSessionLocal() as session:
+            source = await session.get(TrainingRun, source_run_id)
+            if source is None:
+                raise ValueError("The source run of the batch prediction does not exist.")
+            run, bundle = await load_bundle_of_run(source)
+            _require_predicting_bundle(bundle)
+            if bundle.request_kind != "rows":
+                raise ValueError("This model cannot score a table of rows.")
+        if not input_path.exists():
+            raise ValueError("The input file of the batch prediction is gone.")
+        import pandas as _pd
+
+        frame = _pd.read_csv(input_path)
+        rows = frame.to_dict(orient="records")
+        _, bundle = await load_bundle_of_run(run)
+        result = await run_in_threadpool(bundle.infer, {"rows": rows})
+        predictions = result.get("predictions") or []
+        output = input_path.with_name(input_path.stem + "_result.csv")
+        frame["prediction"] = list(predictions) + [None] * (len(frame) - len(predictions))
+        frame.to_csv(output, index=False)
+        await _finish_run(
+            run_id,
+            STATUS_COMPLETED,
+            metrics={
+                "job_kind": "predict",
+                "source_run_id": source_run_id,
+                "rows": len(frame),
+                "warnings": result.get("warnings", []),
+            },
+            artifact={
+                "artifact_path": str(output),
+                "artifact_sha256": None,
+                "artifact_bytes": output.stat().st_size,
+            },
+        )
+    except Exception as exc:
+        logger.exception("The batch prediction %s failed", run_id)
+        await _finish_run(
+            run_id, STATUS_FAILED, metrics={"error": _public_error(exc), "job_kind": "predict"}
+        )
 
 
 async def _heartbeat(run_id: int) -> None:
@@ -1302,11 +1575,25 @@ async def _heartbeat(run_id: int) -> None:
             logger.warning("Could not write the heartbeat of the run %s", run_id)
 
 
+def _remove_artifact_files(artifact_path: str) -> None:
+    """Remove an artifact of either format: a directory or a single file."""
+    path = Path(artifact_path)
+    try:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
 async def _finish_run(
     run_id: int,
     status: str,
     metrics: Optional[Dict[str, Any]] = None,
-    artifact_path: Optional[str] = None,
+    artifact: Optional[Dict[str, Any]] = None,
+    charts: Optional[Dict[str, Any]] = None,
+    wall_seconds: Optional[float] = None,
     dataset_source: Optional[str] = None,
     dataset_tag: Optional[str] = None,
 ) -> bool:
@@ -1315,12 +1602,24 @@ async def _finish_run(
     The write is conditional (``WHERE status = 'running'``): a run that was
     cancelled while it trained must stay cancelled, so its result is dropped,
     and the artifact it wrote is removed instead of being left orphaned.
+
+    ``artifact`` is the record of ``write_bundle`` (path, sha256, bytes - plan
+    C1/A5); ``charts`` is the chart data of plan E1; ``wall_seconds`` feeds
+    the usage accounting of plan A5.
     """
     values: Dict[str, Any] = {"status": status, "finished_at": _now()}
     if metrics is not None:
         values["metrics"] = metrics
-    if artifact_path is not None:
-        values["artifact_path"] = artifact_path
+    if artifact is not None:
+        values["artifact_path"] = artifact.get("artifact_path")
+        if artifact.get("artifact_sha256") is not None:
+            values["artifact_sha256"] = artifact["artifact_sha256"]
+        if artifact.get("artifact_bytes") is not None:
+            values["artifact_bytes"] = artifact["artifact_bytes"]
+    if charts is not None:
+        values["charts"] = charts
+    if wall_seconds is not None:
+        values["wall_seconds"] = wall_seconds
     if dataset_source is not None:
         values["dataset_source"] = dataset_source
     if dataset_tag is not None:
@@ -1333,13 +1632,9 @@ async def _finish_run(
         )
         await session.commit()
         written = result.rowcount == 1
-    if not written:
+    if not written and artifact is not None:
         logger.info("The run %s is no longer running: its result is discarded", run_id)
-        if artifact_path:
-            try:
-                Path(artifact_path).unlink()
-            except OSError:
-                pass
+        _remove_artifact_files(artifact.get("artifact_path") or "")
     return written
 
 
@@ -1422,6 +1717,25 @@ async def maintenance_loop() -> None:
         await asyncio.sleep(QUEUE_POLL_SECONDS)
 
 
+async def cancel_run_row(db: AsyncSession, run: TrainingRun) -> bool:
+    """Mark a run cancelled (the owner endpoint and the admin queue share it).
+
+    The claim is conditional: a run that already finished stays what it is.
+    """
+    if run.status not in (STATUS_QUEUED, STATUS_RUNNING):
+        return False
+    await db.execute(
+        update(TrainingRun)
+        .where(
+            TrainingRun.id == run.id,
+            TrainingRun.status.in_([STATUS_QUEUED, STATUS_RUNNING]),
+        )
+        .values(status=STATUS_CANCELLED, finished_at=_now())
+    )
+    await db.commit()
+    return True
+
+
 @app.post("/api/v1/ml/runs/{run_id}/cancel")
 async def cancel_training_run(
     run_id: int,
@@ -1471,30 +1785,167 @@ async def cancel_training_run(
     return response
 
 
+# How many runs one page of the list may carry (plan E5). The old endpoint
+# returned every run with its full metrics, which slows down in proportion to
+# usage; the list is now paginated, filterable and searchable, and returns
+# {items, total}.
+RUNS_PAGE_DEFAULT = 20
+RUNS_PAGE_MAX = 100
+
+
+def _run_summary(run: TrainingRun) -> Dict[str, Any]:
+    """The list view of a run: everything except the chart data (plan E1).
+
+    The metrics stay (the list sorts by them); the ``charts`` column never
+    leaves the database through this endpoint.
+    """
+    return {
+        "id": run.id,
+        "model_name": run.model_name,
+        "dataset_source": run.dataset_source,
+        "dataset_tag": run.dataset_tag,
+        "dataset_id": run.dataset_id,
+        "mode": run.mode,
+        "env_id": run.env_id,
+        "optimize_metric": run.optimize_metric,
+        "model_candidates": run.model_candidates,
+        "status": run.status,
+        "job_kind": run.job_kind,
+        "artifact_path": run.artifact_path,
+        "metrics": run.metrics,
+        "tags": run.tags,
+        "note": run.note,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "wall_seconds": run.wall_seconds,
+    }
+
+
 @app.get("/api/v1/ml/runs")
-async def list_training_runs(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(TrainingRun).where(TrainingRun.owner_id == current_user.id).order_by(TrainingRun.created_at.desc()))
-    runs = result.scalars().all()
-    return [
-        {
-            "id": run.id,
-            "model_name": run.model_name,
-            "dataset_source": run.dataset_source,
-            "dataset_tag": run.dataset_tag,
-            "mode": run.mode,
-            "env_id": run.env_id,
-            "optimize_metric": run.optimize_metric,
-            "model_candidates": run.model_candidates,
-            "status": run.status,
-            "artifact_path": run.artifact_path,
-            "metrics": run.metrics,
-            "created_at": run.created_at.isoformat() if run.created_at else None,
-            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
-            "started_at": run.started_at.isoformat() if run.started_at else None,
-            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-        }
-        for run in runs
-    ]
+async def list_training_runs(
+    limit: int = 20,
+    offset: int = 0,
+    status_filter: Optional[str] = None,
+    model: Optional[str] = None,
+    dataset_id: Optional[int] = None,
+    q: Optional[str] = None,
+    tag: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The runs of the caller, paginated, filtered and searched (plan E5)."""
+    limit = max(1, min(int(limit), RUNS_PAGE_MAX))
+    offset = max(0, int(offset))
+    query = select(TrainingRun).where(TrainingRun.owner_id == current_user.id)
+    count_query = select(TrainingRun.id).where(TrainingRun.owner_id == current_user.id)
+    if status_filter:
+        query = query.where(TrainingRun.status == status_filter)
+        count_query = count_query.where(TrainingRun.status == status_filter)
+    if model:
+        query = query.where(TrainingRun.model_name == model)
+        count_query = count_query.where(TrainingRun.model_name == model)
+    if dataset_id is not None:
+        query = query.where(TrainingRun.dataset_id == dataset_id)
+        count_query = count_query.where(TrainingRun.dataset_id == dataset_id)
+    if q:
+        needle = f"%{q}%"
+        query = query.where(
+            or_(TrainingRun.model_name.ilike(needle), TrainingRun.dataset_tag.ilike(needle))
+        )
+        count_query = count_query.where(
+            or_(TrainingRun.model_name.ilike(needle), TrainingRun.dataset_tag.ilike(needle))
+        )
+    if tag:
+        # The tags are a JSON array; the filter matches the array as a string,
+        # which is enough for a tag word and needs no dialect-specific JSON path.
+        query = query.where(TrainingRun.tags.cast(sa.String).ilike(f'%"{tag}"%'))
+        count_query = count_query.where(TrainingRun.tags.cast(sa.String).ilike(f'%"{tag}"%'))
+    query = query.order_by(TrainingRun.created_at.desc()).limit(limit).offset(offset)
+    runs = (await db.execute(query)).scalars().all()
+    total = len((await db.execute(count_query)).all())
+    return {"items": [_run_summary(run) for run in runs], "total": total, "limit": limit, "offset": offset}
+
+@app.get("/api/v1/ml/runs/compare")
+async def compare_runs(
+    ids: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The comparability guard and the shared facts of the runs (plan E4).
+
+    A comparison of runs on different data is the most common way to fool
+    yourself, so the guard comes before the charts: the answer lists every
+    difference (dataset, label, task type, split seed, test fraction) and why
+    the numbers may not be comparable. The user can still proceed.
+    """
+    try:
+        run_ids = [int(part) for part in ids.split(",") if part.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ids must be a comma-separated list of run ids.") from None
+    if not 2 <= len(run_ids) <= 6:
+        raise HTTPException(status_code=422, detail="Compare between 2 and 6 runs.")
+    runs = []
+    for run_id in run_ids:
+        run = (
+            await db.execute(
+                select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id)
+            )
+        ).scalars().first()
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Training run {run_id} not found")
+        runs.append(run)
+    facts = []
+    for run in runs:
+        request = (run.request_payload or {}).get("request") or {}
+        dataset_hash = None
+        if run.dataset_id is not None:
+            dataset = await db.get(Dataset, run.dataset_id)
+            if dataset is not None:
+                dataset_hash = dataset.content_sha256
+        facts.append(
+            {
+                "id": run.id,
+                "model_name": run.model_name,
+                "dataset_id": run.dataset_id,
+                "dataset_hash": dataset_hash,
+                "label_column": request.get("label_column"),
+                "random_state": request.get("random_state"),
+                "test_size": request.get("test_size"),
+                "task_type": (run.metrics or {}).get("task_type"),
+                "metrics": run.metrics,
+                "hyperparameters": run.hyperparameters,
+                "parameters": (run.metrics or {}).get("model_parameters"),
+                "preprocessing": (run.metrics or {}).get("preprocessing"),
+                "cv": (run.metrics or {}).get("cv"),
+            }
+        )
+    # The differences against the first run.
+    differences = []
+    reference = facts[0]
+    for field_name, label in (
+        ("dataset_id", "dataset"),
+        ("dataset_hash", "dataset content"),
+        ("label_column", "label column"),
+        ("task_type", "task type"),
+        ("random_state", "split seed"),
+        ("test_size", "test fraction"),
+    ):
+        values = [fact[field_name] for fact in facts]
+        if len(set(map(str, values))) > 1:
+            differences.append({"field": label, "values": values})
+    return {
+        "runs": facts,
+        "differences": differences,
+        "comparable": not differences,
+        "note": (
+            None
+            if not differences
+            else "These runs differ in " + ", ".join(d["field"] for d in differences)
+            + ": the numbers may not be comparable. You can still look at them."
+        ),
+    }
 
 @app.get("/api/v1/ml/runs/{run_id}")
 async def get_training_run(run_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -1502,20 +1953,48 @@ async def get_training_run(run_id: int, current_user: User = Depends(get_current
     run = result.scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="Training run not found")
+    # The comparability facts of the run (plan E4): what the comparison guard
+    # compares. The dataset content hash comes from the dataset row.
+    dataset_hash = None
+    label_column = None
+    split_seed = None
+    test_size = None
+    task_type = None
+    if run.request_payload:
+        request = run.request_payload.get("request") or {}
+        label_column = request.get("label_column")
+        split_seed = request.get("random_state")
+        test_size = request.get("test_size")
+        task_type = (run.metrics or {}).get("task_type")
+    if run.dataset_id is not None:
+        dataset = await db.get(Dataset, run.dataset_id)
+        if dataset is not None:
+            dataset_hash = dataset.content_sha256
     return {
         "id": run.id,
         "model_name": run.model_name,
         "dataset_source": run.dataset_source,
         "dataset_tag": run.dataset_tag,
+        "dataset_id": run.dataset_id,
+        "dataset_hash": dataset_hash,
+        "label_column": label_column,
+        "random_state": split_seed,
+        "test_size": test_size,
+        "task_type": task_type,
         "hf_dataset_url": run.hf_dataset_url,
         "hyperparameters": run.hyperparameters,
         "metrics": run.metrics,
         "artifact_path": run.artifact_path,
+        "artifact_sha256": run.artifact_sha256,
         "status": run.status,
+        "job_kind": run.job_kind,
         "mode": run.mode,
         "env_id": run.env_id,
         "optimize_metric": run.optimize_metric,
         "model_candidates": run.model_candidates,
+        "tags": run.tags,
+        "note": run.note,
+        "has_charts": bool(run.charts),
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -1523,51 +2002,121 @@ async def get_training_run(run_id: int, current_user: User = Depends(get_current
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
     }
 
+
+@app.get("/api/v1/ml/runs/{run_id}/charts")
+async def get_run_charts(run_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """The chart data of a run (plan E1): the heavy series, outside the list."""
+    result = await db.execute(select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id))
+    run = result.scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    return {"run_id": run.id, "charts": run.charts or {}}
+
+
+@app.patch("/api/v1/ml/runs/{run_id}")
+async def patch_run(
+    run_id: int,
+    body: Dict[str, Any],
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The editable memory of a run (plan E5): tags and a note."""
+    result = await db.execute(select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id))
+    run = result.scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Training run not found")
+    unknown = sorted(set(body) - {"tags", "note"})
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown field(s): {unknown}; only tags and note are editable.")
+    if "tags" in body:
+        tags = body["tags"]
+        if not isinstance(tags, list) or not all(isinstance(t, str) and len(t) <= 40 for t in tags):
+            raise HTTPException(status_code=422, detail="tags must be a list of short strings.")
+        run.tags = tags[:20]
+    if "note" in body:
+        note = body["note"]
+        if not isinstance(note, str) or len(note) > 4000:
+            raise HTTPException(status_code=422, detail="note must be a string of at most 4000 characters.")
+        run.note = note
+    await db.commit()
+    return {"id": run.id, "tags": run.tags, "note": run.note}
+
+
 @app.get("/api/v1/ml/runs/{run_id}/artifact")
 async def download_artifact(run_id: int, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """The artifact of a run: a zip when it is a bundle directory (plan C1)."""
     result = await db.execute(select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id))
     run = result.scalars().first()
     if not run or not run.artifact_path:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    if not Path(run.artifact_path).exists():
+    path = Path(run.artifact_path)
+    if not path.exists():
         raise HTTPException(status_code=404, detail="Artifact file missing")
-    return FileResponse(run.artifact_path, filename=Path(run.artifact_path).name)
+    if path.is_file():
+        return FileResponse(str(path), filename=path.name)
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="Artifact file missing")
+
+    import zipfile
+
+    from fastapi.responses import Response
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for file in sorted(path.rglob("*")):
+            if file.is_file():
+                archive.write(file, file.relative_to(path))
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="artifact_{run.id}.zip"'},
+    )
 
 
-# --- inference ---------------------------------------------------------------
-# A saved artifact is only useful if it can be used: these two routes turn the
-# bundle of a completed run into a prediction service. The schema route says
-# which columns the model expects (the UI builds its form from it), and the
-# predict route answers for rows the model has never seen.
+# --- inference, version 2 (plan D) --------------------------------------------
+# A saved artifact is only useful if it can be used. The schema route says
+# what a request must contain (the UI builds its form from it), and the
+# predict route answers for data the model has never seen. Both dispatch on
+# the bundle: a tabular model takes rows, a text classifier takes texts, a
+# language model takes a prompt, a forecaster takes a window, a graph model
+# takes node ids, a vision model takes an image upload, and a reinforcement
+# learner takes a state.
 
-# The most rows one prediction request may carry. The rows are held in memory
-# and predicted in one call, so the limit is what keeps one request cheap.
+# The most rows one tabular prediction request may carry. The rows are held
+# in memory and predicted in one call, so the limit is what keeps one request
+# cheap.
 PREDICT_MAX_ROWS = int(os.getenv("PREDICT_MAX_ROWS", "1000"))
 
 
-class PredictRequest(BaseModel):
-    # One object per row, keyed by the feature names of the schema. A column
-    # that is left out is treated as missing; the answer lists the warnings.
-    rows: List[Dict[str, Any]] = Field(..., min_length=1)
+async def get_predict_user(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    """The user of a predict request: an API key or the login (plan D2).
+
+    A key is accepted on the predict endpoints only (its scope is
+    ``predict``), is rate-limited per key, and counts against the owner's
+    quota. Everything else needs the login.
+    """
+    if token.startswith("sk-"):
+        user = await inference_module.user_for_api_key(db, token)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or revoked API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        request.state.user = user
+        return user
+    user = await get_current_user(token=token, db=db)
+    request.state.user = user
+    return user
 
 
-@functools.lru_cache(maxsize=8)
-def _load_bundle(path: str, mtime_ns: int) -> Any:
-    """Load an artifact. The key holds the modification time, so a file that
-    was rewritten is loaded again instead of served from the cache."""
-    import joblib
-
-    return joblib.load(path)
-
-
-async def _bundle_for_run(
-    run_id: int, current_user: User, db: AsyncSession
-) -> Tuple[TrainingRun, Any]:
-    """The run of the caller and the bundle of its artifact, or the error to answer with."""
+async def _run_of_caller(run_id: int, current_user: User, db: AsyncSession) -> TrainingRun:
     result = await db.execute(
-        select(TrainingRun).where(
-            TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id
-        )
+        select(TrainingRun).where(TrainingRun.id == run_id, TrainingRun.owner_id == current_user.id)
     )
     run = result.scalars().first()
     if not run:
@@ -1577,29 +2126,7 @@ async def _bundle_for_run(
             status_code=409,
             detail=f"The run is {run.status}: only a completed run can predict.",
         )
-    if not run.artifact_path:
-        raise HTTPException(status_code=404, detail="Artifact not found")
-
-    path = Path(run.artifact_path)
-    models_dir = Path(model_training_module.MODEL_DIR).resolve()
-    # Loading an artifact unpickles it, which runs code: only a file inside the
-    # directory the trainer writes to is ever loaded.
-    if not path.resolve().is_relative_to(models_dir):
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Artifact file missing")
-
-    bundle = await run_in_threadpool(_load_bundle, str(path), path.stat().st_mtime_ns)
-    if not isinstance(bundle, (TabularModelBundle, AutoencoderBundle)):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"The artifact of this {run.model_name} run cannot predict: only the "
-                "supervised tabular models and the autoencoder save a model that knows "
-                "its columns. A run trained before that change has to be trained again."
-            ),
-        )
-    return run, bundle
+    return run
 
 
 @app.get("/api/v1/ml/runs/{run_id}/schema")
@@ -1608,34 +2135,130 @@ async def get_run_schema(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """The columns a prediction request has to carry, with their types, ranges and categories."""
-    run, bundle = await _bundle_for_run(run_id, current_user, db)
-    return {"run_id": run.id, **bundle.schema(), "max_rows": PREDICT_MAX_ROWS}
+    """The shape of a prediction request for the model of a completed run."""
+    run = await _run_of_caller(run_id, current_user, db)
+    try:
+        _, bundle = await load_bundle_of_run(run)
+    except BundleError as exc:
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from None
+    return {
+        "run_id": run.id,
+        **bundle.schema(),
+        "max_rows": PREDICT_MAX_ROWS,
+        "request_kind": bundle.request_kind,
+    }
 
 
 @app.post("/api/v1/ml/runs/{run_id}/predict")
 async def predict_with_run(
     run_id: int,
-    payload: PredictRequest,
-    current_user: User = Depends(get_current_user),
+    body: PredictRequest,
+    current_user: User = Depends(get_predict_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Predict rows with the model of a completed run."""
-    if len(payload.rows) > PREDICT_MAX_ROWS:
+    """Predict with the model of a completed run (any bundle kind, plan D4).
+
+    ``explain=true`` returns the features that moved the prediction
+    (plan D5): coefficient times value for the linear models, a per-row
+    permutation estimate for the rest.
+    """
+    run = await _run_of_caller(run_id, current_user, db)
+    if len(body.rows or []) > PREDICT_MAX_ROWS:
         raise HTTPException(
             status_code=413,
-            detail=f"A request may carry at most {PREDICT_MAX_ROWS} rows, got {len(payload.rows)}.",
+            detail=f"A request may carry at most {PREDICT_MAX_ROWS} rows, got {len(body.rows)}.",
         )
-    run, bundle = await _bundle_for_run(run_id, current_user, db)
     try:
-        result = await run_in_threadpool(bundle.infer, payload.rows)
-    except (FeatureInputError, ValueError) as exc:
-        # A value the model cannot use: the message names the column.
-        raise HTTPException(status_code=422, detail=_public_error(exc))
-    return {
-        "run_id": run.id,
-        "model_name": run.model_name,
-        "n_rows": len(payload.rows),
-        **result,
-    }
+        return await run_prediction(db, current_user, run, body)
+    except BundleError as exc:
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from None
 
+
+@app.post("/api/v1/ml/runs/{run_id}/predict-image")
+async def predict_image_with_run(
+    run_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_predict_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Predict an uploaded image with a vision model (plan C3).
+
+    The upload is capped and decoded with Pillow's decompression-bomb guard
+    on: the artifact carries the exact transform the training used, so the
+    preprocessing of a prediction is the preprocessing of the training.
+    """
+    run = await _run_of_caller(run_id, current_user, db)
+    content = await file.read()
+    await file.close()
+    try:
+        _, bundle = await load_bundle_of_run(run)
+    except BundleError as exc:
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=str(exc)
+        ) from None
+    if bundle.request_kind != "image":
+        raise HTTPException(
+            status_code=422,
+            detail="This model does not take an image upload; use the predict endpoint.",
+        )
+    from fastapi.concurrency import run_in_threadpool
+
+    try:
+        result = await run_in_threadpool(bundle.infer, {"images": [content]})
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=_public_error(exc)) from None
+    return {"run_id": run.id, "model_name": run.model_name, **result}
+
+
+# --- the routers of the plan: the admin API (A6) and inference v2 (D) ----------
+
+
+async def _admin_route_guard(request: Request, admin: User = Depends(get_current_admin)):
+    """The role check of every admin route (plan A10): attached to the router
+    at include time, so an admin route can never be exposed without it."""
+    request.state.admin_user = admin
+    return admin
+
+
+async def _user_route_guard(request: Request, user: User = Depends(get_current_user)):
+    """The login requirement of the inference routes (plan D)."""
+    request.state.user = user
+    return user
+
+
+def _include_inference_router() -> None:
+    """Attach the inference routes with the right authentication (plan D2).
+
+    The predict routes accept an API key as well as the login; everything
+    else (creating a deployment, listing the keys) needs the login, because a
+    key has the predict scope only.
+    """
+    from fastapi.routing import APIRoute
+
+    for route in inference_module.router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if route.path.endswith("/predict") or route.path.endswith("/predict-file"):
+            route.dependencies.append(Depends(get_predict_user))
+        else:
+            route.dependencies.append(Depends(_user_route_guard))
+    app.include_router(inference_module.router)
+
+
+def _include_admin_router() -> None:
+    """Attach the admin routes behind the role check (plan A10).
+
+    The guard is appended to every route before the router is included, so
+    an admin route can never be exposed without it.
+    """
+    for route in admin_module.router.routes:
+        route.dependencies.append(Depends(_admin_route_guard))
+    app.include_router(admin_module.router)
+
+
+_include_admin_router()
+_include_inference_router()

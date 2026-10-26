@@ -92,7 +92,7 @@ def _train(model_name, dataset, **kwargs):
     ["Random_Forest", "Logistic_Regression", "SVM", "KNN", "XGboost_timeseries"],
 )
 def test_a_messy_csv_trains_and_the_report_says_what_was_done(model_name, messy_dataset):
-    metrics, _, _, artifact_path = _train(model_name, messy_dataset)
+    metrics, _, _, artifact = _train(model_name, messy_dataset)
 
     report = metrics["preprocessing"]
     assert report["numeric_columns"] == ["age", "score"]
@@ -106,7 +106,7 @@ def test_a_messy_csv_trains_and_the_report_says_what_was_done(model_name, messy_
     assert report["stratified_split"] is True
     assert report["scaled"] is (model_name in ("Logistic_Regression", "SVM", "KNN"))
     assert metrics["train_size"] + metrics["test_size"] == 239
-    assert Path(artifact_path).exists()
+    assert Path(artifact["artifact_path"]).exists()
 
 
 def test_every_classification_score_comes_with_its_baseline_and_a_cross_validation(
@@ -158,7 +158,7 @@ def test_the_split_is_stratified_so_the_rare_class_reaches_the_test_rows():
     y = pd.Series([0] * 95 + [1] * 5)
     X = pd.DataFrame({"x": np.arange(100.0)})
 
-    _, _, y_train, y_test, stratified = split_data(X, y, "classification", 0.2, 1)
+    _, _, y_train, y_test, stratified, _warnings = split_data(X, y, "classification", 0.2, 1)
 
     assert stratified is True
     assert (y_test == 1).sum() == 1 and (y_train == 1).sum() == 4
@@ -168,7 +168,7 @@ def test_the_split_falls_back_when_a_class_is_too_small_to_stratify():
     y = pd.Series([0] * 30 + [1])
     X = pd.DataFrame({"x": np.arange(31.0)})
 
-    *_, stratified = split_data(X, y, "classification", 0.2, 1)
+    *_, stratified, _warnings = split_data(X, y, "classification", 0.2, 1)
 
     assert stratified is False
 
@@ -194,9 +194,9 @@ def test_cv_folds_zero_turns_the_cross_validation_off(messy_dataset):
 
 
 def test_the_artifact_is_a_bundle_that_predicts_rows_it_has_never_seen(messy_dataset):
-    _, _, _, artifact_path = _train("Random_Forest", messy_dataset)
+    _, _, _, artifact = _train("Random_Forest", messy_dataset)
 
-    bundle = joblib.load(artifact_path)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
     assert isinstance(bundle, TabularModelBundle)
     schema = bundle.schema()
     assert [f["name"] for f in schema["features"]] == ["age", "score", "city"]
@@ -220,8 +220,8 @@ def test_the_artifact_is_a_bundle_that_predicts_rows_it_has_never_seen(messy_dat
 
 
 def test_the_bundle_warns_about_what_the_row_does_not_match(messy_dataset):
-    _, _, _, artifact_path = _train("Logistic_Regression", messy_dataset)
-    bundle = joblib.load(artifact_path)
+    _, _, _, artifact = _train("Logistic_Regression", messy_dataset)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
 
     result = bundle.infer([{"age": 30, "city": "atlantis", "extra": 1}])
 
@@ -233,16 +233,16 @@ def test_the_bundle_warns_about_what_the_row_does_not_match(messy_dataset):
 
 
 def test_a_value_that_is_not_a_number_is_an_error_not_a_silent_nan(messy_dataset):
-    _, _, _, artifact_path = _train("Logistic_Regression", messy_dataset)
-    bundle = joblib.load(artifact_path)
+    _, _, _, artifact = _train("Logistic_Regression", messy_dataset)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
 
     with pytest.raises(FeatureInputError, match="column 'age' must be numeric"):
         bundle.infer([{"age": "forty", "city": "north", "score": 1.0}])
 
 
 def test_a_numeric_label_keeps_its_original_values(classification_dataset):
-    _, _, _, artifact_path = _train("Random_Forest", classification_dataset)
-    bundle = joblib.load(artifact_path)
+    _, _, _, artifact = _train("Random_Forest", classification_dataset)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
 
     result = bundle.infer([{f"feature_{i}": 1.5 for i in range(4)}])
 
@@ -361,8 +361,8 @@ def test_the_preprocessing_is_fitted_on_the_training_rows_only(messy_dataset):
     # The test is only meaningful if the two differ for this dataset.
     assert median_of_the_training_rows != median_of_every_row
 
-    _, _, _, artifact_path = _train("Logistic_Regression", messy_dataset, cv_folds=0)
-    bundle = joblib.load(artifact_path)
+    _, _, _, artifact = _train("Logistic_Regression", messy_dataset, cv_folds=0)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
     numeric = bundle.pipeline.named_steps["prep"].named_transformers_["numeric"]
 
     assert numeric.named_steps["impute"].statistics_[0] == pytest.approx(median_of_the_training_rows)

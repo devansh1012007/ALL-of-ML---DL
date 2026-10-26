@@ -55,6 +55,15 @@ os.environ["SECRET_KEY"] = "test-signing-key-for-the-backend-test-suite"
 # between two steps), so the loop is kept from waking up in the middle of one.
 os.environ["QUEUE_POLL_SECONDS"] = "3600"
 
+# The tests exercise every family through the API, so the free profile of
+# the quota system (plan A3) is seeded with every category enabled - the
+# state an administrator of a demo box would set. The refusal itself is
+# covered by test_quotas.py.
+os.environ["QUOTA_FREE_CATEGORIES"] = (
+    "classification,regression,clustering,autoencoder,time-series,timeseries,"
+    "graph,nlp,vision,reinforcement-learning"
+)
+
 
 def _remove_tmp_db_dir():
     shutil.rmtree(_TMP_DB_DIR, ignore_errors=True)

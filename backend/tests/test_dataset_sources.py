@@ -74,17 +74,32 @@ def test_a_hugging_face_training_needs_no_local_dataset(
     assert "dataset_id" not in detail
 
 
+class _FakeRLBundle:
+    """A stand-in artifact for the RL test: module level, so the bundle
+    writer can pickle it (a class defined inside a function cannot be found
+    again on load)."""
+
+    kind = "rl_policy"
+    request_kind = "state"
+
+    def schema(self):
+        return {"request_kind": self.request_kind, "kind": self.kind}
+
+    def infer(self, request):
+        return {"action": 0}
+
+
 def test_a_reinforcement_learning_training_needs_no_dataset(
     client, auth, monkeypatch, wait_for_run
 ):
     """A reinforcement learning model trains in an environment, not on a file."""
-    from backend.app import model_training
+    from backend.app import rl as rl_module
 
-    monkeypatch.setattr(
-        model_training,
-        "_train_rl_model",
-        lambda model_name, env_id, params: {"mean_reward": 12.5, "env_id": env_id},
-    )
+    def fake_deep_rl(model_name, env_id, params):
+        metrics = {"mean_reward": 12.5, "env_id": env_id}
+        return metrics, _FakeRLBundle()
+
+    monkeypatch.setattr(rl_module, "train_deep_rl", fake_deep_rl)
 
     response = client.post(
         "/api/v1/ml/train",

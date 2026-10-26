@@ -67,8 +67,8 @@ def test_every_tabular_entry_with_a_space_trains_in_auto_tune(
         params = metrics["model_parameters"]
         estimator = build_model(name, metrics["task_type"], params)
         assert estimator is not None
-        assert Path(artifact).exists()
-        assert Path(artifact).parent == isolated_model_dir
+        assert Path(artifact["artifact_path"]).exists()
+        assert Path(artifact["artifact_path"]).parent == isolated_model_dir
 
 
 def test_auto_tune_client_pinned_parameter_is_never_overridden(classification_dataset):

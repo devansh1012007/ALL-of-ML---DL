@@ -73,10 +73,10 @@ def test_it_learns_the_structure_and_beats_the_trivial_reconstruction():
 
 def test_a_row_that_breaks_the_structure_is_flagged_and_a_normal_one_is_not():
     # Three units: the two numbers behind the columns, and the (random) category.
-    _, _, _, artifact_path = _train(
+    _, _, _, artifact = _train(
         _structured_dataset(), latent_dim=3, hidden_units=8, epochs=400
     )
-    bundle = joblib.load(artifact_path)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
     assert isinstance(bundle, AutoencoderBundle)
 
     result = bundle.infer(
@@ -93,10 +93,10 @@ def test_a_row_that_breaks_the_structure_is_flagged_and_a_normal_one_is_not():
 
 
 def test_the_anomaly_threshold_is_the_quantile_of_the_training_errors():
-    metrics, _, _, artifact_path = _train(
+    metrics, _, _, artifact = _train(
         _structured_dataset(), latent_dim=2, hidden_units=8, anomaly_quantile=0.9
     )
-    bundle = joblib.load(artifact_path)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
 
     assert bundle.quantile == 0.9
     assert metrics["anomaly_threshold"] == pytest.approx(bundle.threshold)
@@ -111,10 +111,10 @@ def test_encode_is_the_bottleneck_of_the_trained_network(hidden_units, bottlenec
     If ``encode`` were a look-alike (a different projection), the code and the
     network would disagree, and the returned latent vectors would mean nothing.
     """
-    _, _, _, artifact_path = _train(
+    _, _, _, artifact = _train(
         _structured_dataset(), latent_dim=3, hidden_units=hidden_units, epochs=100
     )
-    bundle = joblib.load(artifact_path)
+    bundle = joblib.load(Path(artifact["artifact_path"]) / "model.joblib")
     assert bundle.bottleneck_layers == bottleneck_layers
 
     frame = pd.DataFrame(
