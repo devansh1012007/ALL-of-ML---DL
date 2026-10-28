@@ -1,9 +1,4 @@
 import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
-import { 
-  Activity, Database, Server, PlusCircle, LogOut, ChevronRight, 
-  Play, CheckCircle, XCircle, Clock, Download, Lock, User, Ban, BarChart3,
-  ShieldCheck
-} from 'lucide-react';
 import { AdminScreen } from './AdminScreen';
 
 // --- CONFIGURATION ---
@@ -74,6 +69,31 @@ const humanizeKey = (value) =>
     .replace(/_/g, ' ')
     .replace(/\bllm\b/gi, 'LLM')
     .replace(/\b\w/g, char => char.toUpperCase());
+
+// "3 min ago", with the exact time left to a tooltip.
+const timeAgo = (iso) => {
+  if (!iso) return '';
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 45) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days} d ago`;
+  return new Date(iso).toLocaleDateString();
+};
+
+const STATUS_LABELS = { queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' };
+const STATUS_TONES = { completed: 'bg-ok', failed: 'bg-bad', running: 'bg-accent animate-pulse', queued: 'bg-faint', cancelled: 'bg-faint' };
+
+// A status is a dot and a word: the word carries the meaning, the dot only helps scanning.
+const StatusMark = ({ status }) => (
+  <span className="inline-flex items-center gap-2">
+    <span className={classNames('dot', STATUS_TONES[status])} aria-hidden="true" />
+    <span>{STATUS_LABELS[status] || status}</span>
+  </span>
+);
 
 const classNames = (...classes) => classes.filter(Boolean).join(' ');
 
@@ -209,19 +229,6 @@ const AuthProvider = ({ children }) => {
 
 // --- COMPONENTS ---
 
-const SidebarItem = ({ icon: Icon, label, active, onClick }) => (
-  <button
-    onClick={onClick}
-    className={classNames(
-      "w-full flex items-center space-x-3 px-4 py-3 rounded-md text-sm font-medium transition-colors",
-      active ? "bg-zinc-800 text-white" : "text-zinc-400 hover:bg-zinc-800/50 hover:text-white"
-    )}
-  >
-    <Icon className="w-5 h-5" />
-    <span>{label}</span>
-  </button>
-);
-
 // --- VIEWS ---
 
 const AuthView = ({ mode, setMode }) => {
@@ -266,78 +273,81 @@ const AuthView = ({ mode, setMode }) => {
     }
   };
 
+  const registering = mode === 'register';
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 text-zinc-100">
-      <div className="w-full max-w-md p-8 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl">
-        <div className="flex justify-center mb-8">
-          <div className="w-12 h-12 bg-blue-600 rounded-lg flex items-center justify-center">
-            <Activity className="w-6 h-6 text-white" />
-          </div>
-        </div>
-        <h2 className="text-2xl font-bold text-center mb-6">
-          {mode === 'login' ? 'Sign In to PrimeTrade' : 'Create an Account'}
-        </h2>
-        {sessionNotice && (
-          <div className="mb-4 p-3 bg-amber-900/40 border border-amber-500 rounded text-amber-200 text-sm">
-            {sessionNotice}
-          </div>
-        )}
-        {error && (
-          <div className="mb-4 p-3 bg-red-900/50 border border-red-500 rounded text-red-200 text-sm">
-            {error}
-          </div>
-        )}
-        <form onSubmit={handleSubmit} className="space-y-4">
+    <main className="min-h-screen flex items-center px-6 py-12">
+      <div className="w-full max-w-sm mx-auto">
+        <p className="text-sm font-medium text-muted mb-10">PrimeTrade AutoML</p>
+        <h1 className="mb-2">{registering ? 'Create an account' : 'Sign in'}</h1>
+        <p className="text-muted mb-8">Train a model on your data, check it against a baseline, and use it.</p>
+        {sessionNotice && <p role="status" className="notice mb-5">{sessionNotice}</p>}
+        {error && <p role="alert" className="notice notice-bad mb-5">{error}</p>}
+        <form onSubmit={handleSubmit} className="space-y-5">
           <div>
-            <label className="block text-sm font-medium text-zinc-400 mb-1">Username</label>
-            <div className="relative">
-              <User className="absolute left-3 top-2.5 w-5 h-5 text-zinc-500" />
-              <input
-                type="text"
-                required
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-zinc-950 border border-zinc-800 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-white"
-                placeholder="admin"
-              />
-            </div>
+            <label htmlFor="auth-username" className="block text-sm text-muted mb-1.5">Username</label>
+            <input
+              id="auth-username" type="text" required autoComplete="username"
+              value={username} onChange={(e) => setUsername(e.target.value)}
+              className="field"
+            />
           </div>
           <div>
-            <label className="block text-sm font-medium text-zinc-400 mb-1">Password</label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-2.5 w-5 h-5 text-zinc-500" />
-              <input
-                type="password"
-                required
-                minLength={mode === 'register' ? 8 : undefined}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-zinc-950 border border-zinc-800 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 text-white"
-                placeholder="••••••••"
-              />
-            </div>
-            {mode === 'register' && (
-              <p className="mt-1 text-xs text-zinc-500">At least 8 characters.</p>
-            )}
+            <label htmlFor="auth-password" className="block text-sm text-muted mb-1.5">Password</label>
+            <input
+              id="auth-password" type="password" required
+              autoComplete={registering ? 'new-password' : 'current-password'}
+              minLength={registering ? 8 : undefined}
+              value={password} onChange={(e) => setPassword(e.target.value)}
+              className="field"
+            />
+            {registering && <p className="mt-1.5 text-sm text-faint">At least 8 characters.</p>}
           </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-medium transition-colors disabled:opacity-50"
-          >
-            {loading ? 'Processing...' : (mode === 'login' ? 'Sign In' : 'Register')}
+          <button type="submit" disabled={loading} className="btn btn-primary w-full">
+            {loading ? (registering ? 'Creating account...' : 'Signing in...') : (registering ? 'Create account' : 'Sign in')}
           </button>
         </form>
-        <div className="mt-6 text-center text-sm text-zinc-500">
-          {mode === 'login' ? (
-            <p>Don't have an account? <button onClick={() => setMode('register')} className="text-blue-500 hover:underline">Register</button></p>
-          ) : (
-            <p>Already have an account? <button onClick={() => setMode('login')} className="text-blue-500 hover:underline">Sign In</button></p>
-          )}
-        </div>
+        <p className="mt-8 text-sm text-muted">
+          {registering ? 'Already have an account? ' : 'New here? '}
+          <button onClick={() => setMode(registering ? 'login' : 'register')} className="link">
+            {registering ? 'Sign in' : 'Create an account'}
+          </button>
+        </p>
       </div>
-    </div>
+    </main>
   );
+};
+
+// The order and the names in which the catalog is shown.
+const MODEL_GROUPS = [
+  ['classification', 'Classification'],
+  ['regression', 'Regression'],
+  ['clustering', 'Clustering and projection'],
+  ['time-series', 'Forecasting with boosted trees'],
+  ['timeseries', 'Forecasting with neural networks'],
+  ['reinforcement-learning', 'Reinforcement learning'],
+  ['autoencoder', 'Autoencoders'],
+  ['nlp', 'Text'],
+  ['vision', 'Images'],
+  ['graph', 'Graphs'],
+];
+const DATASET_KIND_LABELS = {
+  tabular: 'A table (CSV)',
+  timeseries: 'A time series (CSV)',
+  graph: 'A graph (nodes and edges)',
+  text: 'Text',
+  text_pairs: 'Pairs of texts',
+  image_folder: 'A folder of images, one subfolder per class',
+};
+
+// The models in the order and under the names of the catalog page.
+const groupModels = (models) => {
+  const known = new Set(MODEL_GROUPS.map(([c]) => c));
+  const groups = MODEL_GROUPS
+    .map(([category, label]) => [label, models.filter((m) => m.category === category)])
+    .filter(([, rows]) => rows.length > 0);
+  const other = models.filter((m) => !known.has(m.category));
+  if (other.length > 0) groups.push(['Other', other]);
+  return groups;
 };
 
 const ModelsCatalog = () => {
@@ -360,109 +370,116 @@ const ModelsCatalog = () => {
       });
   }, [apiFetch]);
 
-  const getAccuracyRange = (testResults) => {
+  const [query, setQuery] = useState('');
+
+  const expectedResult = (testResults) => {
     if (!testResults) return null;
-    if (testResults.expected_accuracy) return `${(testResults.expected_accuracy[0]*100).toFixed(0)}-${(testResults.expected_accuracy[1]*100).toFixed(0)}%`;
-    if (testResults.expected_r2) return `R²: ${(testResults.expected_r2[0]*100).toFixed(0)}-${(testResults.expected_r2[1]*100).toFixed(0)}%`;
-    if (testResults.expected_silhouette) return `Silhouette: ${testResults.expected_silhouette[0].toFixed(2)}-${testResults.expected_silhouette[1].toFixed(2)}`;
+    const pct = (range) => `${(range[0] * 100).toFixed(0)} to ${(range[1] * 100).toFixed(0)} %`;
+    if (testResults.expected_accuracy) return `Accuracy ${pct(testResults.expected_accuracy)}`;
+    if (testResults.expected_r2) return `R² ${pct(testResults.expected_r2)}`;
+    if (testResults.expected_silhouette) return `Silhouette ${testResults.expected_silhouette[0].toFixed(2)} to ${testResults.expected_silhouette[1].toFixed(2)}`;
     return null;
   };
 
-  const getScalabilityColor = (scalability) => {
-    switch(scalability) {
-      case 'high': return 'bg-emerald-900/20 text-emerald-400 border-emerald-700/50';
-      case 'medium': return 'bg-yellow-900/20 text-yellow-400 border-yellow-700/50';
-      case 'low': return 'bg-orange-900/20 text-orange-400 border-orange-700/50';
-      default: return 'bg-zinc-800 text-zinc-400';
-    }
+  // What a model asks of the server, in the words a user would use.
+  const needsOf = (model) => {
+    const needs = [];
+    if (model.requires_gpu === true) needs.push('needs a GPU');
+    else if (model.requires_gpu === 'recommended') needs.push('GPU recommended');
+    if (model.downloads_checkpoint) needs.push('downloads pretrained weights');
+    return needs.join(', ');
   };
 
+  const visible = models.filter((m) => {
+    const q = query.trim().toLowerCase();
+    return !q || m.name.toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q);
+  });
+  const groups = MODEL_GROUPS
+    .map(([category, label]) => [label, visible.filter((m) => m.category === category)])
+    .filter(([, rows]) => rows.length > 0);
+  const knownCategories = new Set(MODEL_GROUPS.map(([c]) => c));
+  const other = visible.filter((m) => !knownCategories.has(m.category));
+  if (other.length > 0) groups.push(['Other', other]);
+  const runnable = models.filter((m) => m.implemented !== false && m.available !== false).length;
+
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-white mb-2">Model Catalog</h1>
-        <p className="text-zinc-400">Available architectures with performance estimates and recommended use cases.</p>
-      </div>
+    <div className="space-y-8">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="mb-1">Models</h1>
+          <p className="text-muted">
+            {models.length > 0 ? `${runnable} of ${models.length} can run on this server.` : 'What you can train, and what this server can run.'}
+          </p>
+        </div>
+        <input
+          type="search" value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder="Find a model" aria-label="Find a model" className="field max-w-xs"
+        />
+      </header>
+
       {modelsError && (
-        <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">
-          Could not load the model catalog — {modelsError}. Showing the built-in fallback list.
+        <p role="alert" className="notice">
+          The model list could not be loaded ({modelsError}). Showing the built-in list instead.
         </p>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {models.map(model => (
-          <div key={model.name} className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 flex flex-col hover:border-blue-700/50 transition-colors">
-            <div className="flex justify-between items-start mb-2">
-              <h3 className="text-lg font-semibold text-white">{model.name}</h3>
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-1 bg-zinc-800 text-zinc-300 text-xs rounded-full uppercase tracking-wider">
-                  {model.category}
-                </span>
-                {model.implemented === false && (
-                  <span className="px-2 py-1 bg-red-900/20 text-red-400 border border-red-700/50 text-xs rounded-full uppercase tracking-wider">
-                    Not implemented
-                  </span>
-                )}
-              </div>
-            </div>
-            <p className="text-sm text-zinc-400 mb-4 flex-grow">{model.description}</p>
-            
-            {/* Test Results Summary */}
-            {model.implemented === false ? null : model.test_results ? (
-              <div className="mb-4 p-3 bg-zinc-950/50 rounded border border-zinc-800/50 space-y-2">
-                {getAccuracyRange(model.test_results) && (
-                  <div className="text-xs">
-                    <span className="text-zinc-400">Est. Performance:</span>
-                    <span className="text-blue-400 ml-2 font-semibold">{getAccuracyRange(model.test_results)}</span>
-                  </div>
-                )}
-                <div className="text-xs">
-                  <span className="text-zinc-400">Training Time:</span>
-                  <span className="text-zinc-300 ml-2 font-mono">~{model.test_results.typical_training_time_sec}s</span>
-                </div>
-                <div className="text-xs flex items-center gap-2">
-                  <span className="text-zinc-400">Scalability:</span>
-                  <span className={classNames("px-2 py-0.5 rounded text-xs font-semibold border", getScalabilityColor(model.test_results.scalability))}>
-                    {model.test_results.scalability?.charAt(0).toUpperCase() + model.test_results.scalability?.slice(1)}
-                  </span>
-                </div>
-                {model.test_results.best_for && model.test_results.best_for.length > 0 && (
-                  <div className="text-xs pt-2 border-t border-zinc-700/50">
-                    <span className="text-zinc-400 block mb-1">Best for:</span>
-                    <div className="flex flex-wrap gap-1">
-                      {model.test_results.best_for.slice(0, 2).map((use, idx) => (
-                        <span key={idx} className="bg-blue-900/30 text-blue-300 px-1.5 py-0.5 rounded text-xs">
-                          {use.replace(/_/g, ' ').substring(0, 15)}...
-                        </span>
-                      ))}
-                      {model.test_results.best_for.length > 2 && (
-                        <span className="text-zinc-500 text-xs">+{model.test_results.best_for.length - 2} more</span>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p className="mb-4 p-3 bg-zinc-950/50 rounded border border-zinc-800/50 text-xs text-zinc-500">
-                no benchmark data yet
-              </p>
-            )}
 
-            {/* Parameters */}
-            <div className="bg-zinc-950 rounded p-3 text-xs font-mono text-zinc-500 border border-zinc-800/50">
-              {Object.keys(model.parameters).length > 0 ? (
-                <div className="space-y-1">
-                  {Object.entries(model.parameters).slice(0, 3).map(([k, v]) => (
-                    <div key={k}><span className="text-zinc-400">{k}:</span> {JSON.stringify(v)}</div>
-                  ))}
-                  {Object.keys(model.parameters).length > 3 && (
-                    <div className="text-zinc-600">+{Object.keys(model.parameters).length - 3} more parameters</div>
-                  )}
-                </div>
-              ) : "No configurable parameters."}
-            </div>
-          </div>
-        ))}
-      </div>
+      {groups.length === 0 && <p className="text-muted">No model matches that search.</p>}
+
+      {groups.map(([label, rows]) => (
+        <section key={label}>
+          <h2 className="mb-2">{label}</h2>
+          <ul className="border-t border-rule">
+            {rows.map((model) => {
+              const usable = model.implemented !== false && model.available !== false;
+              const result = usable ? expectedResult(model.test_results) : null;
+              const parameters = Object.entries(model.parameters || {});
+              return (
+                <li key={model.name} className="border-b border-rule/60">
+                  <details className="group">
+                    <summary className="flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 -mx-2 px-2 rounded">
+                      <span className="font-medium text-strong w-56 shrink-0 break-words">{model.name}</span>
+                      <span className="text-muted flex-1 min-w-0 line-clamp-1 group-open:line-clamp-none">{model.description}</span>
+                      <span className={classNames('text-sm shrink-0 text-right', usable ? 'text-faint' : 'text-warn')}>
+                        {usable ? needsOf(model) : 'Not available here'}
+                      </span>
+                    </summary>
+                    <div className="pb-5 pt-1 max-w-prose space-y-4">
+                      {!usable && (
+                        <p className="notice">
+                          {model.implemented === false
+                            ? 'This model is not implemented yet.'
+                            : (model.unavailable_reason || 'This server cannot run it.')}
+                        </p>
+                      )}
+                      <dl className="grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 text-sm">
+                        {result && (<><dt className="text-muted">Typical result</dt><dd className="text-ink">{result}</dd></>)}
+                        {usable && model.test_results?.typical_training_time_sec != null && (
+                          <><dt className="text-muted">Typical time</dt><dd className="text-ink">about {model.test_results.typical_training_time_sec} s on small data</dd></>
+                        )}
+                        {usable && model.test_results?.best_for?.length > 0 && (
+                          <><dt className="text-muted">Good for</dt><dd className="text-ink">{model.test_results.best_for.map((u) => u.replace(/_/g, ' ')).join(', ')}</dd></>
+                        )}
+                        {model.dataset_kind && (<><dt className="text-muted">Data</dt><dd className="text-ink">{DATASET_KIND_LABELS[model.dataset_kind] || model.dataset_kind}</dd></>)}
+                        {needsOf(model) && (<><dt className="text-muted">Needs</dt><dd className="text-ink">{needsOf(model)}{model.min_memory_mb ? `, about ${(model.min_memory_mb / 1024).toFixed(model.min_memory_mb >= 10240 ? 0 : 1)} GB of memory` : ''}</dd></>)}
+                        <dt className="text-muted">Parameters</dt>
+                        <dd className="text-ink">
+                          {parameters.length === 0 ? 'None to set.' : (
+                            <span className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+                              {parameters.map(([k, v]) => (
+                                <React.Fragment key={k}><span className="text-muted">{k}</span><span className="tabular-nums break-all">{JSON.stringify(v)}</span></React.Fragment>
+                              ))}
+                            </span>
+                          )}
+                        </dd>
+                      </dl>
+                    </div>
+                  </details>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
     </div>
   );
 };
@@ -492,105 +509,101 @@ const RunsDashboard = ({ navigate }) => {
     return () => clearInterval(interval);
   }, [fetchRuns]);
 
-  const getStatusIcon = (status) => {
-    switch(status) {
-      case 'completed': return <CheckCircle className="w-4 h-4 text-emerald-500" />;
-      case 'failed': return <XCircle className="w-4 h-4 text-red-500" />;
-      case 'cancelled': return <Ban className="w-4 h-4 text-zinc-500" />;
-      case 'running': return <Activity className="w-4 h-4 text-blue-500 animate-pulse" />;
-      // A queued run waits for the worker, it has not started yet.
-      case 'queued': return <Clock className="w-4 h-4 text-zinc-500" />;
-      default: return <Clock className="w-4 h-4 text-zinc-500" />;
-    }
-  };
-
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="space-y-8">
+      <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white mb-2">Training Runs</h1>
-          <p className="text-zinc-400">Monitor and inspect ML pipeline executions.</p>
+          <h1 className="mb-1">Runs</h1>
+          <p className="text-muted">Every training you started, and how it did against doing nothing.</p>
         </div>
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center gap-3">
           <button
             onClick={() => navigate('compare', selected)}
             disabled={selected.length < 2}
-            title="Tick two to four runs"
-            className="flex items-center space-x-2 border border-zinc-700 text-zinc-200 hover:bg-zinc-800 px-4 py-2 rounded-md font-medium disabled:opacity-40 disabled:hover:bg-transparent"
+            title="Tick two to four completed runs"
+            className="btn btn-quiet"
           >
-            <BarChart3 className="w-4 h-4" />
-            <span>Compare{selected.length > 0 ? ` (${selected.length})` : ''}</span>
+            Compare{selected.length > 0 ? ` (${selected.length})` : ''}
           </button>
-          <button 
-            onClick={() => navigate('new-job')}
-            className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>New Training Job</span>
-          </button>
+          <button onClick={() => navigate('new-job')} className="btn btn-primary">New run</button>
         </div>
-      </div>
+      </header>
 
       {runsError && (
-        <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">
-          Could not load the training runs — {runsError}.
-        </p>
+        <p role="alert" className="notice notice-bad">The runs could not be loaded ({runsError}).</p>
       )}
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-zinc-950 text-zinc-400 border-b border-zinc-800 uppercase tracking-wider">
-            <tr>
-              <th className="px-4 py-4 w-8" />
-              <th className="px-6 py-4 font-medium">ID</th>
-              <th className="px-6 py-4 font-medium">Model</th>
-              <th className="px-6 py-4 font-medium">Dataset</th>
-              <th className="px-6 py-4 font-medium">Status</th>
-              <th className="px-6 py-4 font-medium">Primary Metric</th>
-              <th className="px-6 py-4 font-medium">Started</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-800">
-            {runs.length === 0 && !runsError && (
+      {runs.length === 0 && !runsError ? (
+        <div className="panel max-w-prose">
+          <h2 className="mb-1">No runs yet</h2>
+          <p className="text-muted mb-4">Pick a dataset and a model, and the first result appears here with its baseline.</p>
+          <button onClick={() => navigate('new-job')} className="btn btn-primary">Start a run</button>
+        </div>
+      ) : (
+        <div className="overflow-x-auto -mx-3">
+          <table className="w-full text-sm">
+            <thead>
               <tr>
-                <td colSpan="7" className="px-6 py-8 text-center text-zinc-500">No training runs found.</td>
+                <th className="th w-8"><span className="sr-only">Compare</span></th>
+                <th className="th">Model</th>
+                <th className="th">Dataset</th>
+                <th className="th">Status</th>
+                <th className="th">Result</th>
+                <th className="th text-right">Started</th>
               </tr>
-            )}
-            {runs.map(run => (
-              <tr 
-                key={run.id} 
-                onClick={() => navigate('run-details', run.id)}
-                className="hover:bg-zinc-800/50 cursor-pointer transition-colors text-zinc-300"
-              >
-                <td className="px-4 py-4" onClick={(e) => e.stopPropagation()}>
-                  <input
-                    type="checkbox"
-                    aria-label={`Select run ${run.id} for a comparison`}
-                    checked={selected.includes(run.id)}
-                    onChange={() => toggleSelected(run.id)}
-                    disabled={run.status !== 'completed'}
-                  />
-                </td>
-                <td className="px-6 py-4 font-mono text-zinc-500">#{run.id}</td>
-                <td className="px-6 py-4 font-medium text-white">{run.model_name}</td>
-                <td className="px-6 py-4 truncate max-w-[200px]">{run.dataset_tag}</td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center space-x-2">
-                    {getStatusIcon(run.status)}
-                    <span className="capitalize">{run.status}</span>
-                  </div>
-                </td>
-                <td className="px-6 py-4 font-mono">
-                  {primaryMetric(run)}
-                </td>
-                <td className="px-6 py-4 text-zinc-500">
-                  {new Date(run.created_at).toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {runs.map((run) => {
+                const result = resultOf(run);
+                return (
+                  <tr key={run.id} onClick={() => navigate('run-details', run.id)} className="cursor-pointer hover:bg-surface/70">
+                    <td className="td" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select run ${run.id} for a comparison`}
+                        checked={selected.includes(run.id)}
+                        onChange={() => toggleSelected(run.id)}
+                        disabled={run.status !== 'completed'}
+                        className="accent-[rgb(var(--accent))]"
+                      />
+                    </td>
+                    <td className="td">
+                      <span className="inline-flex items-baseline gap-2 whitespace-nowrap">
+                        <a
+                          href={`#/run-details/${run.id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="font-medium text-strong hover:text-accent"
+                        >
+                          {run.model_name}
+                        </a>
+                        <span className="text-faint tabular-nums">#{run.id}</span>
+                      </span>
+                    </td>
+                    <td className="td text-muted"><span className="block truncate max-w-[14rem]">{run.dataset_tag}</span></td>
+                    <td className="td"><StatusMark status={run.status} /></td>
+                    <td className="td tabular-nums">
+                      {result ? (
+                        <>
+                          <span className="text-strong">{result.text}</span>
+                          {result.baseline && <span className="text-faint ml-2">baseline {result.baseline}</span>}
+                          {result.beatsBaseline === false && (
+                            <span className={classNames('ml-2', result.worse ? 'text-warn' : 'text-faint')}>
+                              {result.worse ? 'below baseline' : 'tied with baseline'}
+                            </span>
+                          )}
+                        </>
+                      ) : <span className="text-faint">{run.status === 'completed' ? 'No score' : ''}</span>}
+                    </td>
+                    <td className="td text-right text-muted whitespace-nowrap" title={new Date(run.created_at).toLocaleString()}>
+                      {timeAgo(run.created_at)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 };
@@ -598,7 +611,15 @@ const RunsDashboard = ({ navigate }) => {
 // --- METRICS, EVALUATION AND PREDICTION ---------------------------------------
 
 // Metrics for which a smaller value is the better one.
-const LOWER_IS_BETTER = new Set(['mse', 'rmse', 'mae', 'reconstruction_mse', 'train_loss']);
+const LOWER_IS_BETTER = new Set(['mse', 'rmse', 'mae', 'smape', 'mase', 'reconstruction_mse', 'held_out_perplexity', 'davies_bouldin', 'train_loss']);
+// The numbers of a run that are scores. Only those can be "the best": a larger
+// training set or a higher baseline is not better.
+const SCORE_METRICS = new Set([
+  'accuracy', 'val_accuracy', 'balanced_accuracy', 'f1_macro', 'precision_macro', 'recall_macro', 'roc_auc',
+  'r2', 'mae', 'rmse', 'mse', 'smape', 'mase', 'rouge1', 'rouge2', 'rougeL', 'held_out_perplexity',
+  'reconstruction_mse', 'reconstruction_r2', 'mean_return', 'success_rate', 'silhouette', 'davies_bouldin',
+  'calinski_harabasz', 'trustworthiness', 'explained_variance', 'skill_vs_naive',
+]);
 // Metrics that are not a single number: they get a panel of their own instead
 // of a tile (a tile would print "[object Object]").
 const STRUCTURED_METRICS = new Set([
@@ -609,115 +630,221 @@ const isNumber = (v) => typeof v === 'number' && Number.isFinite(v);
 const formatMetric = (val) => {
   if (val === null || val === undefined) return '—';
   if (typeof val === 'boolean') return val ? 'yes' : 'no';
-  if (typeof val === 'number') return Number.isInteger(val) ? String(val) : val.toFixed(4);
+  if (typeof val === 'number') return Number.isInteger(val) ? String(val) : fmtNum(val);
   return String(val);
 };
 
 // What the list shows for a run: the score, and the baseline it has to beat.
-const primaryMetric = (run) => {
-  const m = run.metrics;
-  if (!m || run.status !== 'completed') return '-';
-  if (isNumber(m.accuracy)) {
-    return `Acc ${m.accuracy.toFixed(3)}` + (isNumber(m.baseline_accuracy) ? ` (baseline ${m.baseline_accuracy.toFixed(3)})` : '');
-  }
-  if (isNumber(m.rmse)) {
-    return `RMSE ${m.rmse.toFixed(3)}` + (isNumber(m.baseline_rmse) ? ` (baseline ${m.baseline_rmse.toFixed(3)})` : '');
-  }
-  if (isNumber(m.reconstruction_mse)) {
-    return `Recon MSE ${m.reconstruction_mse.toFixed(4)}` + (isNumber(m.baseline_mse) ? ` (baseline ${m.baseline_mse.toFixed(4)})` : '');
-  }
-  if (isNumber(m.mse)) return `MSE ${m.mse.toFixed(4)}`;
-  return '-';
+// ``beatsBaseline`` is null when the run has no baseline to compare with.
+const resultOf = (run) => {
+  if (!run.metrics || run.status !== 'completed') return null;
+  const h = headlineOf(run.metrics);
+  if (!h) return null;
+  const hasBase = isNumber(h.baseline);
+  const margin = h.fraction ? 0.01 : 0;
+  const beats = hasBase ? (h.higherBetter ? h.value > h.baseline + margin : h.value < h.baseline) : null;
+  // "Tied" is within the margin; "below" is clearly worse than doing nothing.
+  const worse = hasBase && (h.higherBetter ? h.value < h.baseline - margin : h.value > h.baseline + margin);
+  return {
+    text: `${h.label.replace('Accuracy on held-out images', 'Accuracy').replace('Perplexity on held-out text', 'Perplexity')} ${fmtNum(h.value)}`,
+    baseline: hasBase ? fmtNum(h.baseline) : null,
+    beatsBaseline: beats,
+    worse: !!worse,
+  };
 };
 
-const Bar = ({ label, value, max, tone = 'bg-blue-500', note }) => {
-  const width = isNumber(value) && max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+// Numbers are shown with the precision that means something for their size.
+const fmtNum = (v) => {
+  if (!isNumber(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 1000) return v.toFixed(0);
+  if (abs >= 100) return v.toFixed(1);
+  if (abs >= 0.01 || abs === 0) return v.toFixed(3);
+  return v.toFixed(4);
+};
+
+// Every kind of run reports one number that matters and the number a model that
+// learned nothing would score. This finds the pair, whatever the trainer calls it,
+// so one component can answer the question the product exists for: is it better
+// than doing nothing?
+const headlineOf = (m) => {
+  if (!m) return null;
+  const pick = (candidates, higherBetter) => {
+    const present = candidates.filter(([key]) => isNumber(m[key]));
+    if (present.length === 0) return null;
+    // The strongest baseline is the one that has to be beaten.
+    present.sort((x, y) => (higherBetter ? m[y[0]] - m[x[0]] : m[x[0]] - m[y[0]]));
+    return { value: m[present[0][0]], phrase: present[0][1] };
+  };
+  const make = (key, label, higherBetter, baselines, fraction = false, cvKey = null) => {
+    if (!isNumber(m[key])) return null;
+    const base = pick(baselines, higherBetter);
+    return { key, label, value: m[key], higherBetter, fraction, cvKey, baseline: base ? base.value : null, phrase: base ? base.phrase : null };
+  };
+  const NAIVE = [['baseline_seasonal_naive_mae', 'repeating the last season'], ['baseline_naive_mae', 'repeating the last value']];
+  const MAJORITY = 'always predicting the most frequent class';
   return (
-    <div>
-      <div className="flex justify-between text-xs text-zinc-400 mb-1">
-        <span>{label}</span>
-        <span className="font-mono text-zinc-300">{formatMetric(value)}{note ? ` ${note}` : ''}</span>
-      </div>
-      <div className="h-2 bg-zinc-800 rounded">
-        <div className={`h-2 rounded ${tone}`} style={{ width: `${width}%` }} />
-      </div>
-    </div>
+    make('mean_return', 'Average return', true, [['baseline_mean_return', 'a random policy']]) ||
+    make('held_out_perplexity', 'Perplexity on held-out text', false, [['pretrained_perplexity', 'the same model before fine-tuning'], ['unigram_perplexity', 'a model that only counts words']]) ||
+    make('rouge1', 'ROUGE-1', true, [['baseline_copy_rouge1', 'copying the input']], true) ||
+    make('mae', 'Mean absolute error', false, NAIVE, false, 'mae') ||
+    make('val_accuracy', 'Accuracy on held-out images', true, [['baseline_accuracy', MAJORITY]], true) ||
+    make('accuracy', 'Accuracy', true, [
+      ['baseline_feature_only_accuracy', 'a model that ignores the graph'],
+      ['baseline_majority_accuracy', MAJORITY],
+      ['baseline_accuracy', MAJORITY],
+    ], true, 'accuracy') ||
+    make('rmse', 'Root mean squared error', false, [['baseline_rmse', 'always predicting the training mean']], false, 'rmse') ||
+    make('reconstruction_mse', 'Reconstruction error', false, [['baseline_mse', 'rebuilding every column as its mean']]) ||
+    null
   );
 };
 
-// The score of a run next to what a model that learned nothing scores, plus the
-// cross-validation. A score without its baseline is how a 95%-"no" dataset makes
-// a useless model look good, so the verdict is spelled out.
-const EvaluationPanel = ({ metrics }) => {
-  const rows = [];
-  let verdict = null;
-  if (isNumber(metrics.accuracy)) {
-    rows.push({ label: 'Accuracy', value: metrics.accuracy, max: 1, tone: 'bg-blue-500' });
-    if (isNumber(metrics.baseline_accuracy)) {
-      rows.push({ label: 'Baseline (always the most frequent class)', value: metrics.baseline_accuracy, max: 1, tone: 'bg-zinc-600' });
-      if (metrics.accuracy <= metrics.baseline_accuracy + 0.01) {
-        verdict = 'This model does not beat always predicting the most frequent class: its accuracy says nothing.';
-      }
+// The one bold element of the product: the result drawn against the baseline.
+// A hairline scale; a tick where doing nothing lands; the model's score as a
+// dot with a segment back to the tick (blue when it is better, amber when it
+// is not); and the cross-validation range as a faint band, so the spread of
+// the score is visible next to the score.
+const ResultLine = ({ metrics }) => {
+  const h = headlineOf(metrics);
+  if (!h) return null;
+  const hasBase = isNumber(h.baseline);
+  const cv = metrics.cv && metrics.cv.scores && h.cvKey ? metrics.cv.scores[h.cvKey] : null;
+
+  const points = [h.value, ...(hasBase ? [h.baseline] : []), ...(cv ? [cv.mean - cv.std, cv.mean + cv.std] : [])];
+  let lo = h.fraction ? 0 : Math.min(0, ...points);
+  let hi = h.fraction ? 1 : Math.max(0, ...points);
+  if (!h.fraction) {
+    const pad = (hi - lo || 1) * 0.08;
+    hi += pad;
+    if (lo < 0) lo -= pad;
+  }
+  const at = (v) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo || 1)) * 100));
+
+  const margin = h.fraction ? 0.01 : 0;
+  const better = hasBase ? (h.higherBetter ? h.value > h.baseline + margin : h.value < h.baseline) : null;
+
+  let sentence = null;
+  if (hasBase) {
+    if (h.higherBetter && h.fraction) {
+      const points100 = (h.value - h.baseline) * 100;
+      sentence = Math.abs(points100) < 1
+        ? `About the same as ${h.phrase} (${fmtNum(h.baseline)}).`
+        : `${Math.abs(points100).toFixed(1)} points ${points100 > 0 ? 'better' : 'worse'} than ${h.phrase} (${fmtNum(h.baseline)}).`;
+    } else if (h.higherBetter) {
+      const diff = h.value - h.baseline;
+      sentence = diff === 0
+        ? `The same as ${h.phrase} (${fmtNum(h.baseline)}).`
+        : `${fmtNum(Math.abs(diff))} ${diff > 0 ? 'higher' : 'lower'} than ${h.phrase} (${fmtNum(h.baseline)}).`;
+    } else {
+      const pct = h.baseline !== 0 ? (1 - h.value / h.baseline) * 100 : 0;
+      sentence = Math.abs(pct) < 1
+        ? `About the same as ${h.phrase} (${fmtNum(h.baseline)}).`
+        : `${Math.abs(pct).toFixed(0)} % ${pct > 0 ? 'lower' : 'higher'} than ${h.phrase} (${fmtNum(h.baseline)}).`;
     }
-    if (isNumber(metrics.balanced_accuracy)) rows.push({ label: 'Balanced accuracy', value: metrics.balanced_accuracy, max: 1, tone: 'bg-blue-400' });
-    if (isNumber(metrics.f1_macro)) rows.push({ label: 'F1 (macro)', value: metrics.f1_macro, max: 1, tone: 'bg-blue-400' });
-    if (isNumber(metrics.roc_auc)) rows.push({ label: 'ROC AUC', value: metrics.roc_auc, max: 1, tone: 'bg-blue-400' });
-  } else if (isNumber(metrics.rmse)) {
-    const top = Math.max(metrics.rmse, metrics.baseline_rmse || 0) || 1;
-    rows.push({ label: 'RMSE', value: metrics.rmse, max: top, tone: 'bg-blue-500' });
-    if (isNumber(metrics.baseline_rmse)) {
-      rows.push({ label: 'Baseline RMSE (always the training mean)', value: metrics.baseline_rmse, max: top, tone: 'bg-zinc-600' });
-      if (metrics.rmse >= metrics.baseline_rmse) {
-        verdict = 'This model is not better than always predicting the training mean.';
-      }
-    }
-  } else if (isNumber(metrics.reconstruction_mse)) {
-    const top = Math.max(metrics.reconstruction_mse, metrics.baseline_mse || 0) || 1;
-    rows.push({ label: 'Reconstruction error (held-out rows)', value: metrics.reconstruction_mse, max: top, tone: 'bg-blue-500' });
-    if (isNumber(metrics.baseline_mse)) {
-      rows.push({ label: 'Baseline (the mean of every column)', value: metrics.baseline_mse, max: top, tone: 'bg-zinc-600' });
-      if (metrics.reconstruction_mse >= metrics.baseline_mse) {
-        verdict = 'The bottleneck learned nothing: it reconstructs no better than the mean.';
-      }
+    if (better === false) {
+      const worse = h.higherBetter ? h.value < h.baseline - margin : h.value > h.baseline;
+      // "About the same" already says it; only a model that is clearly worse needs the verdict first.
+      sentence = worse ? `Worse than ${h.phrase}. ${sentence}` : `No better than ${h.phrase} (${fmtNum(h.baseline)}).`;
     }
   }
-  if (rows.length === 0) return null;
 
-  const cv = metrics.cv;
-  const cvScores = cv && cv.scores ? Object.entries(cv.scores) : [];
+  const tickLeft = hasBase ? Math.min(92, Math.max(8, at(h.baseline))) : 0;
+  const segStart = hasBase ? Math.min(at(h.baseline), at(h.value)) : 0;
+  const segEnd = hasBase ? Math.max(at(h.baseline), at(h.value)) : 0;
+  const description = `${h.label} ${fmtNum(h.value)}${hasBase ? `, baseline ${fmtNum(h.baseline)}` : ''}${cv ? `, cross-validation ${fmtNum(cv.mean)} plus or minus ${fmtNum(cv.std)}` : ''}.`;
+
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-      <h3 className="text-lg font-semibold text-white mb-4">Evaluation</h3>
-      <p className="text-xs text-zinc-500 mb-4">
-        Measured on rows the model never trained on
-        {metrics.preprocessing && metrics.preprocessing.stratified_split ? ' (stratified split)' : ''}.
-      </p>
-      <div className="space-y-3">
-        {rows.map((r) => <Bar key={r.label} {...r} />)}
+    <section aria-label="Result" className="panel">
+      <div className="flex flex-wrap items-baseline gap-x-4">
+        <span className="text-5xl font-semibold text-strong tabular-nums tracking-tight">{fmtNum(h.value)}</span>
+        <span className="text-muted">{h.label}{h.higherBetter ? '' : ', lower is better'}</span>
       </div>
-      {verdict && (
-        <p className="mt-4 text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">{verdict}</p>
-      )}
-      {cv && (
-        <div className="mt-5 text-sm text-zinc-300">
-          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-2">Cross-validation</div>
-          {cvScores.length > 0 ? (
-            <>
-              <p className="text-xs text-zinc-500 mb-2">{cv.folds} folds on the training rows (mean ± standard deviation).</p>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                {cvScores.map(([name, s]) => (
-                  <div key={name} className="bg-zinc-950 p-3 rounded-md border border-zinc-800/50">
-                    <div className="text-xs text-zinc-500 uppercase tracking-wider">{name.replace(/_/g, ' ')}</div>
-                    <div className="font-mono text-zinc-200">{formatMetric(s.mean)} ± {formatMetric(s.std)}</div>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : (
-            <p className="text-zinc-500">Not run: {cv.skipped}.</p>
+      {sentence && <p className={classNames('mt-2', better === false ? 'text-warn' : 'text-ink')}>{sentence}</p>}
+
+      {hasBase && (
+        <div className="relative mt-12 mb-1 h-5" role="img" aria-label={description}>
+          <div className="absolute left-0 right-0 top-1/2 h-px bg-rule" />
+          {cv && (
+            <div
+              className="absolute top-1/2 -translate-y-1/2 h-2 rounded-sm bg-accent/25"
+              style={{ left: `${at(cv.mean - cv.std)}%`, width: `${Math.max(0.5, at(cv.mean + cv.std) - at(cv.mean - cv.std))}%` }}
+            />
           )}
+          <div
+            className={classNames('absolute top-1/2 -translate-y-1/2 h-0.5', better === false ? 'bg-warn' : 'bg-accent')}
+            style={{ left: `${segStart}%`, width: `${segEnd - segStart}%` }}
+          />
+          <div className="absolute top-0 bottom-0 w-px bg-muted" style={{ left: `${at(h.baseline)}%` }} />
+          <span className="absolute bottom-full mb-1.5 text-xs text-muted whitespace-nowrap -translate-x-1/2 tabular-nums" style={{ left: `${tickLeft}%` }}>
+            baseline {fmtNum(h.baseline)}
+          </span>
+          <div
+            className={classNames('absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full ring-4 ring-canvas', better === false ? 'bg-warn' : 'bg-accent')}
+            style={{ left: `${at(h.value)}%` }}
+          />
         </div>
       )}
+      {hasBase && (
+        <div className="flex justify-between text-xs text-faint tabular-nums mt-3">
+          <span>{fmtNum(lo)}</span>
+          <span>{fmtNum(hi)}</span>
+        </div>
+      )}
+      {cv && cv.mean !== undefined && (
+        <p className="mt-4 text-sm text-muted tabular-nums">
+          Cross-validation on the training rows: {fmtNum(cv.mean)} ± {fmtNum(cv.std)}
+          {metrics.cv.folds ? ` over ${metrics.cv.folds} folds` : ''}, drawn as the band on the line.
+        </p>
+      )}
+      {metrics.cv && !metrics.cv.scores && metrics.cv.skipped && (
+        <p className="mt-4 text-sm text-faint">Cross-validation did not run: {metrics.cv.skipped}.</p>
+      )}
+    </section>
+  );
+};
+
+// Scores that explain the headline, shown only when the run reports them.
+const OTHER_SCORES = [
+  ['balanced_accuracy', 'Balanced accuracy'], ['f1_macro', 'F1 (macro)'], ['roc_auc', 'ROC AUC'],
+  ['r2', 'R²'], ['mae', 'MAE'], ['rmse', 'RMSE'], ['smape', 'sMAPE %'], ['rouge2', 'ROUGE-2'], ['rougeL', 'ROUGE-L'],
+  ['skill_vs_naive', 'Skill vs naive'], ['mean_return', 'Average return'], ['success_rate', 'Success rate'],
+];
+
+const EvaluationPanel = ({ metrics }) => {
+  const headline = headlineOf(metrics);
+  const shown = OTHER_SCORES.filter(([key]) => isNumber(metrics[key]) && !(headline && headline.key === key));
+  return (
+    <>
+      <ResultLine metrics={metrics} />
+      {shown.length > 0 && (
+        <section className="panel">
+          <h2 className="mb-4">Other scores</h2>
+          <dl className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-x-8 gap-y-5">
+            {shown.map(([key, label]) => (
+              <div key={key}>
+                <dt className="text-sm text-muted">{label}</dt>
+                <dd className="text-lg text-strong tabular-nums">{fmtNum(metrics[key])}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
+    </>
+  );
+};
+
+const Bar = ({ label, value, max, tone = 'bg-accent', note }) => {
+  const width = isNumber(value) && max > 0 ? Math.max(0, Math.min(100, (value / max) * 100)) : 0;
+  return (
+    <div>
+      <div className="flex justify-between text-sm text-muted mb-1">
+        <span>{label}</span>
+        <span className="tabular-nums text-ink">{formatMetric(value)}{note ? ` ${note}` : ''}</span>
+      </div>
+      <div className="h-1.5 bg-raised rounded-full">
+        <div className={`h-1.5 rounded-full ${tone}`} style={{ width: `${width}%` }} />
+      </div>
     </div>
   );
 };
@@ -727,26 +854,26 @@ const ConfusionMatrix = ({ confusion }) => {
   const labels = confusion.labels || [];
   const top = Math.max(1, ...confusion.matrix.flat());
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-      <h3 className="text-lg font-semibold text-white mb-1">Confusion matrix</h3>
-      <p className="text-xs text-zinc-500 mb-4">Rows: the true class. Columns: the predicted class.</p>
+    <section className="panel">
+      <h2 className="mb-1">Where it gets confused</h2>
+      <p className="text-sm text-muted mb-5">Rows are the true class, columns the predicted one. The diagonal is correct.</p>
       <div className="overflow-x-auto">
         <table className="text-sm text-center">
           <thead>
             <tr>
               <th className="px-3 py-2" />
-              {labels.map((l) => <th key={String(l)} className="px-3 py-2 text-zinc-400 font-medium">{String(l)}</th>)}
+              {labels.map((l) => <th key={String(l)} scope="col" className="px-3 py-2 text-muted font-medium">{String(l)}</th>)}
             </tr>
           </thead>
           <tbody>
             {confusion.matrix.map((row, i) => (
               <tr key={i}>
-                <th className="px-3 py-2 text-zinc-400 font-medium text-right">{String(labels[i])}</th>
+                <th scope="row" className="px-3 py-2 text-muted font-medium text-right">{String(labels[i])}</th>
                 {row.map((count, j) => (
                   <td
                     key={j}
-                    className={`px-3 py-2 font-mono ${i === j ? 'text-emerald-200' : 'text-red-200'}`}
-                    style={{ background: `rgba(${i === j ? '16,185,129' : '239,68,68'},${(count / top) * 0.45})` }}
+                    className={classNames('px-4 py-2 tabular-nums rounded-sm', i === j ? 'text-strong' : 'text-ink')}
+                    style={{ background: `rgb(var(${i === j ? '--accent' : '--warn'}) / ${count === 0 ? 0 : 0.12 + (count / top) * 0.4})` }}
                   >
                     {count}
                   </td>
@@ -756,7 +883,7 @@ const ConfusionMatrix = ({ confusion }) => {
           </tbody>
         </table>
       </div>
-    </div>
+    </section>
   );
 };
 
@@ -765,82 +892,130 @@ const PreprocessingReport = ({ report }) => {
   if (!report) return null;
   const list = (items) => (items && items.length ? items.join(', ') : 'none');
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-      <h3 className="text-lg font-semibold text-white mb-4">Data preparation</h3>
-      <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Numeric columns</dt><dd className="text-zinc-300 break-words">{list(report.numeric_columns)}</dd></div>
-        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Categorical columns (one-hot)</dt><dd className="text-zinc-300 break-words">{list(report.categorical_columns)}</dd></div>
-        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Missing cells filled in</dt><dd className="text-zinc-300">{report.missing_cells_imputed}</dd></div>
-        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Rows without a label (dropped)</dt><dd className="text-zinc-300">{report.rows_dropped_missing_label}</dd></div>
-        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Features standardised</dt><dd className="text-zinc-300">{formatMetric(report.scaled)}</dd></div>
-        <div><dt className="text-xs text-zinc-500 uppercase tracking-wider">Task type</dt><dd className="text-zinc-300">{report.task_type_source === 'request' ? 'chosen by you' : 'guessed from the label'}</dd></div>
+    <section className="panel">
+      <h2 className="mb-4">How the data was prepared</h2>
+      <dl className="grid grid-cols-[13rem_1fr] gap-x-6 gap-y-3 max-w-prose">
+        <dt className="text-muted">Number columns</dt><dd className="break-words">{list(report.numeric_columns)}</dd>
+        <dt className="text-muted">Text columns, one-hot encoded</dt><dd className="break-words">{list(report.categorical_columns)}</dd>
+        <dt className="text-muted">Missing values filled in</dt><dd className="tabular-nums">{report.missing_cells_imputed}</dd>
+        <dt className="text-muted">Rows without a label, dropped</dt><dd className="tabular-nums">{report.rows_dropped_missing_label}</dd>
+        <dt className="text-muted">Numbers standardised</dt><dd>{formatMetric(report.scaled)}</dd>
+        <dt className="text-muted">Task type</dt><dd>{report.task_type_source === 'request' ? 'chosen by you' : 'guessed from the label'}</dd>
       </dl>
       {report.dropped_columns && report.dropped_columns.length > 0 && (
-        <div className="mt-4">
-          <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Dropped columns</div>
-          <ul className="text-sm text-amber-200/90 space-y-1">
-            {report.dropped_columns.map((d) => <li key={d.column}><span className="font-mono">{d.column}</span>: {d.reason}</li>)}
+        <div className="mt-5 max-w-prose">
+          <h3 className="mb-2">Columns left out</h3>
+          <ul className="space-y-1">
+            {report.dropped_columns.map((d) => (
+              <li key={d.column} className="notice"><span className="text-strong">{d.column}</span>: {d.reason}</li>
+            ))}
           </ul>
         </div>
       )}
-    </div>
+    </section>
   );
 };
 
-// A prediction form built from the schema of the run: the model says which
-// columns it expects, so nobody has to know them by heart.
+// Asking a model: the form is built from the schema of the run, so nobody has
+// to know the columns by heart. What a model takes depends on its kind, and the
+// server says which in ``request_kind``: a table row, some texts, a prompt, the
+// last window of a series, node ids, the state of an agent, or an image.
 const PredictPanel = ({ runId }) => {
   const { apiFetch } = useContext(AuthContext);
   const [schema, setSchema] = useState(null);
   const [schemaError, setSchemaError] = useState(null);
-  const [values, setValues] = useState({});
-  const [mode, setMode] = useState('form');
-  const [jsonText, setJsonText] = useState('');
+  const [values, setValues] = useState({});          // the row form
+  const [mode, setMode] = useState('form');          // row form or JSON
+  const [text, setText] = useState('');              // texts, prompt, node ids, state, window
+  const [maxTokens, setMaxTokens] = useState(64);
+  const [file, setFile] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
-    setSchema(null);
-    setSchemaError(null);
-    setResult(null);
+    setSchema(null); setSchemaError(null); setResult(null); setError(null);
     apiFetch(`/api/v1/ml/runs/${runId}/schema`)
       .then((s) => {
         if (!active) return;
         setSchema(s);
-        const initial = {};
-        s.features.forEach((f) => { initial[f.name] = f.default === undefined ? '' : String(f.default); });
-        setValues(initial);
-        setJsonText(JSON.stringify([Object.fromEntries(s.features.map((f) => [f.name, f.default]))], null, 2));
+        const kind = s.request_kind || 'rows';
+        if (kind === 'rows') {
+          const initial = {};
+          (s.features || []).forEach((f) => { initial[f.name] = f.default === undefined ? '' : String(f.default); });
+          setValues(initial);
+          setText(JSON.stringify([Object.fromEntries((s.features || []).map((f) => [f.name, f.default]))], null, 2));
+        } else if (kind === 'window_rows') {
+          // One line per time step, columns separated by commas: the target first, then the covariates.
+          const columns = (s.features || []).length || 1;
+          setText(Array.from({ length: s.window || 1 }, () => Array(columns).fill('0').join(', ')).join('\n'));
+        } else if (kind === 'state') {
+          setText('0');
+        } else {
+          setText('');
+        }
       })
-      .catch((err) => { if (active) setSchemaError(err.message || 'The model cannot predict.'); });
+      .catch((err) => { if (active) setSchemaError(err.message || 'This model cannot predict.'); });
     return () => { active = false; };
   }, [apiFetch, runId]);
 
-  const rowFromForm = () => {
-    const row = {};
-    schema.features.forEach((f) => {
-      const raw = values[f.name];
-      if (raw === '' || raw === undefined) return; // left out: the model imputes it
-      row[f.name] = f.kind === 'numeric' ? Number(raw) : raw;
-    });
-    return row;
+  const body = () => {
+    const kind = schema.request_kind || 'rows';
+    if (kind === 'rows') {
+      if (mode === 'json') {
+        const rows = JSON.parse(text);
+        if (!Array.isArray(rows)) throw new Error('The rows have to be a JSON array of objects.');
+        return { rows };
+      }
+      const row = {};
+      (schema.features || []).forEach((f) => {
+        const raw = values[f.name];
+        if (raw === '' || raw === undefined) return; // left out: the model fills it in as in training
+        row[f.name] = f.kind === 'numeric' ? Number(raw) : raw;
+      });
+      return { rows: [row] };
+    }
+    if (kind === 'texts') {
+      const texts = text.split('\n').map((t) => t.trim()).filter(Boolean);
+      if (texts.length === 0) throw new Error('Write at least one text, one per line.');
+      return { texts };
+    }
+    if (kind === 'prompt') {
+      if (!text.trim()) throw new Error('Write a prompt.');
+      return { prompt: text, max_new_tokens: Number(maxTokens) || 64 };
+    }
+    if (kind === 'window_rows') {
+      const window_rows = text.split('\n').map((l) => l.trim()).filter(Boolean)
+        .map((l) => l.split(/[,\s]+/).filter(Boolean).map(Number));
+      if (window_rows.some((r) => r.some((v) => Number.isNaN(v)))) throw new Error('Every value has to be a number.');
+      return { window_rows };
+    }
+    if (kind === 'node_ids') {
+      const node_ids = text.split(/[,\s]+/).filter(Boolean);
+      if (node_ids.length === 0) throw new Error('Give at least one node id.');
+      return { node_ids };
+    }
+    if (kind === 'state') {
+      const t = text.trim();
+      if (!t) throw new Error('Give a state.');
+      // A table agent takes one whole number; a policy takes the observation vector.
+      return { state: /[,\s]/.test(t) ? t.split(/[,\s]+/).filter(Boolean).map(Number) : Number(t) };
+    }
+    throw new Error(`The interface does not know the request kind "${kind}".`);
   };
 
   const predict = async () => {
-    setLoading(true);
-    setError(null);
-    setResult(null);
+    setLoading(true); setError(null); setResult(null);
     try {
-      let rows;
-      if (mode === 'json') {
-        rows = JSON.parse(jsonText);
-        if (!Array.isArray(rows)) throw new Error('The rows have to be a JSON array of objects.');
+      if ((schema.request_kind || 'rows') === 'image') {
+        if (!file) throw new Error('Choose an image first.');
+        const form = new FormData();
+        form.append('file', file);
+        setResult(await apiFetch(`/api/v1/ml/runs/${runId}/predict-image`, { method: 'POST', body: form }));
       } else {
-        rows = [rowFromForm()];
+        setResult(await apiFetch(`/api/v1/ml/runs/${runId}/predict`, { method: 'POST', body: JSON.stringify(body()) }));
       }
-      setResult(await apiFetch(`/api/v1/ml/runs/${runId}/predict`, { method: 'POST', body: JSON.stringify({ rows }) }));
     } catch (err) {
       setError(err.message || 'The prediction failed.');
     } finally {
@@ -850,100 +1025,158 @@ const PredictPanel = ({ runId }) => {
 
   if (schemaError) {
     return (
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-white mb-2">Predict</h3>
-        <p className="text-sm text-zinc-500">{schemaError}</p>
-      </div>
+      <section className="panel">
+        <h2 className="mb-2">Use this model</h2>
+        <p className="text-muted">{schemaError}</p>
+      </section>
     );
   }
-  if (!schema) return <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6 text-zinc-500">Loading the model…</div>;
+  if (!schema) return <section className="panel"><p className="text-muted">Loading the model...</p></section>;
 
-  const inputClass = 'w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white text-sm focus:ring-2 focus:ring-blue-500';
+  const kind = schema.request_kind || 'rows';
+  const hints = {
+    texts: 'One text per line.',
+    prompt: 'The model continues this text.',
+    window_rows: `Exactly ${schema.window} lines, oldest first. Each line: ${(schema.features || []).join(', ') || 'the value'}.`,
+    node_ids: `Node ids from the graph, separated by commas or spaces (${schema.nodes ?? '?'} nodes).`,
+    state: schema.n_states != null ? `A state from 0 to ${schema.n_states - 1} (${schema.n_actions} actions).` : 'The observation: numbers separated by commas.',
+    image: `An image of one of: ${(schema.classes || []).join(', ')}.`,
+  };
+
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-      <div className="flex justify-between items-center mb-4">
-        <h3 className="text-lg font-semibold text-white">Predict with this model</h3>
-        <div className="flex text-xs border border-zinc-800 rounded-md overflow-hidden">
-          {['form', 'json'].map((m) => (
-            <button key={m} onClick={() => setMode(m)} className={`px-3 py-1 ${mode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'}`}>
-              {m === 'form' ? 'One row' : 'Several rows (JSON)'}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {mode === 'form' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {schema.features.map((f) => (
-            <div key={f.name}>
-              <label className="block text-xs text-zinc-400 mb-1">
-                {f.name}
-                <span className="text-zinc-600">{f.kind === 'numeric' ? ` (${formatMetric(f.min)} to ${formatMetric(f.max)})` : ''}</span>
-              </label>
-              {f.kind === 'categorical' && !f.categories_truncated ? (
-                <select value={values[f.name] ?? ''} onChange={(e) => setValues({ ...values, [f.name]: e.target.value })} className={inputClass}>
-                  <option value="">(missing)</option>
-                  {f.categories.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              ) : (
-                <input
-                  type={f.kind === 'numeric' ? 'number' : 'text'} step="any"
-                  value={values[f.name] ?? ''}
-                  onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}
-                  className={inputClass}
-                />
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <textarea value={jsonText} onChange={(e) => setJsonText(e.target.value)} rows={8} className={`${inputClass} font-mono`} />
-      )}
-
-      <div className="mt-4 flex items-center space-x-3">
-        <button onClick={predict} disabled={loading} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md font-medium disabled:opacity-50">
-          {loading ? 'Predicting…' : 'Predict'}
-        </button>
-        <span className="text-xs text-zinc-500">A field left empty is treated as missing, as in training.</span>
-      </div>
-
-      {error && <p className="mt-4 text-sm text-red-300 border border-red-900 rounded-md px-3 py-2">{error}</p>}
-      {result && <PredictionResult result={result} />}
-    </div>
-  );
-};
-
-const PredictionResult = ({ result }) => (
-  <div className="mt-5 space-y-3">
-    {result.warnings && result.warnings.length > 0 && (
-      <ul className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 space-y-1">
-        {result.warnings.map((w, i) => <li key={i}>{w}</li>)}
-      </ul>
-    )}
-    {result.predictions.map((p, i) => (
-      <div key={i} className="bg-zinc-950 border border-zinc-800/50 rounded-md p-4">
-        <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Row {i + 1}</div>
-        <div className="text-2xl font-mono text-white">{isNumber(p) ? formatMetric(p) : String(p)}</div>
-        {result.probabilities && result.probabilities[i] && (
-          <div className="mt-3 space-y-2">
-            {Object.entries(result.probabilities[i]).map(([label, prob]) => (
-              <Bar key={label} label={String(label)} value={prob} max={1} tone={String(label) === String(p) ? 'bg-emerald-500' : 'bg-zinc-600'} />
+    <section className="panel">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
+        <h2 className="whitespace-nowrap">Use this model</h2>
+        {kind === 'rows' && (
+          <div className="inline-flex text-sm border border-rule rounded-md overflow-hidden" role="group" aria-label="Input style">
+            {[['form', 'One row'], ['json', 'Several rows']].map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)} aria-pressed={mode === m}
+                className={classNames('px-3 h-8 inline-flex items-center', mode === m ? 'bg-raised text-strong' : 'text-muted hover:text-strong')}>
+                {label}
+              </button>
             ))}
           </div>
         )}
       </div>
-    ))}
-    {result.reconstruction_error && result.reconstruction_error.map((err, i) => (
-      <div key={i} className="bg-zinc-950 border border-zinc-800/50 rounded-md p-4">
-        <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Row {i + 1}</div>
-        <div className={`text-xl font-mono ${result.is_anomaly[i] ? 'text-red-300' : 'text-emerald-300'}`}>
-          {result.is_anomaly[i] ? 'Unusual' : 'Usual'} — error {formatMetric(err)}
+      {schema.output && <p className="text-sm text-muted mb-5">{schema.output.charAt(0).toUpperCase() + schema.output.slice(1)}.</p>}
+
+      {kind === 'rows' && mode === 'form' && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+          {(schema.features || []).map((f) => (
+            <div key={f.name}>
+              <label htmlFor={`f-${f.name}`} className="block text-sm text-muted mb-1">
+                {f.name}
+                {f.kind === 'numeric' && <span className="text-faint tabular-nums">{` (${formatMetric(f.min)} to ${formatMetric(f.max)})`}</span>}
+              </label>
+              {f.kind === 'categorical' && !f.categories_truncated ? (
+                <select id={`f-${f.name}`} value={values[f.name] ?? ''} onChange={(e) => setValues({ ...values, [f.name]: e.target.value })} className="field">
+                  <option value="">(missing)</option>
+                  {f.categories.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              ) : (
+                <input id={`f-${f.name}`} type={f.kind === 'numeric' ? 'number' : 'text'} step="any"
+                  value={values[f.name] ?? ''} onChange={(e) => setValues({ ...values, [f.name]: e.target.value })} className="field" />
+              )}
+            </div>
+          ))}
         </div>
-        <div className="text-xs text-zinc-500 mt-1">Threshold {formatMetric(result.threshold)}. Latent code: [{result.latent[i].map((v) => v.toFixed(3)).join(', ')}]</div>
+      )}
+      {kind === 'rows' && mode === 'json' && (
+        <textarea aria-label="Rows as JSON" value={text} onChange={(e) => setText(e.target.value)} rows={8} className="field font-mono text-sm" />
+      )}
+
+      {['texts', 'prompt', 'window_rows', 'node_ids'].includes(kind) && (
+        <div>
+          <label htmlFor="predict-input" className="block text-sm text-muted mb-1">{hints[kind]}</label>
+          <textarea id="predict-input" value={text} onChange={(e) => setText(e.target.value)}
+            rows={kind === 'node_ids' ? 2 : 5} className={classNames('field', kind === 'window_rows' && 'font-mono text-sm')} />
+        </div>
+      )}
+      {kind === 'prompt' && (
+        <div className="mt-3 max-w-[12rem]">
+          <label htmlFor="max-tokens" className="block text-sm text-muted mb-1">Longest answer, in tokens</label>
+          <input id="max-tokens" type="number" min="1" max="512" value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} className="field" />
+        </div>
+      )}
+      {kind === 'state' && (
+        <div className="max-w-sm">
+          <label htmlFor="predict-state" className="block text-sm text-muted mb-1">{hints.state}</label>
+          <input id="predict-state" type="text" value={text} onChange={(e) => setText(e.target.value)} className="field" />
+        </div>
+      )}
+      {kind === 'image' && (
+        <div>
+          <label htmlFor="predict-image" className="block text-sm text-muted mb-1">{hints.image}</label>
+          <input id="predict-image" type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="block text-sm text-muted file:mr-4 file:btn file:btn-quiet file:cursor-pointer" />
+        </div>
+      )}
+
+      <div className="mt-5 flex flex-wrap items-center gap-4">
+        <button onClick={predict} disabled={loading} className="btn btn-primary">{loading ? 'Working...' : (kind === 'prompt' ? 'Generate' : 'Predict')}</button>
+        {kind === 'rows' && <span className="text-sm text-faint">A field left empty is treated as missing, as in training.</span>}
       </div>
-    ))}
-  </div>
-);
+
+      {error && <p role="alert" className="notice notice-bad mt-5 whitespace-pre-wrap">{error}</p>}
+      {result && <PredictionResult result={result} />}
+    </section>
+  );
+};
+
+const PredictionResult = ({ result }) => {
+  const predictions = result.predictions || [];
+  return (
+    <div className="mt-6 space-y-5" aria-live="polite">
+      {result.warnings && result.warnings.length > 0 && (
+        <ul className="space-y-1">{result.warnings.map((w, i) => <li key={i} className="notice">{w}</li>)}</ul>
+      )}
+
+      {typeof result.text === 'string' && (
+        <div>
+          <p className="text-sm text-muted mb-1">
+            Generated{result.new_tokens != null ? `, ${result.new_tokens} tokens` : ''}
+          </p>
+          <p className="text-ink whitespace-pre-wrap border-l-2 border-accent pl-4">{result.text}</p>
+        </div>
+      )}
+
+      {result.action !== undefined && (
+        <div>
+          <p className="text-sm text-muted mb-1">Best action</p>
+          <p className="text-4xl font-semibold text-strong tabular-nums">{Array.isArray(result.action) ? result.action.join(', ') : String(result.action)}</p>
+          {result.q_values && (
+            <p className="mt-2 text-sm text-muted tabular-nums">Value of each action: {result.q_values.map((v) => formatMetric(v)).join(', ')}</p>
+          )}
+        </div>
+      )}
+
+      {predictions.map((p, i) => (
+        <div key={i} className={classNames(i > 0 && 'border-t border-rule/60 pt-5')}>
+          {predictions.length > 1 && <p className="text-sm text-muted mb-1">Row {i + 1}</p>}
+          <p className="text-3xl font-semibold text-strong tabular-nums break-words">
+            {Array.isArray(p) ? p.join(', ') : (isNumber(p) ? formatMetric(p) : String(p))}
+          </p>
+          {result.probabilities && result.probabilities[i] && (
+            <div className="mt-4 space-y-2 max-w-md">
+              {Object.entries(result.probabilities[i]).map(([label, prob]) => (
+                <Bar key={label} label={String(label)} value={prob} max={1} tone={String(label) === String(p) ? 'bg-accent' : 'bg-faint'} />
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {result.reconstruction_error && result.reconstruction_error.map((err, i) => (
+        <div key={i}>
+          <p className={classNames('text-2xl font-semibold tabular-nums', result.is_anomaly[i] ? 'text-bad' : 'text-ok')}>
+            {result.is_anomaly[i] ? 'Unusual' : 'Usual'}, error {formatMetric(err)}
+          </p>
+          <p className="text-sm text-muted tabular-nums mt-1">Threshold {formatMetric(result.threshold)}. Latent code {result.latent[i].map((v) => v.toFixed(3)).join(', ')}.</p>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 // Several runs side by side: the same metric in a row, the best value marked,
 // and a bar so the difference is visible without reading the numbers.
@@ -963,105 +1196,124 @@ const CompareRuns = ({ runIds, navigate }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiFetch, ids.join(',')]);
 
-  if (error) return <div className="bg-red-900/30 border border-red-500/50 p-4 rounded-md text-red-200">{error}</div>;
-  if (!runs) return <div className="text-zinc-500 p-8">Loading the runs...</div>;
+  if (error) return <p role="alert" className="notice notice-bad">{error}</p>;
+  if (!runs) return <p className="text-muted">Loading the runs...</p>;
 
   const completed = runs.filter((r) => r.status === 'completed' && r.metrics);
   const metricNames = [];
   completed.forEach((r) => Object.entries(r.metrics).forEach(([k, v]) => {
-    if (isNumber(v) && !STRUCTURED_METRICS.has(k) && !metricNames.includes(k)) metricNames.push(k);
+    if (isNumber(v) && !STRUCTURED_METRICS.has(k) && !k.startsWith('_') && !metricNames.includes(k)) metricNames.push(k);
   }));
-  const selected = metric && metricNames.includes(metric) ? metric : metricNames[0];
+  const chartable = metricNames.filter((n) => SCORE_METRICS.has(n));
+  const choices = chartable.length > 0 ? chartable : metricNames;
+  const selected = metric && choices.includes(metric) ? metric : choices[0];
   const valueOf = (run, name) => (run.metrics && isNumber(run.metrics[name]) ? run.metrics[name] : null);
   const bestOf = (name) => {
+    if (!SCORE_METRICS.has(name)) return null;
     const values = completed.map((r) => valueOf(r, name)).filter((v) => v !== null);
     if (values.length < 2) return null;
     return LOWER_IS_BETTER.has(name) ? Math.min(...values) : Math.max(...values);
   };
   const top = selected ? Math.max(1e-12, ...completed.map((r) => Math.abs(valueOf(r, selected) || 0))) : 1;
+  // Scores of runs on different data cannot be ranked against each other.
+  const datasets = [...new Set(runs.map((r) => r.dataset_tag).filter(Boolean))];
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center space-x-2 text-sm text-zinc-500">
-        <button onClick={() => navigate('runs')} className="hover:text-white">Runs</button>
-        <ChevronRight className="w-4 h-4" />
-        <span className="text-zinc-300">Compare {runs.length} runs</span>
-      </div>
-      <h1 className="text-2xl font-bold text-white">Compare runs</h1>
+    <div className="space-y-10">
+      <nav aria-label="Breadcrumb" className="text-sm text-muted">
+        <a href="#/runs" className="hover:text-strong">Runs</a>
+        <span className="mx-2 text-faint" aria-hidden="true">/</span>
+        <span>Compare</span>
+      </nav>
+
+      <header className="-mt-5">
+        <h1 className="mb-1">Compare {runs.length} runs</h1>
+        <p className="text-muted">The same score side by side. The best value in each row is marked.</p>
+      </header>
+
+      {datasets.length > 1 && (
+        <p role="status" className="notice">
+          These runs used different datasets ({datasets.join(', ')}), so their scores are not directly comparable.
+        </p>
+      )}
       {completed.length < runs.length && (
-        <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">
-          Only completed runs have metrics: {runs.length - completed.length} of the selected runs {runs.length - completed.length === 1 ? 'is' : 'are'} not shown in the metric table.
+        <p role="status" className="notice">
+          {runs.length - completed.length} of the selected runs {runs.length - completed.length === 1 ? 'has' : 'have'} no result yet, so {runs.length - completed.length === 1 ? 'it is' : 'they are'} left out.
         </p>
       )}
 
       {selected && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-white">Chart</h3>
-            <select value={selected} onChange={(e) => setMetric(e.target.value)} className="bg-zinc-950 border border-zinc-800 rounded-md px-3 py-1 text-sm text-white">
-              {metricNames.map((n) => <option key={n} value={n}>{n.replace(/_/g, ' ')}</option>)}
-            </select>
+        <section className="panel">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+            <h2>By metric</h2>
+            <label className="flex items-center gap-3 text-sm text-muted">
+              Metric
+              <select value={selected} onChange={(e) => setMetric(e.target.value)} className="field w-auto">
+                {choices.map((n) => <option key={n} value={n}>{n.replace(/_/g, ' ')}</option>)}
+              </select>
+            </label>
           </div>
-          <div className="space-y-3">
+          <div className="space-y-4 max-w-2xl">
             {completed.map((r) => (
               <Bar
                 key={r.id}
                 label={`#${r.id} ${r.model_name}`}
                 value={valueOf(r, selected)}
                 max={top}
-                tone={valueOf(r, selected) !== null && valueOf(r, selected) === bestOf(selected) ? 'bg-emerald-500' : 'bg-blue-500'}
+                tone={valueOf(r, selected) !== null && valueOf(r, selected) === bestOf(selected) ? 'bg-accent' : 'bg-faint'}
               />
             ))}
           </div>
-          <p className="text-xs text-zinc-500 mt-3">{LOWER_IS_BETTER.has(selected) ? 'Lower is better.' : 'Higher is better.'} The best run is green.</p>
-        </div>
+          <p className="text-sm text-faint mt-4">{LOWER_IS_BETTER.has(selected) ? 'Lower is better.' : 'Higher is better.'}</p>
+        </section>
       )}
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead className="bg-zinc-950 text-zinc-400 border-b border-zinc-800">
+      <section className="panel overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
             <tr>
-              <th className="px-4 py-3 font-medium">Metric</th>
+              <th className="th">Metric</th>
               {completed.map((r) => (
-                <th key={r.id} className="px-4 py-3 font-medium cursor-pointer hover:text-white" onClick={() => navigate('run-details', r.id)}>
-                  #{r.id} {r.model_name}
+                <th key={r.id} className="th">
+                  <button onClick={() => navigate('run-details', r.id)} className="text-strong hover:text-accent font-medium">
+                    {r.model_name}
+                  </button>
+                  <span className="text-faint ml-2">#{r.id}</span>
                 </th>
               ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-zinc-800 text-zinc-300">
+          <tbody>
             {metricNames.map((name) => (
               <tr key={name}>
-                <td className="px-4 py-2 text-zinc-500 uppercase text-xs tracking-wider">{name.replace(/_/g, ' ')}</td>
+                <th scope="row" className="td text-left font-normal text-muted">{name.replace(/_/g, ' ')}</th>
                 {completed.map((r) => {
                   const v = valueOf(r, name);
                   const best = bestOf(name);
+                  const isBest = v !== null && best !== null && v === best;
                   return (
-                    <td key={r.id} className={`px-4 py-2 font-mono ${v !== null && best !== null && v === best ? 'text-emerald-300' : ''}`}>
+                    <td key={r.id} className={classNames('td tabular-nums', isBest && 'text-accent font-medium')}>
                       {v === null ? '—' : formatMetric(v)}
+                      {isBest && <span className="ml-2 text-xs">best</span>}
                     </td>
                   );
                 })}
               </tr>
             ))}
             <tr>
-              <td className="px-4 py-2 text-zinc-500 uppercase text-xs tracking-wider">Parameters</td>
+              <th scope="row" className="td text-left font-normal text-muted align-top">Parameters</th>
               {completed.map((r) => (
-                <td key={r.id} className="px-4 py-2 font-mono text-xs text-zinc-400 align-top">
-                  <pre className="whitespace-pre-wrap">{JSON.stringify(r.metrics.model_parameters || r.hyperparameters || {}, null, 1)}</pre>
+                <td key={r.id} className="td align-top">
+                  <pre className="whitespace-pre-wrap font-mono text-xs text-muted">{JSON.stringify(r.metrics.model_parameters || r.hyperparameters || {}, null, 1)}</pre>
                 </td>
               ))}
             </tr>
           </tbody>
         </table>
-      </div>
+      </section>
     </div>
   );
 };
-
-
-// The progress stream of a run (plan B4): the phases and the metrics the
-// trainer reports, polled from the events endpoint while the run moves.
 
 const RunEvents = ({ runId }) => {
   const { apiFetch } = useContext(AuthContext);
@@ -1092,24 +1344,37 @@ const RunEvents = ({ runId }) => {
   }, [runId, apiFetch, runStatus]);
 
   if (!events.length) return null;
+
+  // What an event says, in the words a person would use.
+  const describe = (event) => {
+    const payload = event.payload || {};
+    if (event.kind === 'phase') {
+      const { phase, ...detail } = payload;
+      const extra = Object.entries(detail).map(([k, v]) => `${k.replace(/_/g, ' ')} ${isNumber(v) ? (Number.isInteger(v) ? v : fmtNum(v)) : v}`).join(', ');
+      return { text: String(phase || ''), extra, tone: 'text-ink' };
+    }
+    if (event.kind === 'metric') {
+      const pairs = Object.entries(payload).filter(([, v]) => v !== null && typeof v !== 'object');
+      return { text: pairs.map(([k, v]) => `${k.replace(/_/g, ' ')} ${isNumber(v) ? (Number.isInteger(v) ? v : fmtNum(v)) : v}`).join(',  '), extra: '', tone: 'text-muted' };
+    }
+    return { text: payload.message || '', extra: '', tone: 'text-faint' };
+  };
+
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 mb-6">
-      <h3 className="text-sm font-semibold text-zinc-300 mb-3 uppercase tracking-wider">Progress</h3>
-      <div className="max-h-48 overflow-y-auto font-mono text-xs space-y-1">
-        {events.map(event => (
-          <div key={event.seq} className="flex gap-3">
-            <span className="text-zinc-600 shrink-0 w-8 text-right">{event.seq}</span>
-            <span className={event.kind === 'phase' ? 'text-blue-400' : event.kind === 'metric' ? 'text-emerald-400' : 'text-zinc-400'}>
-              {event.kind === 'phase' && event.payload && event.payload.phase
-                ? `phase: ${event.payload.phase}`
-                : event.kind === 'metric'
-                ? `metric: ${JSON.stringify(event.payload)}`
-                : (event.payload && event.payload.message) || JSON.stringify(event.payload)}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
+    <section className="panel" aria-label="Progress">
+      <h2 className="mb-3">Progress</h2>
+      <ol className="max-h-56 overflow-y-auto text-sm space-y-1 tabular-nums" aria-live="polite">
+        {events.map((event) => {
+          const line = describe(event);
+          return (
+            <li key={event.seq} className={line.tone}>
+              {line.text}
+              {line.extra && <span className="text-faint">{`  (${line.extra})`}</span>}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 };
 
@@ -1208,164 +1473,136 @@ const RunDetails = ({ runId, navigate }) => {
 
   if (error) {
     return (
-
       <div className="space-y-6">
-        <RunEvents runId={runId} />
-        <div className="flex items-center space-x-2 text-sm text-zinc-500">
-          <button onClick={() => navigate('runs')} className="hover:text-white">Runs</button>
-          <ChevronRight className="w-4 h-4" />
-          <span className="text-zinc-300">Run #{runId}</span>
-        </div>
-        <div className="bg-red-900/30 border border-red-500/50 p-4 rounded-md text-red-200">
+        <nav aria-label="Breadcrumb" className="text-sm text-muted">
+          <a href="#/runs" className="hover:text-strong">Runs</a>
+          <span className="mx-2 text-faint" aria-hidden="true">/</span>
+          <span>#{runId}</span>
+        </nav>
+        <p role="alert" className="notice notice-bad">
           {error.status === 404
-            ? `Run #${runId} was not found.`
-            : `Failed to load run details: ${error.message}`}
-        </div>
+            ? `Run #${runId} does not exist, or it belongs to another account.`
+            : `The run could not be loaded (${error.message}).`}
+        </p>
       </div>
     );
   }
 
-  if (!run) return <div className="text-zinc-500 p-8">Loading details...</div>;
+  if (!run) return <p className="text-muted">Loading the run...</p>;
 
   const effectiveParameters = run.metrics?.model_parameters;
+  const live = run.status === 'queued' || run.status === 'running';
+  const seconds = run.started_at && run.finished_at
+    ? Math.max(0, Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000))
+    : null;
+  const scalarMetrics = run.metrics
+    ? Object.entries(run.metrics).filter(([k, v]) => !STRUCTURED_METRICS.has(k) && !k.startsWith('_') && (v === null || typeof v !== 'object'))
+    : [];
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center space-x-2 text-sm text-zinc-500 mb-6">
-        <button onClick={() => navigate('runs')} className="hover:text-white">Runs</button>
-        <ChevronRight className="w-4 h-4" />
-        <span className="text-zinc-300">Run #{run.id}</span>
-      </div>
+    <div className="space-y-10">
+      <nav aria-label="Breadcrumb" className="text-sm text-muted">
+        <a href="#/runs" className="hover:text-strong">Runs</a>
+        <span className="mx-2 text-faint" aria-hidden="true">/</span>
+        <span>#{run.id}</span>
+      </nav>
 
-      <div className="flex justify-between items-start">
+      <header className="flex flex-wrap items-start justify-between gap-4 -mt-5">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-2">{run.model_name}</h1>
-          <div className="flex items-center space-x-4 text-sm text-zinc-400">
-            <span className="bg-zinc-800 px-2 py-1 rounded text-zinc-300 uppercase tracking-wide">
-              {run.status}
-            </span>
-            <span>Started: {new Date(run.created_at).toLocaleString()}</span>
-            {run.started_at && run.finished_at && (
-              <span>Took {Math.max(0, Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000))} s</span>
-            )}
-          </div>
+          <h1 className="mb-1">{run.model_name}</h1>
+          <p className="text-muted flex flex-wrap items-center gap-x-5 gap-y-1">
+            <StatusMark status={run.status} />
+            <span>{run.dataset_tag}</span>
+            <span title={new Date(run.created_at).toLocaleString()}>Started {timeAgo(run.created_at)}</span>
+            {seconds !== null && <span className="tabular-nums">Took {seconds} s</span>}
+          </p>
         </div>
-        {(run.status === 'queued' || run.status === 'running') && (
-          <button
-            onClick={handleCancel}
-            disabled={cancelling}
-            className="flex items-center space-x-2 border border-red-800 text-red-300 hover:bg-red-950/40 px-4 py-2 rounded-md font-medium disabled:opacity-50"
-          >
-            <Ban className="w-4 h-4" />
-            <span>{cancelling ? 'Cancelling...' : 'Cancel run'}</span>
-          </button>
-        )}
-        {run.status === 'completed' && run.artifact_path && (
-          <button 
-            onClick={handleDownload}
-            disabled={downloading}
-            className="flex items-center space-x-2 bg-zinc-100 hover:bg-white text-zinc-900 px-4 py-2 rounded-md font-medium disabled:opacity-50"
-          >
-            <Download className="w-4 h-4" />
-            <span>{downloading ? 'Downloading...' : 'Download Artifact'}</span>
-          </button>
-        )}
-      </div>
+        <div className="flex items-center gap-3">
+          {live && (
+            <button onClick={handleCancel} disabled={cancelling} className="btn btn-danger">
+              {cancelling ? 'Cancelling...' : 'Cancel run'}
+            </button>
+          )}
+          {run.status === 'completed' && run.artifact_path && (
+            <button onClick={handleDownload} disabled={downloading} className="btn btn-quiet">
+              {downloading ? 'Downloading...' : 'Download model'}
+            </button>
+          )}
+        </div>
+      </header>
 
-      {cancelNote && (
-        <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2">{cancelNote}</p>
+      {cancelNote && <p role="status" className="notice">{cancelNote}</p>}
+
+      {(live || run.status === 'failed') && <RunEvents runId={runId} />}
+
+      {run.status === 'failed' && (
+        <section className="panel">
+          <h2 className="mb-2">This run failed</h2>
+          <p className="notice notice-bad whitespace-pre-wrap break-words">{run.metrics?.error || 'The server did not say why.'}</p>
+        </section>
+      )}
+      {run.status === 'cancelled' && (
+        <section className="panel"><p className="text-muted">This run was cancelled, so it has no result.</p></section>
+      )}
+      {live && (
+        <section className="panel">
+          <p className="text-muted">
+            {run.status === 'queued'
+              ? 'Waiting for a free worker. This page updates by itself.'
+              : 'Training. The result appears here when it finishes.'}
+          </p>
+        </section>
+      )}
+      {model && model.implemented === false && (
+        <p className="notice notice-bad">This model is not implemented, so this run cannot have a result.</p>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-white mb-4">Execution Metrics</h3>
-            {run.status === 'failed' ? (
-              <div className="bg-red-950/30 border border-red-900 rounded p-4 text-red-400 font-mono text-sm whitespace-pre-wrap">
-                {run.metrics?.error || "Unknown execution error."}
-              </div>
-            ) : run.status === 'cancelled' ? (
-              <p className="text-zinc-400 text-sm">This run was cancelled. It has no result.</p>
-            ) : model && model.implemented === false ? (
-              <div className="bg-red-900/20 border border-red-700/50 rounded p-4 text-red-400 text-sm">
-                Not implemented
-              </div>
-            ) : run.metrics ? (
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                {Object.entries(run.metrics).filter(([k, v]) => !STRUCTURED_METRICS.has(k) && (v === null || typeof v !== 'object')).map(([key, val]) => (
-                  <div key={key} className="bg-zinc-950 p-4 rounded-md border border-zinc-800/50">
-                    <div className="text-xs text-zinc-500 uppercase tracking-wider mb-1">{key.replace(/_/g, ' ')}</div>
-                    <div className="text-xl font-mono text-zinc-200 break-words">
-                      {formatMetric(val)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-zinc-500">No metrics available yet.</p>
-            )}
-          </div>
+      {run.status === 'completed' && run.metrics && (
+        <>
+          <EvaluationPanel metrics={run.metrics} />
+          <ConfusionMatrix confusion={run.metrics.confusion_matrix} />
+          <PreprocessingReport report={run.metrics.preprocessing} />
+          {run.metrics.artifact_kind && <PredictPanel runId={runId} />}
+        </>
+      )}
 
-          {run.status === 'completed' && run.metrics && <EvaluationPanel metrics={run.metrics} />}
-          {run.status === 'completed' && run.metrics && <ConfusionMatrix confusion={run.metrics.confusion_matrix} />}
-          {run.status === 'completed' && run.metrics && <PreprocessingReport report={run.metrics.preprocessing} />}
-          {run.status === 'completed' && run.metrics && run.metrics.artifact_kind && <PredictPanel runId={runId} />}
+      {run.status === 'completed' && scalarMetrics.length > 0 && (
+        <section className="panel">
+          <details>
+            <summary className="cursor-pointer text-strong font-medium hover:text-accent">All metrics ({scalarMetrics.length})</summary>
+            <dl className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-3">
+              {scalarMetrics.map(([key, val]) => (
+                <div key={key} className="flex justify-between gap-4 border-b border-rule/60 pb-1">
+                  <dt className="text-muted">{key.replace(/_/g, ' ')}</dt>
+                  <dd className="text-strong tabular-nums text-right break-words">{formatMetric(val)}</dd>
+                </div>
+              ))}
+            </dl>
+          </details>
+        </section>
+      )}
 
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-white mb-4">Submitted hyperparameters</h3>
-            <pre className="bg-zinc-950 p-4 rounded-md text-sm text-zinc-400 font-mono overflow-x-auto border border-zinc-800/50">
-              {JSON.stringify(run.hyperparameters || {}, null, 2)}
-            </pre>
-            {effectiveParameters && Object.keys(effectiveParameters).length > 0 && (
-              <>
-                <h4 className="text-sm font-semibold text-zinc-300 mt-5 mb-2">Effective parameters</h4>
-                <p className="text-xs text-zinc-500 mb-2">
-                  Parameters actually used for training (catalog defaults merged with mode / preset adjustments).
-                </p>
-                <pre className="bg-zinc-950 p-4 rounded-md text-sm text-zinc-400 font-mono overflow-x-auto border border-zinc-800/50">
-                  {JSON.stringify(effectiveParameters, null, 2)}
-                </pre>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className="space-y-6">
-           <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-white mb-4">Data Provenance</h3>
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs text-zinc-500 uppercase tracking-wider block mb-1">Source Type</label>
-                <div className="text-zinc-300 capitalize">{run.dataset_source}</div>
-              </div>
-              <div>
-                <label className="text-xs text-zinc-500 uppercase tracking-wider block mb-1">Identifier / Tag</label>
-                <div className="text-zinc-300 break-all">{run.dataset_tag}</div>
-              </div>
-              {run.hf_dataset_url && (
-                <div>
-                  <label className="text-xs text-zinc-500 uppercase tracking-wider block mb-1">Hugging Face URL</label>
-                  <a href={run.hf_dataset_url} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline break-all">
-                    {run.hf_dataset_url}
-                  </a>
-                </div>
-              )}
-              {run.mode && (
-                <div>
-                  <label className="text-xs text-zinc-500 uppercase tracking-wider block mb-1">Training Mode</label>
-                  <div className="text-zinc-300 capitalize">{run.mode}</div>
-                </div>
-              )}
-              {run.env_id && (
-                <div>
-                  <label className="text-xs text-zinc-500 uppercase tracking-wider block mb-1">Environment ID</label>
-                  <div className="text-zinc-300 break-all">{run.env_id}</div>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
+      <section className="panel">
+        <h2 className="mb-4">How it was trained</h2>
+        <dl className="grid grid-cols-[10rem_1fr] gap-x-6 gap-y-3 max-w-prose">
+          <dt className="text-muted">Data source</dt><dd className="capitalize">{run.dataset_source}</dd>
+          <dt className="text-muted">Dataset</dt><dd className="break-all">{run.dataset_tag}</dd>
+          {run.hf_dataset_url && (<><dt className="text-muted">Hugging Face</dt><dd><a href={run.hf_dataset_url} target="_blank" rel="noreferrer" className="link break-all">{run.hf_dataset_url}</a></dd></>)}
+          {run.mode && (<><dt className="text-muted">Mode</dt><dd className="capitalize">{run.mode}</dd></>)}
+          {run.env_id && (<><dt className="text-muted">Environment</dt><dd className="break-all">{run.env_id}</dd></>)}
+        </dl>
+        <details className="mt-6">
+          <summary className="cursor-pointer text-strong font-medium hover:text-accent">Parameters</summary>
+          <p className="text-sm text-muted mt-3 mb-2">What you submitted:</p>
+          <pre className="field font-mono text-sm overflow-x-auto">{JSON.stringify(run.hyperparameters || {}, null, 2)}</pre>
+          {effectiveParameters && Object.keys(effectiveParameters).length > 0 && (
+            <>
+              <p className="text-sm text-muted mt-4 mb-2">What was used (defaults, mode and preset merged):</p>
+              <pre className="field font-mono text-sm overflow-x-auto">{JSON.stringify(effectiveParameters, null, 2)}</pre>
+            </>
+          )}
+        </details>
+      </section>
     </div>
   );
 };
@@ -1705,12 +1942,12 @@ const NewJob = ({ navigate }) => {
   return (
     <div className="max-w-6xl space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-white mb-2">Configure Training Job</h1>
-        <p className="text-zinc-400">Specify data sources, model architectures, and training constraints.</p>
+        <h1 className="mb-1">New run</h1>
+        <p className="text-muted">Choose the data, the model, and how it should be trained.</p>
       </div>
 
       {error && (
-        <div className="bg-red-900/30 border border-red-500/50 p-4 rounded-md text-red-200">
+        <div role="alert" className="notice notice-bad">
           {error}
         </div>
       )}
@@ -1718,21 +1955,21 @@ const NewJob = ({ navigate }) => {
       <form onSubmit={handleSubmit} className="space-y-8">
         
         {/* Section A: Data */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-          <h2 className="text-lg font-semibold text-white mb-4 border-b border-zinc-800 pb-2">1. Data Ingestion</h2>
+        <div className="panel">
+          <h2 className="mb-5">Data</h2>
           
           <div className="flex space-x-4 mb-6">
             <button
               type="button"
               onClick={() => setSourceType('local')}
-              className={classNames("px-4 py-2 rounded-md text-sm font-medium transition-colors border", sourceType === 'local' ? "bg-zinc-800 border-zinc-700 text-white" : "bg-transparent border-zinc-800 text-zinc-400 hover:text-white")}
+              className={classNames("px-4 py-2 rounded-md text-sm font-medium transition-colors border", sourceType === 'local' ? "bg-raised border-rule text-strong" : "bg-transparent border-rule text-muted hover:text-strong")}
             >
               Local Dataset (CSV)
             </button>
             <button
               type="button"
               onClick={() => setSourceType('hf')}
-              className={classNames("px-4 py-2 rounded-md text-sm font-medium transition-colors border", sourceType === 'hf' ? "bg-zinc-800 border-zinc-700 text-white" : "bg-transparent border-zinc-800 text-zinc-400 hover:text-white")}
+              className={classNames("px-4 py-2 rounded-md text-sm font-medium transition-colors border", sourceType === 'hf' ? "bg-raised border-rule text-strong" : "bg-transparent border-rule text-muted hover:text-strong")}
             >
               Hugging Face Hub
             </button>
@@ -1741,7 +1978,7 @@ const NewJob = ({ navigate }) => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {sourceType === 'local' ? (
               <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Select Local Dataset</label>
+                <label className="block text-sm text-muted mb-1.5">Select Local Dataset</label>
                 {/* The select stays mounted when the list is empty so the "required"
                     rule keeps blocking the submission instead of posting an empty
                     dataset name to the backend. */}
@@ -1749,7 +1986,7 @@ const NewJob = ({ navigate }) => {
                   required={!isReinforcementLearning}
                   value={payload.dataset_id ?? ''}
                   onChange={(e) => selectDataset(e.target.value)}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 >
                   {datasets.length === 0 && (
                     <option value="" disabled>-- no datasets available --</option>
@@ -1760,45 +1997,45 @@ const NewJob = ({ navigate }) => {
                   {datasets.map(d => <option key={d.id} value={d.id}>{datasetOptionLabel(d)}</option>)}
                 </select>
                 {datasetsError && (
-                  <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 mt-2">
-                    Could not load datasets — {datasetsError}
+                  <p className="notice mt-2">
+                    Could not load datasets: {datasetsError}
                   </p>
                 )}
                 {!datasetsError && datasets.length === 0 && (
-                  <p className="text-sm text-zinc-500 italic border border-dashed border-zinc-800 rounded-md px-3 py-2 mt-2">
+                  <p className="text-sm text-faint mt-2">
                     No datasets available. Upload a CSV file below to start.
                   </p>
                 )}
                 {isReinforcementLearning && (
-                  <p className="text-xs text-zinc-500 mt-1">Not required for reinforcement learning models.</p>
+                  <p className="text-sm text-faint mt-1.5">Not required for reinforcement learning models.</p>
                 )}
                 {selectedDataset && selectedDataset.columns && selectedDataset.columns.length > 0 && (
-                  <p className="text-xs text-zinc-500 mt-2">
-                    {selectedDataset.row_count} rows · {selectedDataset.columns.length} columns
-                    {selectedDataset.source === 'builtin' ? ' · shipped with the repository' : ' · uploaded by you'}
+                  <p className="text-sm text-faint mt-2">
+                    {selectedDataset.row_count} rows, {selectedDataset.columns.length} columns
+                    {selectedDataset.source === 'builtin' ? ', shipped with the repository' : ', uploaded by you'}
                   </p>
                 )}
                 {!isReinforcementLearning && (
                   <div className="mt-3">
-                    <label className="block text-xs font-medium text-zinc-500 mb-1">Upload a CSV file</label>
+                    <label className="block text-xs font-medium text-faint mb-1">Upload a CSV file</label>
                     <div className="flex items-center gap-3">
                       <input
                         type="file"
                         accept=".csv,text/csv"
                         onChange={handleUpload}
                         disabled={uploading}
-                        className="text-sm text-zinc-400 file:mr-3 file:rounded-md file:border-0 file:bg-zinc-800 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-zinc-200 hover:file:bg-zinc-700 disabled:opacity-50"
+                        className="text-sm text-muted file:mr-3 file:rounded-md file:border-0 file:bg-raised file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-ink hover:file:bg-rule disabled:opacity-50"
                       />
-                      {uploading && <Activity className="w-4 h-4 animate-spin text-blue-500" />}
+                      {uploading && <span role="status" className="text-sm text-muted">Uploading...</span>}
                     </div>
                     {uploadError && (
-                      <p className="text-sm text-red-200/90 border border-red-700/50 rounded-md px-3 py-2 mt-2">
+                      <p className="notice mt-2">
                         {uploadError}
                       </p>
                     )}
                     {uploadedDataset && (
-                      <p className="text-sm text-emerald-200/90 border border-emerald-700/50 rounded-md px-3 py-2 mt-2">
-                        Uploaded “{uploadedDataset.name}” — {uploadedDataset.row_count} rows. It is selected above.
+                      <p className="notice mt-2">
+                        Uploaded “{uploadedDataset.name}” with {uploadedDataset.row_count} rows. It is selected above.
                       </p>
                     )}
                   </div>
@@ -1806,26 +2043,26 @@ const NewJob = ({ navigate }) => {
               </div>
             ) : (
               <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Hugging Face URL / Path</label>
+                <label className="block text-sm text-muted mb-1.5">Hugging Face URL / Path</label>
                 <input
                   type="text"
                   required
                   placeholder="e.g., databricks/databricks-dolly-15k"
                   value={payload.hf_dataset_url}
                   onChange={(e) => setPayload({...payload, hf_dataset_url: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 />
               </div>
             )}
 
             <div>
-              <label className="block text-sm font-medium text-zinc-400 mb-1">Target / Label Column</label>
+              <label className="block text-sm text-muted mb-1.5">Target / Label Column</label>
               {labelColumnOptions.length > 0 ? (
                 <select
                   required
                   value={payload.label_column}
                   onChange={(e) => setPayload({...payload, label_column: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 >
                   {labelColumnOptions.map(name => <option key={name} value={name}>{name}</option>)}
                 </select>
@@ -1836,44 +2073,44 @@ const NewJob = ({ navigate }) => {
                   placeholder="label"
                   value={payload.label_column}
                   onChange={(e) => setPayload({...payload, label_column: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 />
               )}
               {labelColumnOptions.length > 0 && (
-                <p className="text-xs text-zinc-500 mt-1">The columns of the selected dataset.</p>
+                <p className="text-sm text-faint mt-1.5">The columns of the selected dataset.</p>
               )}
             </div>
 
             <div className="grid grid-cols-2 gap-4">
                <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Test Size Split</label>
+                <label className="block text-sm text-muted mb-1.5">Test Size Split</label>
                 <input 
                   type="number" 
                   step="0.01" min="0.01" max="0.99" required
                   value={payload.test_size}
                   onChange={(e) => setPayload({...payload, test_size: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 />
               </div>
                <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Random State</label>
+                <label className="block text-sm text-muted mb-1.5">Random State</label>
                 <input 
                   type="number" 
                   required
                   value={payload.random_state}
                   onChange={(e) => setPayload({...payload, random_state: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Task type (tabular models)</label>
+                <label className="block text-sm text-muted mb-1.5">Task type (tabular models)</label>
                 <select
                   value={payload.task_type}
                   onChange={(e) => setPayload({...payload, task_type: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 >
                   <option value="">Guess from the label column</option>
                   <option value="classification">Classification</option>
@@ -1881,12 +2118,12 @@ const NewJob = ({ navigate }) => {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Cross-validation folds (0 = off)</label>
+                <label className="block text-sm text-muted mb-1.5">Cross-validation folds (0 = off)</label>
                 <input
                   type="number" min="0" max="20" required
                   value={payload.cv_folds}
                   onChange={(e) => setPayload({...payload, cv_folds: e.target.value})}
-                  className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 />
               </div>
             </div>
@@ -1894,46 +2131,56 @@ const NewJob = ({ navigate }) => {
         </div>
 
         {/* Section B: Model & Mode Selection */}
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-           <h2 className="text-lg font-semibold text-white mb-4 border-b border-zinc-800 pb-2">2. Architecture & Training Configuration</h2>
+        <div className="panel">
+           <h2 className="mb-5">Architecture & Training Configuration</h2>
            
            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
              <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Model Selection</label>
+                <label className="block text-sm text-muted mb-1.5">Model Selection</label>
                  <select 
                    required
                    value={payload.model_name}
                    onChange={(e) => setPayload({...payload, model_name: e.target.value})}
-                   className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                   className="field"
                  >
-                   <option value="">-- Select Architecture --</option>
-                   {models.map(m => (
-                     <option key={m.name} value={m.name} disabled={m.implemented === false}>
-                       {m.name} ({m.category}){m.implemented === false ? ' — not implemented' : ''}
-                     </option>
+                   <option value="">Choose a model</option>
+                   {groupModels(models).map(([label, rows]) => (
+                     <optgroup key={label} label={label}>
+                       {rows.map((m) => {
+                         const usable = m.implemented !== false && m.available !== false;
+                         return (
+                           <option key={m.name} value={m.name} disabled={!usable}>
+                             {m.name}{usable ? '' : (m.implemented === false ? ' (not implemented)' : ' (not available here)')}
+                           </option>
+                         );
+                       })}
+                     </optgroup>
                    ))}
                  </select>
                  {modelsError && (
-                   <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 mt-2">
+                   <p className="notice mt-2">
                      Could not load models — {modelsError}. Using the built-in fallback list.
                    </p>
                  )}
-                 <p className="text-xs text-zinc-500 mt-1">
-                   Disabled models are not yet implemented.
+                 <p className="text-sm text-faint mt-1.5">
+                   {(() => {
+                     const chosen = models.find((m) => m.name === payload.model_name);
+                     return chosen && chosen.description ? chosen.description : 'Greyed-out models cannot run on this server; the Models page says why.';
+                   })()}
                  </p>
                </div>
 
              <div>
-               <label className="block text-sm font-medium text-zinc-400 mb-1">Training Mode</label>
+               <label className="block text-sm text-muted mb-1.5">Training Mode</label>
                <select
                  value={payload.mode}
                  onChange={(e) => setPayload({...payload, mode: e.target.value})}
-                 className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                 className="field"
                >
                  {modeOptions.map(m => <option key={m} value={m}>{humanizeKey(m)}</option>)}
                </select>
                {modesError && (
-                 <p className="text-xs text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 mt-2">
+                 <p className="text-xs text-warn/90 border border-warn/40 rounded-md px-3 py-2 mt-2">
                    Could not load the training modes — {modesError}. Using the built-in fallback list.
                  </p>
                )}
@@ -1942,8 +2189,8 @@ const NewJob = ({ navigate }) => {
 
             {/* Mode Description */}
             {payload.mode !== 'manual' && (
-              <div className="mb-6 p-3 bg-blue-900/20 border border-blue-700/50 rounded-md">
-                <div className="text-sm text-blue-300">
+              <div className="mb-6 p-3 bg-accent/15/20 border border-accent/50/50 rounded-md">
+                <div className="text-sm text-accent">
                   <span className="font-semibold">Mode: {humanizeKey(payload.mode)}</span> - 
                   {modeDescription}
                 </div>
@@ -1952,7 +2199,7 @@ const NewJob = ({ navigate }) => {
 
            {/* Preset Selector */}
            <div className="mb-6">
-             <label className="block text-sm font-medium text-zinc-400 mb-1">Training Preset</label>
+             <label className="block text-sm text-muted mb-1.5">Training Preset</label>
              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                {trainingPresets.map(p => (
                  <button
@@ -1962,17 +2209,17 @@ const NewJob = ({ navigate }) => {
                    className={classNames(
                      "p-3 rounded-md border text-left transition-all",
                      payload.preset === p.name 
-                       ? "bg-blue-900/40 border-blue-600 text-white" 
-                       : "bg-zinc-950 border-zinc-800 text-zinc-400 hover:border-zinc-600"
+                       ? "bg-accent/15/40 border-accent/50 text-strong" 
+                       : "bg-surface border-rule text-muted hover:border-faint/60"
                    )}
                  >
                     <div className="font-medium capitalize text-sm">{p.name}</div>
-                    <div className="text-xs text-zinc-500 mt-1">{p.description}</div>
+                    <div className="text-sm text-faint mt-1.5">{p.description}</div>
                   </button>
                 ))}
               </div>
               {presetsError && (
-                <p className="text-sm text-amber-200/90 border border-amber-700/50 rounded-md px-3 py-2 mt-2">
+                <p className="notice mt-2">
                   Could not load training presets — {presetsError}. Using the built-in fallback list.
                 </p>
               )}
@@ -1980,14 +2227,14 @@ const NewJob = ({ navigate }) => {
 
            {selectedModelDef?.category === 'reinforcement-learning' && (
              <div className="mb-6">
-                <label className="block text-sm font-medium text-zinc-400 mb-1">Gymnasium Environment ID (Required for RL)</label>
+                <label className="block text-sm text-muted mb-1.5">Gymnasium Environment ID (Required for RL)</label>
                 <input 
                   type="text" 
                   required
                   placeholder="e.g., CartPole-v1"
                   value={payload.env_id}
                   onChange={(e) => setPayload({...payload, env_id: e.target.value})}
-                  className="w-full md:w-1/2 bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                  className="field"
                 />
              </div>
            )}
@@ -1995,34 +2242,34 @@ const NewJob = ({ navigate }) => {
 
         {/* Section C: Model Details Panel */}
         {modelDetails && testResults && (
-          <div className="bg-gradient-to-br from-blue-900/20 to-indigo-900/20 border border-blue-800/50 rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-white mb-4">📊 Model Intelligence</h3>
+          <div className="bg-gradient-to-br from-blue-900/20 to-indigo-900/20 border border-accent/50/50 rounded-md p-6">
+            <h3 className="text-lg font-semibold text-strong mb-4">📊 Model Intelligence</h3>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="bg-zinc-950/50 rounded-md p-4 border border-zinc-800/50">
-                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-2">{testResults.accuracyLabel}</div>
-                <div className="text-lg font-bold text-blue-400">
+              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+                <div className="text-xs text-muted mb-2">{testResults.accuracyLabel}</div>
+                <div className="text-lg font-bold text-accent">
                   {testResults.accuracy ? `${(testResults.accuracy[0]*100).toFixed(0)}% - ${(testResults.accuracy[1]*100).toFixed(0)}%` : 'N/A'}
                 </div>
               </div>
 
-              <div className="bg-zinc-950/50 rounded-md p-4 border border-zinc-800/50">
-                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-2">Training Time</div>
-                <div className="text-lg font-bold text-emerald-400">~{testResults.trainingTime}s</div>
+              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+                <div className="text-xs text-muted mb-2">Training Time</div>
+                <div className="text-lg font-bold text-ok">~{testResults.trainingTime}s</div>
               </div>
 
-              <div className="bg-zinc-950/50 rounded-md p-4 border border-zinc-800/50">
-                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-2">Scalability</div>
+              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+                <div className="text-xs text-muted mb-2">Scalability</div>
                 <div className={classNames("text-lg font-bold", 
-                  testResults.scalability === 'high' ? 'text-emerald-400' :
-                  testResults.scalability === 'medium' ? 'text-yellow-400' : 'text-orange-400'
+                  testResults.scalability === 'high' ? 'text-ok' :
+                  testResults.scalability === 'medium' ? 'text-warn' : 'text-orange-400'
                 )}>
                   {testResults.scalability?.charAt(0).toUpperCase() + testResults.scalability?.slice(1)}
                 </div>
               </div>
 
-              <div className="bg-zinc-950/50 rounded-md p-4 border border-zinc-800/50">
-                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-2">Optimization Targets</div>
-                <div className="text-sm text-zinc-300">
+              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+                <div className="text-xs text-muted mb-2">Optimization Targets</div>
+                <div className="text-sm text-ink">
                   {selectedModelDef?.optimization?.length > 0 ? selectedModelDef.optimization.slice(0, 2).join(', ') : 'N/A'}
                   {selectedModelDef?.optimization?.length > 2 && '...'}
                 </div>
@@ -2030,11 +2277,11 @@ const NewJob = ({ navigate }) => {
             </div>
 
             {testResults.bestFor && (
-              <div className="mt-4 pt-4 border-t border-zinc-800/50">
-                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-2">Best For:</div>
+              <div className="mt-4 pt-4 border-t border-rule/50">
+                <div className="text-xs text-muted mb-2">Best For:</div>
                 <div className="flex flex-wrap gap-2">
                   {testResults.bestFor.map((tag, idx) => (
-                    <span key={idx} className="px-3 py-1 bg-blue-900/40 border border-blue-700/50 rounded-full text-xs text-blue-300">
+                    <span key={idx} className="px-3 py-1 bg-accent/15/40 border border-accent/50/50 rounded-full text-xs text-accent">
                       {tag.replace(/_/g, ' ')}
                     </span>
                   ))}
@@ -2047,15 +2294,15 @@ const NewJob = ({ navigate }) => {
         {/* The Model Intelligence panel is replaced by the reason it could not be
             loaded, so the section never disappears without an explanation. */}
         {modelDetailsError && (
-          <div className="bg-amber-900/20 border border-amber-700/50 rounded-lg p-4 text-amber-200 text-sm">
+          <div className="notice text-sm">
             Could not load model details — {modelDetailsError}.
           </div>
         )}
 
         {/* Section D: Hyperparameters */}
         {selectedModelDef && payload.mode === 'manual' && (
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-             <h2 className="text-lg font-semibold text-white mb-4 border-b border-zinc-800 pb-2">3. Hyperparameters</h2>
+          <div className="panel">
+             <h2 className="mb-5">Hyperparameters</h2>
              
              {Object.keys(payload.hyperparameters).length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2069,28 +2316,28 @@ const NewJob = ({ navigate }) => {
                   const step = isNumeric ? 'any' : undefined;
                   return (
                    <div key={key}>
-                    <label className="block text-xs font-mono text-zinc-500 mb-1">{key}</label>
+                    <label className="block text-xs tabular-nums text-faint mb-1">{key}</label>
                     <input
                        type={isNumeric ? 'number' : 'text'}
                        step={step}
                        value={val === null || val === undefined ? '' : val}
                        onChange={(e) => handleParamChange(key, e.target.value)}
-                       className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-1.5 text-sm text-white focus:ring-2 focus:ring-blue-500"
+                       className="field"
                     />
                    </div>
                   );
                 })}
               </div>
              ) : (
-              <div className="text-sm text-zinc-500 italic">No configurable parameters required or auto-adjusted mode selected.</div>
+              <div className="text-sm text-faint italic">No configurable parameters required or auto-adjusted mode selected.</div>
              )}
           </div>
         )}
 
         {selectedModelDef && payload.mode !== 'manual' && (
-          <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
-             <h2 className="text-lg font-semibold text-white mb-4 border-b border-zinc-800 pb-2">3. Hyperparameters</h2>
-             <div className="text-sm text-zinc-400">
+          <div className="panel">
+             <h2 className="mb-5">Hyperparameters</h2>
+             <div className="text-sm text-muted">
                <p className="mb-2">
                   In <span className="font-semibold">{humanizeKey(payload.mode)}</span> mode, hyperparameters will be automatically {
                     payload.mode === 'auto_tune' ? 'tuned via randomized search' :
@@ -2103,7 +2350,7 @@ const NewJob = ({ navigate }) => {
                  <p className="mb-2">
                    {searchCandidates.length > 0 ? (
                      <>
-                       Compared models: <span className="font-mono text-zinc-300">{searchCandidates.join(', ')}</span>
+                       Compared models: <span className="tabular-nums text-ink">{searchCandidates.join(', ')}</span>
                      </>
                    ) : (
                      <>
@@ -2123,17 +2370,10 @@ const NewJob = ({ navigate }) => {
           </div>
         )}
 
-        <div className="flex justify-end pt-4">
-          <button
-            type="submit"
-            disabled={submitting || !payload.model_name}
-            className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-md font-medium transition-colors disabled:opacity-50"
-          >
-            {submitting ? (
-               <><Activity className="w-5 h-5 animate-spin" /><span>Queueing Run...</span></>
-            ) : (
-               <><Play className="w-5 h-5" /><span>Execute Training</span></>
-            )}
+        <div className="flex items-center justify-end gap-4 border-t border-rule pt-6">
+          {!payload.model_name && <p className="text-sm text-faint">Choose a model to continue.</p>}
+          <button type="submit" disabled={submitting || !payload.model_name} className="btn btn-primary">
+            {submitting ? 'Queueing...' : 'Start run'}
           </button>
         </div>
       </form>
@@ -2164,14 +2404,14 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.error) {
       return (
-        <div className="p-8 m-6 rounded-lg bg-red-950/40 border border-red-800 text-red-200">
-          <h2 className="text-lg font-semibold mb-2">This view could not be rendered.</h2>
-          <p className="text-sm opacity-80 mb-4">
-            {String(this.state.error && this.state.error.message || this.state.error)}
+        <div role="alert" className="max-w-prose">
+          <h2 className="mb-2">This view could not be shown</h2>
+          <p className="notice notice-bad mb-5 break-words">
+            {String((this.state.error && this.state.error.message) || this.state.error)}
           </p>
           <button
             onClick={() => { this.setState({ error: null }); this.props.onReset && this.props.onReset(); }}
-            className="bg-red-800 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm"
+            className="btn btn-quiet"
           >
             Back to the runs
           </button>
@@ -2242,79 +2482,55 @@ const MainApp = () => {
     }
   };
 
+  const formatBytes = (n) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
+  const usage = me?.usage;
+  const inRuns = ['runs', 'run-details', 'compare'].includes(currentView);
+  const nav = [
+    { id: 'runs', label: 'Runs', active: inRuns },
+    { id: 'models', label: 'Models', active: currentView === 'models' },
+    { id: 'new-job', label: 'New run', active: currentView === 'new-job' },
+    ...(me?.role === 'admin' ? [{ id: 'admin', label: 'Admin', active: currentView === 'admin' }] : []),
+  ];
+
   return (
-    <div className="flex h-screen bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
-      
-      {/* Sidebar */}
-      <aside className="w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col hidden md:flex shrink-0">
-        <div className="h-16 flex items-center px-6 border-b border-zinc-800 shrink-0">
-          <Activity className="w-6 h-6 text-blue-500 mr-2" />
-          <span className="font-bold text-lg tracking-tight">PrimeTrade</span>
-        </div>
-        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
-          <SidebarItem 
-            icon={Activity} label="Training Runs" 
-            active={currentView === 'runs' || currentView === 'run-details' || currentView === 'compare'} 
-            onClick={() => navigate('runs')} 
-          />
-          <SidebarItem 
-            icon={Database} label="Model Catalog" 
-            active={currentView === 'models'} 
-            onClick={() => navigate('models')} 
-          />
-          <SidebarItem 
-            icon={PlusCircle} label="New Job" 
-            active={currentView === 'new-job'} 
-            onClick={() => navigate('new-job')} 
-          />
-          {me?.role === 'admin' ? (
-            <SidebarItem 
-              icon={ShieldCheck} label="Admin" 
-              active={currentView === 'admin'} 
-              onClick={() => navigate('admin')} 
-            />
-          ) : null}
-        </nav>
-        <div className="p-4 border-t border-zinc-800 shrink-0">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2 truncate">
-              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center shrink-0">
-                <User className="w-4 h-4 text-zinc-400" />
-              </div>
-              <div className="truncate text-sm">
-                <div className="font-medium truncate">{user?.sub}</div>
-                <div className="text-xs text-zinc-500 uppercase">{me?.role || user?.role}</div>
-                {me?.usage ? (
-                  <div className="text-[11px] text-zinc-600 mt-0.5 tabular-nums">
-                    {me.usage.runs_today}{me.usage.limits?.max_runs_per_day ? `/${me.usage.limits.max_runs_per_day}` : ''} runs today
-                    {' · '}
-                    {me.usage.storage_bytes >= 1024 * 1024
-                      ? `${(me.usage.storage_bytes / (1024 * 1024)).toFixed(1)} MB`
-                      : `${Math.round(me.usage.storage_bytes / 1024)} KB`} stored
-                  </div>
-                ) : null}
-              </div>
-            </div>
-            <button onClick={logout} className="p-2 text-zinc-400 hover:text-white rounded-md hover:bg-zinc-800 transition">
-              <LogOut className="w-4 h-4" />
-            </button>
+    <div className="min-h-screen">
+      <header className="border-b border-rule">
+        <div className="max-w-page mx-auto px-5 md:px-8 flex flex-wrap items-center gap-x-8 gap-y-2 py-3">
+          <span className="font-semibold text-strong">PrimeTrade AutoML</span>
+          <nav aria-label="Main" className="flex items-center gap-1 -mx-2">
+            {nav.map((item) => (
+              <a
+                key={item.id}
+                href={`#/${item.id}`}
+                aria-current={item.active ? 'page' : undefined}
+                className={classNames(
+                  'px-2 py-1 text-sm rounded transition-colors border-b-2 whitespace-nowrap',
+                  item.active ? 'text-strong border-accent' : 'text-muted border-transparent hover:text-strong'
+                )}
+              >
+                {item.label}
+              </a>
+            ))}
+          </nav>
+          <div className="ml-auto flex items-center gap-4 text-sm text-muted">
+            {usage && (
+              <span className="hidden sm:inline tabular-nums">
+                {usage.limits?.max_runs_per_day
+                  ? `${usage.runs_today} of ${usage.limits.max_runs_per_day} runs today`
+                  : `${usage.runs_today} runs today`}
+                {`, ${formatBytes(usage.storage_bytes)} stored`}
+              </span>
+            )}
+            <span className="text-strong">{user?.sub}</span>
+            <button onClick={logout} className="hover:text-strong underline-offset-4 hover:underline">Sign out</button>
           </div>
         </div>
-      </aside>
-
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden relative">
-        {/* Mobile Header */}
-        <header className="h-16 border-b border-zinc-800 bg-zinc-900 flex items-center px-4 md:hidden shrink-0">
-           <Activity className="w-6 h-6 text-blue-500 mr-2" />
-           <span className="font-bold text-lg tracking-tight">PrimeTrade</span>
-        </header>
-
-        <div className="flex-1 overflow-auto">
-           <div className="p-6 md:p-10">
-              {renderView()}
-           </div>
-        </div>
+      </header>
+      <main className="max-w-page mx-auto px-5 md:px-8 py-8 md:py-10">
+        {/* One broken view must not blank the page: the navigation stays alive. */}
+        <ErrorBoundary key={`${currentView}:${String(activeParams)}`} onReset={() => navigate('runs')}>
+          {renderView()}
+        </ErrorBoundary>
       </main>
     </div>
   );

@@ -293,12 +293,16 @@ class TextGenerationBundle:
         lora: bool = False,
         base_model: Optional[str] = None,
         tiny: bool = False,
+        words: Optional[List[str]] = None,
     ):
         self.directory = Path(directory)
         self.block_size = block_size
         self.lora = lora
         self.base_model = base_model
         self.tiny = tiny
+        # The vocabulary of a tiny run. The tiny base of a LoRA adapter must be
+        # rebuilt with exactly the same vocabulary, or the shapes do not match.
+        self.words = list(words or [])
         self._model = None
         self._tokenizer = None
 
@@ -313,7 +317,7 @@ class TextGenerationBundle:
                     # The adapter was trained on the tiny offline
                     # configuration: the base has to be rebuilt the same way
                     # or the shapes cannot match.
-                    base, _tokenizer = _tiny_causal(self.base_model or "llama")
+                    base, _tokenizer = _tiny_causal(self.base_model or "llama", self.words)
                 else:
                     base = AutoModelForCausalLM.from_pretrained(self.base_model)
                 # ``self.directory`` already is the adapter directory (the
@@ -499,7 +503,7 @@ register_loader("text_seq2seq", TextSeq2SeqBundle.load)
 # --- the shared loaders ----------------------------------------------------------------
 
 
-def _tiny_classifier(checkpoint: str, n_classes: int):
+def _tiny_classifier(checkpoint: str, n_classes: int, words=None):
     """A tiny configuration, built from a config object (plan F1): the tests
     and the offline deployments never download anything."""
     from transformers import (
@@ -513,8 +517,9 @@ def _tiny_classifier(checkpoint: str, n_classes: int):
         config = AutoConfig.for_model(
             "gpt2", n_embd=32, n_layer=2, n_head=2, num_labels=n_classes
         )
+        tokenizer = _tiny_tokenizer(words)
+        config.vocab_size = len(tokenizer)
         model = AutoModelForSequenceClassification.from_config(config)
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
         model.config.pad_token_id = tokenizer.pad_token_id
     else:
@@ -525,15 +530,66 @@ def _tiny_classifier(checkpoint: str, n_classes: int):
             num_attention_heads=2,
             intermediate_size=64,
             num_labels=n_classes,
+            vocab_size=len(_tiny_tokenizer(words)),
         )
+        tokenizer = _tiny_tokenizer(words)
         model = AutoModelForSequenceClassification.from_config(config)
-        tokenizer = AutoTokenizer.from_pretrained(
-            "bert-base-uncased" if "bert" in base else "distilbert-base-uncased"
-        )
     return model, tokenizer
 
 
-def _tiny_causal(checkpoint: str):
+def _words_of(texts) -> list:
+    """The distinct words of some texts, for a tiny offline vocabulary.
+
+    A tiny model can only learn from words it has seen as tokens: a word that
+    maps to [UNK] is the same input for every text, and nothing can be learned
+    from it. This is why the vocabulary comes from the data being trained on.
+    """
+    words = set()
+    for text in texts:
+        words.update(str(text).split())
+    return sorted(words)
+
+
+def _tiny_tokenizer(vocab_words=None):
+    """A word-level tokenizer built in code: the tiny configurations use it.
+
+    The real checkpoints are loaded by name (``AutoTokenizer.from_pretrained``),
+    which needs the Hugging Face hub. A tiny model is only a test of the
+    *training path*, so it does not need a real vocabulary: this one is built
+    from the words of the data, with the special tokens the trainers rely on.
+    Nothing is downloaded, so the tiny configurations run offline and in any
+    CI sandbox.
+    """
+    from tokenizers import Tokenizer, models, pre_tokenizers, processors
+    from transformers import PreTrainedTokenizerFast
+
+    specials = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "<s>", "</s>", "<pad>"]
+    words = sorted(set(vocab_words or []) | set("abcdefghijklmnopqrstuvwxyz0123456789"))
+    vocab = {token: index for index, token in enumerate(specials + words)}
+    core = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
+    core.pre_tokenizer = pre_tokenizers.Whitespace()
+    # Every sequence ends with the end token, as a real tokenizer does. Without
+    # it a generation model is never trained to stop: its targets have no end,
+    # so it repeats a word until the length limit.
+    core.post_processor = processors.TemplateProcessing(
+        single="$A </s>",
+        pair="$A </s> $B:1 </s>:1",
+        special_tokens=[("</s>", vocab["</s>"])],
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=core,
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        mask_token="[MASK]",
+        bos_token="<s>",
+        eos_token="</s>",
+    )
+    return tokenizer
+
+
+def _tiny_causal(checkpoint: str, words=None):
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     if "llama" in checkpoint.lower():
@@ -543,32 +599,34 @@ def _tiny_causal(checkpoint: str):
             intermediate_size=64,
             num_hidden_layers=2,
             num_attention_heads=2,
-            vocab_size=50257,  # the tiny configuration ships with the gpt2 tokenizer
+            vocab_size=len(_tiny_tokenizer(words)),  # matches the offline tokenizer
         )
         model = AutoModelForCausalLM.from_config(config)
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer = _tiny_tokenizer(words)
         tokenizer.pad_token = tokenizer.eos_token
     else:
-        config = AutoConfig.for_model("gpt2", n_embd=32, n_layer=2, n_head=2)
+        tokenizer = _tiny_tokenizer(words)
+        config = AutoConfig.for_model(
+            "gpt2", n_embd=32, n_layer=2, n_head=2, vocab_size=len(tokenizer)
+        )
         model = AutoModelForCausalLM.from_config(config)
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
 
-def _tiny_seq2seq(checkpoint: str):
+def _tiny_seq2seq(checkpoint: str, words=None):
     from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 
     if "t5" in checkpoint:
+        tokenizer = _tiny_tokenizer(words)
         config = AutoConfig.for_model(
-            "t5", d_model=32, d_ff=64, num_layers=2, num_heads=2
+            "t5", d_model=32, d_ff=64, num_layers=2, num_heads=2, vocab_size=len(tokenizer)
         )
         # T5 starts its decoder with the pad token; a config built from
         # scratch does not carry it, and the seq2seq machinery needs it.
         config.decoder_start_token_id = 0
         config.pad_token_id = 0
         model = AutoModelForSeq2SeqLM.from_config(config)
-        tokenizer = AutoTokenizer.from_pretrained("t5-small")
     else:
         # The tiny BERT2BERT: two tiny BERTs warm-started into an
         # EncoderDecoderModel, exactly the construction of the real one.
@@ -578,10 +636,13 @@ def _tiny_seq2seq(checkpoint: str):
             BertModel,
         )
 
+        tokenizer = _tiny_tokenizer(words)
+        vocab = len(tokenizer)
         encoder_config = BertConfig(
-            hidden_size=32, num_hidden_layers=2, num_attention_heads=2, intermediate_size=64
+            vocab_size=vocab, hidden_size=32, num_hidden_layers=2, num_attention_heads=2, intermediate_size=64
         )
         decoder_config = BertConfig(
+            vocab_size=vocab,
             hidden_size=32,
             num_hidden_layers=2,
             num_attention_heads=2,
@@ -589,7 +650,6 @@ def _tiny_seq2seq(checkpoint: str):
             is_decoder=True,
             add_cross_attention=True,
         )
-        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         model = EncoderDecoderModel(
             encoder=BertModel(encoder_config), decoder=BertLMHeadModel(decoder_config)
         )
@@ -641,7 +701,9 @@ def train_text_classifier(
     train_frame, test_frame = _stratified_split(frame, 0.2, seed)
 
     if _tiny_enabled():
-        model, tokenizer = _tiny_classifier(checkpoint, len(classes))
+        model, tokenizer = _tiny_classifier(
+            checkpoint, len(classes), _words_of(train_frame["text"].tolist())
+        )
         pretrained_loaded = False
     else:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
@@ -764,7 +826,7 @@ def train_language_model(
         raise ValueError("The corpus needs at least four texts.")
 
     if _tiny_enabled():
-        model, tokenizer = _tiny_causal(checkpoint)
+        model, tokenizer = _tiny_causal(checkpoint, _words_of(texts))
         pretrained_loaded = False
     else:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
@@ -775,6 +837,9 @@ def train_language_model(
 
     # The held-out split (90/10 by example, plan F6), then the packing of
     # the training texts into blocks of block_size tokens.
+    # At random (seeded), for the reason given for the seq2seq split.
+    order = np.random.default_rng(int(params.get("random_state", 42))).permutation(len(texts))
+    texts = [texts[i] for i in order]
     split = max(1, int(len(texts) * 0.9))
     train_texts, held_out_texts = texts[:split], texts[split:]
 
@@ -864,7 +929,10 @@ def train_language_model(
     scratch = Path(tempfile.mkdtemp(prefix=f"text_lm_{model_name}_"))
     model.save_pretrained(scratch)
     tokenizer.save_pretrained(scratch)
-    bundle = TextGenerationBundle(scratch, block_size=block_size)
+    bundle = TextGenerationBundle(
+        scratch, block_size=block_size, tiny=_tiny_enabled(),
+        words=_words_of(texts) if _tiny_enabled() else None,
+    )
     return metrics, bundle
 
 
@@ -902,12 +970,19 @@ def train_seq2seq(
             "target": dataset[target_column].astype(str),
         }
     ).dropna()
-    train_frame, test_frame = frame.iloc[: max(3, int(len(frame) * 0.9))], frame.iloc[
-        max(3, int(len(frame) * 0.9)) :
-    ]
+    # Split by example, at random (seeded). A split of the first 90 percent and
+    # the last 10 percent would put whatever order the file is in (by date, by
+    # topic) into the held-out rows, and the score would not describe the data.
+    frame = frame.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    cut = max(3, int(len(frame) * 0.9))
+    train_frame, test_frame = frame.iloc[:cut], frame.iloc[cut:]
 
     if _tiny_enabled():
-        model, tokenizer = _tiny_seq2seq(checkpoint)
+        # A vocabulary covers every word of the data, as a real tokenizer's does:
+        # it is not something the model learns, so it is no leak of the held-out rows.
+        model, tokenizer = _tiny_seq2seq(
+            checkpoint, _words_of(frame["source"].tolist() + frame["target"].tolist())
+        )
         pretrained_loaded = False
     else:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
@@ -1087,7 +1162,7 @@ def train_llama_lora(
         raise ValueError("The corpus needs at least four texts.")
 
     if _tiny_enabled():
-        model, tokenizer = _tiny_causal("llama")
+        model, tokenizer = _tiny_causal("llama", _words_of(texts))
     else:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
         if tokenizer.pad_token is None:
@@ -1171,5 +1246,6 @@ def train_llama_lora(
     bundle = TextGenerationBundle(
         adapter_dir, block_size=block_size, lora=True, base_model=checkpoint,
         tiny=_tiny_enabled(),
+        words=_words_of(texts) if _tiny_enabled() else None,
     )
     return metrics, bundle

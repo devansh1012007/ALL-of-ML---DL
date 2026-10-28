@@ -104,6 +104,9 @@ class PredictRequest(BaseModel):
     prompt: Optional[str] = None
     window_rows: Optional[List[List[float]]] = None
     node_ids: Optional[List[str]] = None
+    # A reinforcement-learning model: the state id (Q-Learning) or the
+    # observation vector (PPO, DQN).
+    state: Optional[Any] = None
     max_new_tokens: int = Field(64, ge=1, le=GENERATION_MAX_NEW_TOKENS)
     temperature: float = Field(1.0, gt=0.0, le=2.0)
     top_p: float = Field(0.9, gt=0.0, le=1.0)
@@ -635,6 +638,14 @@ async def _run_prediction_inner(
         if not node_ids:
             raise HTTPException(status_code=422, detail="The request has no node id.")
         payload = {"node_ids": node_ids}
+    elif request_kind == "state":
+        if body.state is None:
+            raise HTTPException(
+                status_code=422,
+                detail="The request has no state: send the state id (Q-Learning) "
+                "or the observation vector (PPO, DQN).",
+            )
+        payload = {"state": body.state}
     else:  # pragma: no cover - an image is served by its own endpoint
         raise HTTPException(
             status_code=422,
