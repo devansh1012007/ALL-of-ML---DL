@@ -77,7 +77,7 @@ const UsersTab = ({ apiFetch, profiles, reload }) => {
   const load = useCallback(() => {
     apiFetch('/api/v1/admin/users?limit=200')
       .then((data) => { setUsers(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   useEffect(() => { load(); }, [load]);
@@ -90,7 +90,7 @@ const UsersTab = ({ apiFetch, profiles, reload }) => {
       load();
       reload();
     } catch (err) {
-      setError(err.message);
+      setError(err?.message || 'The request failed. Please try again.');
     } finally {
       setBusy(null);
     }
@@ -153,7 +153,7 @@ const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reloa
       .then((data) => {
         if (cancelled) return;
         setUsage(data.usage);
-        if (data.usage) setUsageFailed(false);
+        setUsageFailed(false);
       })
       .catch(() => { if (!cancelled) setUsageFailed(true); });
     return () => { cancelled = true; };
@@ -275,7 +275,7 @@ const QuotaEditor = ({ apiFetch, user, profiles, onSaved }) => {
       setMessage('Saved. The limits apply to the next request.');
       onSaved();
     } catch (err) {
-      setError(err.message);
+      setError(err?.message || 'The request failed. Please try again.');
     }
   };
 
@@ -326,12 +326,19 @@ const QuotaEditor = ({ apiFetch, user, profiles, onSaved }) => {
 
 const QueueTab = ({ apiFetch }) => {
   const [queue, setQueue] = useState(null);
-  const [error, setError] = useState(null);
+  // DECISION: keep load errors separate from mutation errors. The queue
+  // polls every 5s; a poll success must not wipe a refused cancel alert.
+  // The poll only clears its own loadError.
+  const [loadError, setLoadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
+  // INVARIANT: at most one alert is shown (action wins over load) so the
+  // existing single role="alert" contract is preserved.
+  const error = actionError || loadError;
 
   const load = useCallback(() => {
     apiFetch('/api/v1/admin/queue')
-      .then((data) => { setQueue(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .then((data) => { setQueue(data.items); setLoadError(null); })
+      .catch((err) => setLoadError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   useEffect(() => {
@@ -343,10 +350,10 @@ const QueueTab = ({ apiFetch }) => {
   const cancel = async (runId) => {
     try {
       await apiFetch(`/api/v1/admin/queue/${runId}/cancel`, { method: 'POST' });
-      setError(null);
+      setActionError(null);
       load();
     } catch (err) {
-      setError(err.message);
+      setActionError(err?.message || 'The request failed. Please try again.');
     }
   };
 
@@ -440,7 +447,7 @@ const ProfilesTab = ({ apiFetch, profiles, reload }) => {
       setError(null);
       reload();
     } catch (err) {
-      setError(err.message);
+      setError(err?.message || 'The request failed. Please try again.');
       setSaved(null);
     }
   };
@@ -504,7 +511,7 @@ const InvitesTab = ({ apiFetch }) => {
   const load = useCallback(() => {
     apiFetch('/api/v1/admin/invites')
       .then((data) => { setInvites(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   useEffect(() => { load(); }, [load]);
@@ -519,7 +526,7 @@ const InvitesTab = ({ apiFetch }) => {
       setError(null);
       load();
     } catch (err) {
-      setError(err.message);
+      setError(err?.message || 'The request failed. Please try again.');
     }
   };
 
@@ -550,14 +557,14 @@ const InvitesTab = ({ apiFetch }) => {
         </span>
       </div>
 
-      {created ? (
+      {created?.code ? (
         <div className="rounded-md border border-accent/50/30 bg-accent/10 p-4 flex items-center justify-between">
           <div>
             <div className="text-sm tabular-nums text-accent">{created.code}</div>
             <div className="text-xs text-muted mt-1">Copy it now - it is not shown again.</div>
           </div>
           <button
-            onClick={() => { navigator.clipboard?.writeText(created.code); }}
+            onClick={() => { if (created?.code) navigator.clipboard?.writeText(created.code); }}
             className="p-2 rounded-md hover:bg-accent-hover/20 text-accent"
             title="Copy the code"
           >
@@ -606,7 +613,7 @@ const AuditTab = ({ apiFetch }) => {
   useEffect(() => {
     apiFetch('/api/v1/admin/audit?limit=100')
       .then((data) => { setEvents(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   if (error) return <div className="text-bad text-sm">{error}</div>;

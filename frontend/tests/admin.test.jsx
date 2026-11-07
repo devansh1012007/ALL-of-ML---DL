@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -262,6 +262,83 @@ describe('admin mutations: queue cancel', () => {
     expect(alert).toHaveTextContent('Server refused the cancel');
     expect(screen.getByText('#101')).toBeInTheDocument();
   });
+
+  it('cancelling a queued run succeeds and reloads the list', async () => {
+    const app = renderApp({ hash: '#/admin', token: 'admin', seed: adminSeed() });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /^admin$/i });
+    fireEvent.click(screen.getByRole('button', { name: /^queue$/i }));
+
+    await screen.findByText('#101');
+    const getsBefore = backend.calls.filter(
+      (c) => c.method === 'GET' && c.pathname === '/api/v1/admin/queue'
+    ).length;
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    await waitFor(() => {
+      expect(
+        backend.calls.some(
+          (c) => c.method === 'POST' && c.pathname === '/api/v1/admin/queue/101/cancel'
+        )
+      ).toBe(true);
+    });
+    // The fake backend removes the cancelled run, so a successful cancel
+    // followed by the explicit reload must render the empty queue.
+    await waitFor(() => {
+      expect(screen.getByText('The queue is empty.')).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText('#101')).not.toBeInTheDocument();
+    expect(
+      backend.calls.filter(
+        (c) => c.method === 'GET' && c.pathname === '/api/v1/admin/queue'
+      ).length
+    ).toBeGreaterThan(getsBefore);
+  });
+
+  it('refused queue cancel survives a poll tick', async () => {
+    const app = renderApp({ hash: '#/admin', token: 'admin', seed: adminSeed() });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /^admin$/i });
+    fireEvent.click(screen.getByRole('button', { name: /^queue$/i }));
+
+    await screen.findByText('#101');
+    backend.state.fail['/api/v1/admin/queue/101/cancel'] = {
+      status: 409,
+      detail: 'Server refused the cancel',
+    };
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Server refused the cancel');
+
+    const getsBeforePoll = backend.calls.filter(
+      (c) => c.method === 'GET' && c.pathname === '/api/v1/admin/queue'
+    ).length;
+
+    // The queue polls every 5s on real timers. Wait for at least one poll
+    // GET after the refusal, then let its state update settle.
+    await waitFor(
+      () => {
+        expect(
+          backend.calls.filter(
+            (c) => c.method === 'GET' && c.pathname === '/api/v1/admin/queue'
+          ).length
+        ).toBeGreaterThan(getsBeforePoll);
+      },
+      { timeout: 10000 }
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Server refused the cancel');
+    expect(screen.getByText('#101')).toBeInTheDocument();
+  }, 20000);
 });
 
 describe('admin mutations: invite create', () => {
