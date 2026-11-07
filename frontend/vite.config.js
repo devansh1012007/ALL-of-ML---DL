@@ -10,6 +10,6 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     css: false,
-    include: ['tests/**/*.test.jsx'],
+    include: ['tests/**/*.{test,spec}.{js,jsx}'],
   },
 });
