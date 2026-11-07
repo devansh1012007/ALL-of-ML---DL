@@ -1,0 +1,12 @@
+# Tech debt and follow-ups
+
+Recorded during Frontend UI/UX Round 1 (revised) — `docs/plans/2026-11-08-frontend-ui-round1-revised.md`. Each item: impact + suggested fix. None blocks the round's acceptance (tests + build green).
+
+- **Runs pagination (limit=20, no UI).** Backend `GET /runs` defaults to `limit=20` (`backend/app/main.py:2338`); the frontend list has no pagination/total UI, so it silently truncates at 20 now that the `{items}` parse fix (R1) makes rows visible. Impact: users with >20 runs see only the first page without explanation. Fix: add total-aware pagination or "Showing first 20" notice (separate spec).
+- **D1/D2 browser probe not run.** jsdom cannot measure layout/pseudo-elements; D1 (Runs table width at 390px) and D2 (disclosure marker alignment closed/open at 360px/768px) are covered by static guards + inspection only. Impact: visual regression could pass tests. Fix: manual Chromium probe per spec §H, or Playwright spec (deferred per D5).
+- **Screen-reader pass not run (spec H).** C2 phase-change status and PredictionResult summary are DOM-verified only; real announcement verbosity needs NVDA/JAWS + keyboard-only pass of sign-in / start-run / watch-run / admin-approve. Impact: SR behaviour unverified. Fix: manual pass, record in audit.
+- **P2b low notes (deferred).** Empty object `detail:{}` renders `"{}"` instead of friendly sentence (pre-existing `formatApiDetail`); no test pins quota-object `detail` through the new `hasDetail` gate. Impact: cosmetic edge. Fix: tighten `hasDetail` to non-empty + add quota-object test.
+- **P3 low test-strength notes.** C2 dedup is proven by code, not by test (React bails on identical state); D1/D2 static guards are presence-only. Impact: weaker regression signal. Fix: exact-padding regex guards; dedup test via announcement counting if a tool allows.
+- **Copy ownership.** F3/F4/F16/F17 user-facing sentences are spec wording, not content-owner approved. Impact: copy may change. Fix: content-owner review.
+- **Deferred decisions (D3/D4/D5).** Product name still "PrimeTrade AutoML" everywhere; token still in `localStorage`; touch targets 24px AA (not 44px AAA); Playwright not in CI. Each needs an owner decision before its phase (spec §7).
+- **Backend test baseline not run.** No `.venv` in the dev environment, so `pytest backend/tests` was NOT-RUN for this round (no backend files changed). Impact: backend regressions unverified. Fix: run backend suite in CI / with venv before merge.

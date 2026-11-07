@@ -71,7 +71,7 @@ Backend (from repo root, venv at repo root):
 Frontend:
 - install: `scripts/install.sh --frontend` — it runs `npm install` in `frontend/` with the cache of the repository.
 - `cd frontend && npm run dev` → **http://localhost:3000** (`frontend/vite.config.js` sets `server.port: 3000`; the root `readme.md` says 5173 — it is wrong).
-- `npm run build` → `frontend/dist/`
+- `npm test` → Vitest (jsdom) in `frontend/tests/` — renders the real `<App/>` against a fetch-level fake backend (`frontend/tests/helpers.jsx`); `npm run build` → `frontend/dist/`
 
 Scripts:
 - `scripts/download.sh <url> [target]` — downloads a file and continues where it stopped (`curl --continue-at -`), retrying a transfer that breaks.

@@ -1,6 +1,6 @@
 # Plan: Frontend UI/UX Round 1 (revised — spec as target)
 
-Status: In progress — implementation started 2026-11-08
+Status: Done — P1/P2a/P2b/P3 implemented and reviewed 2026-11-08 (see §7 verification; browser/SR probes remain follow-ups in docs/tech-debt.md)
 Baseline: `main` @ `091e0cf`, clean tree
 Spec: operator message "Frontend spec: UI/UX round 1" (target state; **not present** in checkout — see Facts)
 Decisions: D1 scope Phase 1–2 (Option A), D2 recon+baseline yes, D3 keep "PrimeTrade AutoML" for now, D4 keep `localStorage` token, D5 24px AA touch, defer Playwright, D6 Phase 3 (admin/E1) before Phase 4 (split) — D6 applies after this round, Q7-a spec-is-target (user: "Start with your default")
@@ -74,3 +74,14 @@ Open questions (non-blocking): exact F3/F4/F16/F17 copy (owner), D1 px + SR veri
 - F6 minor, C3/C4/D1 underspecified → exact call-sites/hints/scoped selectors named in P3.
 - F7 minor, P1 missing pieces → `/me` seed, JWT crafting, fake timers/cleanup, `vitest run` in P1 done-criteria.
 - Test gaps → 401-preservation, bare-array tolerance, prediction announcement, all throw-paths added.
+
+## 7. Verification (actual)
+
+- P1: `npm test` 4/4, `npm run build` green. Review APPROVE (4 minor, fixed in `f0eaa1b`).
+- P2a: red 13 failed → green 21/21 after fixes (`aa90d1d` + `07b2ff9`). Review: majors fixed, delta APPROVE.
+- P2b: red 5 failed → green 30/30 (`cbeb190`). Review APPROVE (2 low deferred, see tech-debt).
+- P3: red 9 failed → green 39/39 (`81d39c5`). Review APPROVE (2 low advisory, see tech-debt).
+- Final combined review: pending (Step 8).
+- Backend `pytest`: NOT-RUN (no `.venv`; no backend files changed).
+- D1/D2 px + SR pass: NOT-RUN (browser/SR needed) — tech-debt.
+
