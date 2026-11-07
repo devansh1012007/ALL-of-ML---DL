@@ -132,3 +132,35 @@ describe('predict: server error shown verbatim, distinct from input error', () =
     expect(alert).not.toHaveTextContent(/Rows must be valid JSON/);
   });
 });
+
+describe('predict: result announces a summary, not the whole result', () => {
+  it('single role=status with result summary; result container has no aria-live', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: completedPredictSeed(),
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^use this model$/i })
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    // The full result is still plain visible content.
+    expect(await screen.findByText('a', { exact: true })).toBeInTheDocument();
+
+    const statuses = screen.getAllByRole('status');
+    expect(statuses).toHaveLength(1);
+    const status = statuses[0];
+    expect(status).toHaveTextContent(/1 prediction.*a/i);
+
+    // The result container that wraps the announcement no longer live-announces.
+    expect(status.parentElement).not.toHaveAttribute('aria-live');
+    expect(document.querySelectorAll('[aria-live]')).toHaveLength(0);
+
+    // The summary is short, not a dump of the probabilities.
+    expect(status.textContent).not.toMatch(/0\.9/);
+  });
+});

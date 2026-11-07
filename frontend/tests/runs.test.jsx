@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup, act } from '@testing-library/react';
+import { screen, cleanup, act, waitFor } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -42,6 +42,15 @@ function completedRun(id, modelName) {
     started_at: '2026-11-08T00:00:00Z',
     finished_at: '2026-11-08T00:01:00Z',
     wall_seconds: 60,
+  };
+}
+
+function runningRun(id, modelName) {
+  return {
+    ...completedRun(id, modelName),
+    status: 'running',
+    artifact_path: null,
+    metrics: null,
   };
 }
 
@@ -117,4 +126,128 @@ describe('runs: bare array tolerance', () => {
     expect(screen.getByText('#9')).toBeInTheDocument();
     expect(screen.queryByText('No runs yet')).not.toBeInTheDocument();
   });
+});
+
+describe('runs: checkbox column purpose is perceivable', () => {
+  it('Runs header shows visible "Compare" text and keeps row labels', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(7, 'Envelope_Forest')],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('Envelope_Forest')).toBeInTheDocument();
+
+    const header = screen.getByRole('columnheader', { name: /compare/i });
+    expect(header).toHaveTextContent('Compare');
+    // Visible, not screen-reader-only: the header cell holds no sr-only text.
+    expect(header.querySelector('.sr-only')).toBeNull();
+    expect(header.className).not.toContain('sr-only');
+
+    // Row checkboxes keep their comparison labels.
+    expect(
+      screen.getByLabelText(/select run 7 for a comparison/i)
+    ).toBeInTheDocument();
+  });
+});
+
+describe('run details: Progress announces the latest phase only', () => {
+  it(
+    'single role=status with latest phase; same-phase poll is stable, phase change updates',
+    async () => {
+      const app = renderApp({
+        hash: '#/run-details/1',
+        token: 'testuser',
+        seed: {
+          runs: [runningRun(1, 'Running_Forest')],
+          events: {
+            1: {
+              events: [
+                {
+                  seq: 1,
+                  kind: 'phase',
+                  payload: { phase: 'preprocessing', epoch: 1 },
+                },
+              ],
+            },
+          },
+        },
+      });
+      backend = app.backend;
+
+      expect(
+        await screen.findByRole('heading', { name: /progress/i })
+      ).toBeInTheDocument();
+
+      // The log itself is plain content now, not a live region.
+      const progress = document.querySelector(
+        'section[aria-label="Progress"]'
+      );
+      expect(progress).not.toBeNull();
+      const log = progress.querySelector('ol');
+      expect(log).not.toBeNull();
+      expect(log).not.toHaveAttribute('aria-live');
+      expect(log).toHaveTextContent('epoch 1');
+
+      // Exactly one status, carrying the phase only (not the epoch detail).
+      const statuses = screen.getAllByRole('status');
+      expect(statuses).toHaveLength(1);
+      const status = statuses[0];
+      expect(status).toHaveTextContent('preprocessing');
+      expect(status.textContent).not.toMatch(/epoch/);
+      const stableText = status.textContent;
+
+      // A repeated same-phase poll (different detail, same phase) must not
+      // re-announce: the status text stays stable while the log grows.
+      backend.state.events['1'].events.push({
+        seq: 2,
+        kind: 'phase',
+        payload: { phase: 'preprocessing', epoch: 2 },
+      });
+      await waitFor(
+        () => {
+          expect(log).toHaveTextContent('epoch 2');
+        },
+        { timeout: 8000 }
+      );
+      expect(screen.getAllByRole('status')).toHaveLength(1);
+      expect(screen.getByRole('status')).toHaveTextContent('preprocessing');
+      expect(screen.getByRole('status').textContent).toBe(stableText);
+      expect(screen.getByRole('status').textContent).not.toMatch(/epoch/);
+
+      // A metric line must not become the announcement either.
+      backend.state.events['1'].events.push({
+        seq: 3,
+        kind: 'metric',
+        payload: { accuracy: 0.95 },
+      });
+      await waitFor(
+        () => {
+          expect(log).toHaveTextContent('accuracy 0.95');
+        },
+        { timeout: 8000 }
+      );
+      expect(screen.getByRole('status')).toHaveTextContent('preprocessing');
+      expect(screen.getByRole('status').textContent).toBe(stableText);
+
+      // A phase change updates the single status.
+      backend.state.events['1'].events.push({
+        seq: 4,
+        kind: 'phase',
+        payload: { phase: 'training' },
+      });
+      await waitFor(
+        () => {
+          expect(screen.getByRole('status')).toHaveTextContent('training');
+        },
+        { timeout: 8000 }
+      );
+      expect(screen.getAllByRole('status')).toHaveLength(1);
+      expect(screen.getByRole('status').textContent.trim()).toBe('training');
+    },
+    { timeout: 30000 }
+  );
 });

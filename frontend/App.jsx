@@ -456,7 +456,8 @@ const ModelsCatalog = () => {
               return (
                 <li key={model.name} className="border-b border-rule/60">
                   <details className="group">
-                    <summary className="flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 -mx-2 px-2 rounded">
+                    <summary className="disclosure-summary flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 -mx-2 px-2 rounded">
+                      <span aria-hidden="true" className="disclosure-marker">+</span>
                       <span className="font-medium text-strong w-56 shrink-0 break-words">{model.name}</span>
                       <span className="text-muted flex-1 min-w-0 line-clamp-1 group-open:line-clamp-none">{model.description}</span>
                       <span className={classNames('text-sm shrink-0 text-right', usable ? 'text-faint' : 'text-warn')}>
@@ -571,11 +572,11 @@ const RunsDashboard = ({ navigate }) => {
           <button onClick={() => navigate('new-job')} className="btn btn-primary">Start a run</button>
         </div>
       ) : (
-        <div className="overflow-x-auto -mx-3">
+        <div className="overflow-x-auto runs-table-wrap">
           <table className="w-full text-sm">
             <thead>
               <tr>
-                <th className="th w-8"><span className="sr-only">Compare</span></th>
+                <th className="th">Compare</th>
                 <th className="th">Model</th>
                 <th className="th">Dataset</th>
                 <th className="th">Status</th>
@@ -1165,8 +1166,24 @@ const PredictPanel = ({ runId }) => {
 
 const PredictionResult = ({ result }) => {
   const predictions = result.predictions || [];
+  // Single screen-reader announcement per view: a short result summary only.
+  // DECISION: the full result stays plain visible content; the status never
+  // dumps probabilities or the whole payload.
+  const formatOne = (p) => (Array.isArray(p) ? p.join(', ') : isNumber(p) ? formatMetric(p) : String(p));
+  let summary = 'Prediction complete.';
+  if (typeof result.text === 'string' && result.text) {
+    summary = `Prediction complete: ${result.text.slice(0, 120)}`;
+  } else if (result.action !== undefined) {
+    const action = Array.isArray(result.action) ? result.action.join(', ') : String(result.action);
+    summary = `Best action ${action}.`;
+  } else if (predictions.length > 0) {
+    summary = `${predictions.length} prediction${predictions.length === 1 ? '' : 's'}: ${formatOne(predictions[0])}`;
+  } else if (result.reconstruction_error && result.reconstruction_error.length) {
+    summary = `Reconstruction error ${formatMetric(result.reconstruction_error[0])}.`;
+  }
   return (
-    <div className="mt-6 space-y-5" aria-live="polite">
+    <div className="mt-6 space-y-5">
+      <p role="status" className="sr-only">{summary}</p>
       {result.warnings && result.warnings.length > 0 && (
         <ul className="space-y-1">{result.warnings.map((w, i) => <li key={i} className="notice">{w}</li>)}</ul>
       )}
@@ -1294,15 +1311,21 @@ const CompareRuns = ({ runIds, navigate }) => {
             </label>
           </div>
           <div className="space-y-4 max-w-2xl">
-            {completed.map((r) => (
-              <Bar
-                key={r.id}
-                label={`#${r.id} ${r.model_name}`}
-                value={valueOf(r, selected)}
-                max={top}
-                tone={valueOf(r, selected) !== null && valueOf(r, selected) === bestOf(selected) ? 'bg-accent' : 'bg-faint'}
-              />
-            ))}
+            {completed.map((r) => {
+              const value = valueOf(r, selected);
+              const isBest =
+                value !== null && bestOf(selected) !== null && value === bestOf(selected);
+              return (
+                <Bar
+                  key={r.id}
+                  label={`#${r.id} ${r.model_name}`}
+                  value={value}
+                  max={top}
+                  tone={isBest ? 'bg-accent' : 'bg-faint'}
+                  note={isBest ? 'best' : undefined}
+                />
+              );
+            })}
           </div>
           <p className="text-sm text-faint mt-4">{LOWER_IS_BETTER.has(selected) ? 'Lower is better.' : 'Higher is better.'}</p>
         </section>
@@ -1359,6 +1382,11 @@ const RunEvents = ({ runId }) => {
   const { apiFetch } = useContext(AuthContext);
   const [events, setEvents] = useState([]);
   const [runStatus, setRunStatus] = useState(null);
+  // Single screen-reader announcement per view: the latest phase only.
+  // DECISION: log lines are plain visible content; announcing every polled
+  // line would spam screen readers. The status text changes only when the
+  // phase string changes, so repeated same-phase polls never re-announce.
+  const [announcedPhase, setAnnouncedPhase] = useState('');
   const afterRef = useRef(0);
 
   useEffect(() => {
@@ -1383,6 +1411,31 @@ const RunEvents = ({ runId }) => {
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [runId, apiFetch, runStatus]);
 
+  // The phase an event carries, from its kind / payload.phase. Metric and
+  // message events carry no phase and never update the announcement.
+  const phaseOf = (event) => {
+    const payload = event.payload || {};
+    if (event.kind === 'phase' && payload.phase) return String(payload.phase);
+    if (payload.phase) return String(payload.phase);
+    return null;
+  };
+  let latestPhase = null;
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const phase = phaseOf(events[i]);
+    if (phase) {
+      latestPhase = phase;
+      break;
+    }
+  }
+
+  // Dedup by phase string: the status updates only on a phase change, so
+  // repeated same-phase polls keep the same text and never re-announce.
+  useEffect(() => {
+    if (latestPhase && latestPhase !== announcedPhase) {
+      setAnnouncedPhase(latestPhase);
+    }
+  }, [latestPhase, announcedPhase]);
+
   if (!events.length) return null;
 
   // What an event says, in the words a person would use.
@@ -1403,7 +1456,10 @@ const RunEvents = ({ runId }) => {
   return (
     <section className="panel" aria-label="Progress">
       <h2 className="mb-3">Progress</h2>
-      <ol className="max-h-56 overflow-y-auto text-sm space-y-1 tabular-nums" aria-live="polite">
+      {announcedPhase && (
+        <p role="status" className="sr-only">{announcedPhase}</p>
+      )}
+      <ol className="max-h-56 overflow-y-auto text-sm space-y-1 tabular-nums">
         {events.map((event) => {
           const line = describe(event);
           return (
@@ -1609,7 +1665,7 @@ const RunDetails = ({ runId, navigate }) => {
       {run.status === 'completed' && scalarMetrics.length > 0 && (
         <section className="panel">
           <details>
-            <summary className="cursor-pointer text-strong font-medium hover:text-accent">All metrics ({scalarMetrics.length})</summary>
+            <summary className="disclosure-summary cursor-pointer text-strong font-medium hover:text-accent"><span aria-hidden="true" className="disclosure-marker">+</span>All metrics ({scalarMetrics.length})</summary>
             <dl className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-3">
               {scalarMetrics.map(([key, val]) => (
                 <div key={key} className="flex justify-between gap-4 border-b border-rule/60 pb-1">
@@ -1632,7 +1688,7 @@ const RunDetails = ({ runId, navigate }) => {
           {run.env_id && (<><dt className="text-muted">Environment</dt><dd className="break-all">{run.env_id}</dd></>)}
         </dl>
         <details className="mt-6">
-          <summary className="cursor-pointer text-strong font-medium hover:text-accent">Parameters</summary>
+          <summary className="disclosure-summary cursor-pointer text-strong font-medium hover:text-accent"><span aria-hidden="true" className="disclosure-marker">+</span>Parameters</summary>
           <p className="text-sm text-muted mt-3 mb-2">What you submitted:</p>
           <pre className="field font-mono text-sm overflow-x-auto">{JSON.stringify(run.hyperparameters || {}, null, 2)}</pre>
           {effectiveParameters && Object.keys(effectiveParameters).length > 0 && (
