@@ -195,6 +195,11 @@ const AuthProvider = ({ children }) => {
     const response = await fetch(`${API_BASE}${endpoint}`, {
       ...options,
       headers,
+    }).catch(() => {
+      // A network failure (offline, DNS, refused) has no HTTP status and no
+      // server `detail`: show one friendly sentence instead of the browser's
+      // raw `TypeError: Failed to fetch` at every caller.
+      throw new Error('Could not reach the server. Check your connection and try again.');
     });
 
     if (response.status === 401) {
@@ -209,7 +214,20 @@ const AuthProvider = ({ children }) => {
     
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      const error = new Error(formatApiDetail(errData && errData.detail, response.status));
+      const detail = errData && errData.detail;
+      // DECISION: a non-JSON error body (HTML/plaintext error page, no usable
+      // `detail`) has nothing server-authored to show verbatim. Fall back to
+      // the connectivity sentence instead of the raw "HTTP error! status: …",
+      // while a real JSON `detail` is still shown verbatim below.
+      const hasDetail =
+        (typeof detail === 'string' && detail.trim()) ||
+        (Array.isArray(detail) && detail.length > 0) ||
+        (detail && typeof detail === 'object');
+      const error = new Error(
+        hasDetail
+          ? formatApiDetail(detail, response.status)
+          : 'Could not reach the server. Check your connection and try again.'
+      );
       error.status = response.status;
       throw error;
     }
@@ -408,7 +426,9 @@ const ModelsCatalog = () => {
         <div>
           <h1 className="mb-1">Models</h1>
           <p className="text-muted">
-            {models.length > 0 ? `${runnable} of ${models.length} can run on this server.` : 'What you can train, and what this server can run.'}
+            {modelsError
+              ? 'The model list could not be loaded, so what this server supports is unknown. Showing the built-in list instead.'
+              : models.length > 0 ? `${runnable} of ${models.length} can run on this server.` : 'What you can train, and what this server can run.'}
           </p>
         </div>
         <input
@@ -418,7 +438,7 @@ const ModelsCatalog = () => {
       </header>
 
       {modelsError && (
-        <p role="alert" className="notice">
+        <p role="alert" className="notice notice-bad">
           The model list could not be loaded ({modelsError}). Showing the built-in list instead.
         </p>
       )}
@@ -498,7 +518,18 @@ const RunsDashboard = ({ navigate }) => {
     // A failed request is not the same as "there are no runs": the two cases are
     // reported separately so a backend outage is not mistaken for an empty history.
     apiFetch('/api/v1/ml/runs')
-      .then(data => { setRuns(Array.isArray(data) ? data : []); setRunsError(null); })
+      .then(data => {
+        // The real backend returns {items, total, limit, offset}; older callers
+        // and mocks may still return a bare array. Accept both so the list is
+        // not always empty against the real backend.
+        const items = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.items)
+            ? data.items
+            : [];
+        setRuns(items);
+        setRunsError(null);
+      })
       .catch(err => { setRunsError(err.message || 'Unknown error'); });
   }, [apiFetch]);
 
@@ -964,7 +995,16 @@ const PredictPanel = ({ runId }) => {
     const kind = schema.request_kind || 'rows';
     if (kind === 'rows') {
       if (mode === 'json') {
-        const rows = JSON.parse(text);
+        // DECISION: invalid input is a client error, not a server error. Show
+        // one friendly sentence here at the source so the raw SyntaxError
+        // ("Unexpected token …") never reaches predict()'s server-message
+        // path; server predict errors still surface verbatim via apiFetch.
+        let rows;
+        try {
+          rows = JSON.parse(text);
+        } catch {
+          throw new Error('Rows must be valid JSON. Check the input and try again.');
+        }
         if (!Array.isArray(rows)) throw new Error('The rows have to be a JSON array of objects.');
         return { rows };
       }
