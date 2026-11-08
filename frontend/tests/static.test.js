@@ -60,12 +60,16 @@ describe('static guard: no layout negative margins (R1)', () => {
   // ResultLine ticks are centered with -translate-x-1/2 / -translate-y-1/2,
   // which are transforms, not layout margins: strip that allow-list before
   // scanning so every other negative margin fails the suite.
-  const layoutNegativeMargin = /-m[trblxyse]?-\d/g;
+  const layoutNegativeMargin = /-m[trblxyse]?-(\d|\[)/g;
   const stripAllowList = (s) => s.replaceAll('-translate-x-1/2', '').replaceAll('-translate-y-1/2', '');
 
   it('App.jsx has no layout negative margins (translate allow-list excepted)', () => {
     const withoutAllowList = stripAllowList(appSource);
     expect(withoutAllowList.match(layoutNegativeMargin) || []).toEqual([]);
+    // Guard self-check: the pattern catches both the numeric (-m-4) and the
+    // arbitrary-value (-mt-[5px]) forms; the old /-\d/ form missed the latter.
+    expect('-mt-[5px]'.match(layoutNegativeMargin)).toEqual(['-mt-[']);
+    expect('-m-4'.match(layoutNegativeMargin)).toEqual(['-m-4']);
   });
 
   it('AdminScreen.jsx has no layout negative margins', () => {
