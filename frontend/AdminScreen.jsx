@@ -552,8 +552,8 @@ const InvitesTab = ({ apiFetch }) => {
 
       {created?.code ? (
         <div className="admin-invite-code">
-          <div>
-            <div className="text-sm tabular-nums text-accent">{created.code}</div>
+          <div className="min-w-0">
+            <div className="text-sm tabular-nums text-accent admin-invite-code-text">{created.code}</div>
             <div className="text-xs text-muted mt-1">Copy it now - it is not shown again.</div>
           </div>
           <button

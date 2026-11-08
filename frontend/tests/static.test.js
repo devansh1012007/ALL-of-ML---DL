@@ -600,4 +600,22 @@ describe('static guard: T-303 control consistency, reduced', () => {
     const preFix = '.admin-invite-code { display: flex; align-items: center; }';
     expect(/\.admin-invite-code\s*\{[^}]*flex-wrap:\s*wrap/.test(preFix)).toBe(false);
   });
+
+  it('invite code text can break hostile long tokens (V-104)', () => {
+    // Flex item min-content defeats overflow-wrap alone: the code text pairs
+    // min-width:0 with overflow-wrap:anywhere and the wrapper carries min-w-0.
+    // `anywhere` (not break-all): only breaks when the line must break.
+    expect(stylesSource).toMatch(/\.admin-invite-code-text\s*\{[^}]*min-width:\s*0/);
+    expect(stylesSource).toMatch(/\.admin-invite-code-text\s*\{[^}]*overflow-wrap:\s*anywhere/);
+    expect(source).toContain('admin-invite-code-text');
+    // Scoped to the invite-code block: AdminScreen already carries an unrelated
+    // min-w-0 in the audit row, so a bare toContain cannot pin the wrapper.
+    const inviteBlock = source.slice(source.indexOf('admin-invite-code">'));
+    expect(inviteBlock.slice(0, 400)).toContain('min-w-0');
+    expect(inviteBlock.slice(0, 400)).toContain('admin-invite-code-text');
+    // Guard self-check: the pre-V-104 literal (bare div, no rule) fails both pins.
+    const preFix = '<div className="text-sm tabular-nums text-accent">{created.code}</div>';
+    expect(/\.admin-invite-code-text\s*\{[^}]*overflow-wrap:\s*anywhere/.test(preFix)).toBe(false);
+    expect(preFix.includes('admin-invite-code-text')).toBe(false);
+  });
 });
