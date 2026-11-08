@@ -3,16 +3,27 @@ import React, { useState, useContext } from 'react';
 import { AuthContext } from '../components/shared.jsx';
 import { ThemeToggle } from '../components/theme.jsx';
 
+// Whitelist mapping (V-103): 409 -> username-only; 400 -> both;
+// all else (403/404/405/422/401/429/network undefined/>=500) -> describedby-only.
+function ariaFor(status) {
+  if (status === 409) return { uIn: true, pIn: false, uDe: true, pDe: false };
+  if (status === 400) return { uIn: true, pIn: true, uDe: true, pDe: true };
+  return { uIn: false, pIn: false, uDe: true, pDe: true };
+}
+
 export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
   const { login, apiFetch, sessionNotice } = useContext(AuthContext);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
+  const [errorStatus, setErrorStatus] = useState(null);
   const [loading, setLoading] = useState(false);
+  const { uIn, pIn, uDe, pDe } = ariaFor(errorStatus);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
+    setErrorStatus(null);
     setLoading(true);
 
     try {
@@ -40,6 +51,9 @@ export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
         : err.status === 429
         ? 'Too many attempts. Please wait a minute and try again.'
         : err.message);
+      // err.status is undefined for network failures (no status property on the Error)
+      // and a number for HTTP errors; preserve undefined vs null (no error) distinction.
+      setErrorStatus(err.status);
     } finally {
       setLoading(false);
     }
@@ -64,8 +78,8 @@ export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
               id="auth-username" type="text" required autoComplete="username"
               value={username} onChange={(e) => setUsername(e.target.value)}
               className="field"
-              aria-invalid={error ? true : undefined}
-              aria-describedby={error ? 'auth-error' : undefined}
+              aria-invalid={error && uIn ? true : undefined}
+              aria-describedby={error && uDe ? 'auth-error' : undefined}
             />
           </div>
           <div>
@@ -76,8 +90,8 @@ export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
               minLength={registering ? 8 : undefined}
               value={password} onChange={(e) => setPassword(e.target.value)}
               className="field"
-              aria-invalid={error ? true : undefined}
-              aria-describedby={error ? 'auth-error' : undefined}
+              aria-invalid={error && pIn ? true : undefined}
+              aria-describedby={error && pDe ? 'auth-error' : undefined}
             />
             {registering && <p className="mt-1.5 text-sm text-faint">At least 8 characters.</p>}
           </div>

@@ -198,7 +198,16 @@ describe('auth: T-304 failed submission exposes aria-invalid + aria-describedby 
     expect(bare.getAttribute('aria-invalid')).toBeNull();
   });
 
-  it('failed submit marks both fields aria-invalid="true" and describes them with the alert text', async () => {
+  // INVARIANT: every present aria-describedby resolves to the alert element.
+  function checkDescribedByInvariant(alert) {
+    const described = document.querySelectorAll('[aria-describedby]');
+    for (const el of described) {
+      const target = document.getElementById(el.getAttribute('aria-describedby'));
+      expect(target, `aria-describedby on ${el.id || el.tagName} resolves`).toBe(alert);
+    }
+  }
+
+  it('network failure marks neither field invalid but describes both with the alert text', async () => {
     const app = renderApp({
       seed: {
         fail: {
@@ -215,19 +224,164 @@ describe('auth: T-304 failed submission exposes aria-invalid + aria-describedby 
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/Could not reach the server/);
-    // The alert must be addressable so aria-describedby can point at it.
     const describedBy = alert.getAttribute('id');
     expect(describedBy, 'alert carries an id for aria-describedby').toBeTruthy();
 
     const username = screen.getByLabelText(/^username$/i);
     const password = screen.getByLabelText(/^password$/i);
     for (const field of [username, password]) {
-      expect(field).toHaveAttribute('aria-invalid', 'true');
+      expect(field).not.toHaveAttribute('aria-invalid');
       expect(field).toHaveAttribute('aria-describedby', describedBy);
-      // The describedby target is the alert itself, so AT announces the error.
-      expect(document.getElementById(field.getAttribute('aria-describedby'))).toBe(alert);
     }
-    // Mutation tripwire: removing aria-invalid/aria-describedby from AuthView
-    // makes the for-loop assertions above fail (attrs absent -> not 'true').
+    checkDescribedByInvariant(alert);
+    // Mutation tripwire: old both-fields code marks invalid -> fails not.toHaveAttribute.
+  });
+
+  it('register 409 marks username-only invalid (password-negative absent)', async () => {
+    const app = renderApp({
+      seed: {
+        fail: {
+          '/api/v1/register': { status: 409, detail: 'Username taken' },
+        },
+      },
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /create an account/i }));
+    expect(
+      await screen.findByRole('heading', { name: /create an account/i })
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^username$/i), {
+      target: { value: 'testuser' },
+    });
+    fireEvent.change(screen.getByLabelText(/^password$/i), {
+      target: { value: 'secret123' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^create account$/i }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/already taken/);
+    const alertId = alert.getAttribute('id');
+    expect(alertId).toBeTruthy();
+
+    const username = screen.getByLabelText(/^username$/i);
+    const password = screen.getByLabelText(/^password$/i);
+    expect(username).toHaveAttribute('aria-invalid', 'true');
+    expect(username).toHaveAttribute('aria-describedby', alertId);
+    expect(password).not.toHaveAttribute('aria-invalid');
+    expect(password).not.toHaveAttribute('aria-describedby');
+    checkDescribedByInvariant(alert);
+  });
+
+  it('login 429 describes both but invalidates neither', async () => {
+    const app = renderApp({
+      seed: { fail: { '/token': { status: 429, detail: 'Rate limited' } } },
+    });
+    backend = app.backend;
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Too many attempts/);
+    const alertId = alert.getAttribute('id');
+    for (const field of [screen.getByLabelText(/^username$/i), screen.getByLabelText(/^password$/i)]) {
+      expect(field).not.toHaveAttribute('aria-invalid');
+      expect(field).toHaveAttribute('aria-describedby', alertId);
+    }
+    checkDescribedByInvariant(alert);
+  });
+
+  it('login 502 server error describes both but invalidates neither', async () => {
+    const app = renderApp({
+      seed: { fail: { '/token': { status: 502, detail: 'Bad gateway' } } },
+    });
+    backend = app.backend;
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+    const alert = await screen.findByRole('alert');
+    const alertId = alert.getAttribute('id');
+    for (const field of [screen.getByLabelText(/^username$/i), screen.getByLabelText(/^password$/i)]) {
+      expect(field).not.toHaveAttribute('aria-invalid');
+      expect(field).toHaveAttribute('aria-describedby', alertId);
+    }
+    checkDescribedByInvariant(alert);
+  });
+
+  it('login 500 server error describes both but invalidates neither', async () => {
+    const app = renderApp({
+      seed: { fail: { '/token': { status: 500, detail: 'Server error' } } },
+    });
+    backend = app.backend;
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+    const alert = await screen.findByRole('alert');
+    const alertId = alert.getAttribute('id');
+    for (const field of [screen.getByLabelText(/^username$/i), screen.getByLabelText(/^password$/i)]) {
+      expect(field).not.toHaveAttribute('aria-invalid');
+      expect(field).toHaveAttribute('aria-describedby', alertId);
+    }
+    checkDescribedByInvariant(alert);
+  });
+
+  it('login 400 marks both fields invalid and describes both (guard-rail)', async () => {
+    const app = renderApp({
+      seed: { fail: { '/token': { status: 400, detail: 'Incorrect username or password' } } },
+    });
+    backend = app.backend;
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+    const alert = await screen.findByRole('alert');
+    const alertId = alert.getAttribute('id');
+    for (const field of [screen.getByLabelText(/^username$/i), screen.getByLabelText(/^password$/i)]) {
+      expect(field).toHaveAttribute('aria-invalid', 'true');
+      expect(field).toHaveAttribute('aria-describedby', alertId);
+    }
+    checkDescribedByInvariant(alert);
+  });
+
+  it('login 403 describes both but invalidates neither (user-confirmed whitelist)', async () => {
+    const app = renderApp({
+      seed: { fail: { '/token': { status: 403, detail: 'Invite required' } } },
+    });
+    backend = app.backend;
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+    const alert = await screen.findByRole('alert');
+    const alertId = alert.getAttribute('id');
+    for (const field of [screen.getByLabelText(/^username$/i), screen.getByLabelText(/^password$/i)]) {
+      expect(field).not.toHaveAttribute('aria-invalid');
+      expect(field).toHaveAttribute('aria-describedby', alertId);
+    }
+    checkDescribedByInvariant(alert);
+  });
+
+  it('login 401 defensive describes both but invalidates neither', async () => {
+    const app = renderApp({
+      seed: { fail: { '/token': { status: 401, detail: 'Unauthorized' } } },
+    });
+    backend = app.backend;
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+    const alert = await screen.findByRole('alert');
+    const alertId = alert.getAttribute('id');
+    for (const field of [screen.getByLabelText(/^username$/i), screen.getByLabelText(/^password$/i)]) {
+      expect(field).not.toHaveAttribute('aria-invalid');
+      expect(field).toHaveAttribute('aria-describedby', alertId);
+    }
+    checkDescribedByInvariant(alert);
   });
 });
