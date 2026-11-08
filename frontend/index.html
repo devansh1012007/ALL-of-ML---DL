@@ -2,8 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <script>
+      // T-101 pre-paint init: resolve once and set BOTH html[data-theme] and
+      // meta[name=color-scheme] from the single resolution. ONE outer
+      // try/catch with silent fall-through to dark on any throw.
+      try {
+        var stored = localStorage.getItem('prime_theme');
+        var resolved = 'dark';
+        if (stored === 'light' || stored === 'dark') {
+          resolved = stored;
+        } else if (
+          typeof window.matchMedia === 'function' &&
+          window.matchMedia('(prefers-color-scheme: light)').matches
+        ) {
+          resolved = 'light';
+        }
+        document.documentElement.dataset.theme = resolved;
+        document
+          .querySelector('meta[name="color-scheme"]')
+          .setAttribute('content', resolved);
+      } catch (_) {}
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PrimeTrade AutoML</title>
   </head>
   <body>

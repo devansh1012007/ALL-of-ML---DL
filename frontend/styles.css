@@ -30,6 +30,28 @@
   color-scheme: dark;
 }
 
+/* Light theme (T-101): same 14 token names, contrast-valid light triples
+   from the approved design record (W2-DEEP-01 D2 §2.1). :root above is
+   the dark default and must stay byte-identical; this block only overrides
+   when <html data-theme="light">. */
+[data-theme="light"] {
+  --canvas: 248 250 252;
+  --surface: 241 245 249;
+  --raised: 226 232 240;
+  --rule: 120 138 165;
+  --strong: 15 23 42;
+  --ink: 30 41 59;
+  --muted: 60 74 95;
+  --faint: 86 100 124;
+  --accent: 29 78 216;
+  --accent-hover: 30 64 175;
+  --accent-ink: 255 255 255;
+  --ok: 4 110 80;
+  --warn: 165 73 10;
+  --bad: 185 28 28;
+  color-scheme: light;
+}
+
 @layer base {
   html { -webkit-text-size-adjust: 100%; }
   body {

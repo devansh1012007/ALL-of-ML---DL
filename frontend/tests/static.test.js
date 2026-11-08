@@ -316,3 +316,177 @@ describe('static guard: R6 split coverage (F1)', () => {
     expect(contextDefs.length).toBe(1);
   });
 });
+
+// --- T-101 light mode guards (design W2-DEEP-01 D6, binding) ---
+const TOKEN_NAMES = [
+  'canvas', 'surface', 'raised', 'rule', 'strong', 'ink', 'muted', 'faint',
+  'accent', 'accent-hover', 'accent-ink', 'ok', 'warn', 'bad',
+];
+
+function extractBlock(css, pattern) {
+  const m = css.match(pattern);
+  if (!m) return null;
+  return m[1];
+}
+
+function parseTriples(block) {
+  const triples = {};
+  for (const name of TOKEN_NAMES) {
+    // Escape the hyphen in accent-hover / accent-ink.
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`--${escaped}:\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)`);
+    const m = block.match(re);
+    triples[name] = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  }
+  return triples;
+}
+
+function luminance([r, g, b]) {
+  const lin = (c) => {
+    const s = c / 255;
+    return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+function ratioOf(a, b) {
+  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (light + 0.05) / (dark + 0.05);
+}
+
+function composite(fg, alpha, bg) {
+  return fg.map((c, i) => Math.round(alpha * c + (1 - alpha) * bg[i]));
+}
+
+describe('static guard: T-101 light block structural', () => {
+  it('defines all 14 token names and color-scheme: light', () => {
+    const block = extractBlock(stylesSource, /\[data-theme="light"\]\s*\{([\s\S]*?)\}/);
+    expect(block, 'light block exists').not.toBeNull();
+    for (const name of TOKEN_NAMES) {
+      expect(block).toMatch(new RegExp(`--${name}:`));
+    }
+    expect(block).toContain('color-scheme: light');
+    // Guard self-check: a missing token fails the per-name assertion.
+    expect('--canvas:'.includes('--rule:')).toBe(false);
+  });
+});
+
+describe('static guard: T-101 dark-value invariance (85acdda)', () => {
+  it('14 :root triples equal the approved literals', () => {
+    const rootBlock = extractBlock(stylesSource, /:root\s*\{([\s\S]*?)\}/);
+    expect(rootBlock, ':root block exists').not.toBeNull();
+    const dark = parseTriples(rootBlock);
+    const expected = {
+      canvas: [18, 24, 33],
+      surface: [24, 32, 43],
+      raised: [32, 42, 55],
+      rule: [42, 54, 70],
+      strong: [245, 248, 252],
+      ink: [230, 235, 242],
+      muted: [154, 167, 185],
+      faint: [131, 146, 168],
+      accent: [91, 157, 240],
+      'accent-hover': [124, 177, 245],
+      'accent-ink': [10, 18, 32],
+      ok: [93, 201, 162],
+      warn: [228, 185, 95],
+      bad: [240, 128, 128],
+    };
+    for (const name of TOKEN_NAMES) {
+      expect(dark[name], `${name} parsed`).toEqual(expected[name]);
+    }
+    expect(rootBlock).toContain('color-scheme: dark');
+  });
+});
+
+describe('static guard: T-101 light ratio guards (D2 inventory)', () => {
+  const lightBlock = extractBlock(stylesSource, /\[data-theme="light"\]\s*\{([\s\S]*?)\}/);
+  const light = parseTriples(lightBlock);
+
+  it('body tokens clear 4.5 on canvas, surface and raised', () => {
+    for (const fg of ['strong', 'ink', 'muted', 'faint']) {
+      for (const bg of ['canvas', 'surface', 'raised']) {
+        const r = ratioOf(light[fg], light[bg]);
+        expect(r, `${fg}/${bg} ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    // Tightest body pair is pinned: faint/raised must stay above 4.5.
+    const tight = ratioOf(light.faint, light.raised);
+    expect(tight, `faint/raised ${tight.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('accent as link text and accent-ink dual clear 4.5', () => {
+    expect(ratioOf(light.accent, light.canvas), 'accent/canvas').toBeGreaterThanOrEqual(4.5);
+    expect(ratioOf(light.accent, light.surface), 'accent/surface').toBeGreaterThanOrEqual(4.5);
+    expect(ratioOf(light['accent-ink'], light.accent), 'accent-ink/accent').toBeGreaterThanOrEqual(4.5);
+    expect(ratioOf(light['accent-ink'], light['accent-hover']), 'accent-ink/accent-hover').toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('ok/warn/bad clear 4.5 on canvas and surface', () => {
+    for (const fg of ['ok', 'warn', 'bad']) {
+      for (const bg of ['canvas', 'surface']) {
+        const r = ratioOf(light[fg], light[bg]);
+        expect(r, `${fg}/${bg} ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it('non-text boundaries clear 3 (rule/fill/focus)', () => {
+    expect(ratioOf(light.rule, light.canvas), 'rule/canvas').toBeGreaterThanOrEqual(3);
+    expect(ratioOf(light.rule, light.surface), 'rule/surface').toBeGreaterThanOrEqual(3);
+    expect(ratioOf(light.accent, light.raised), 'accent/raised fill').toBeGreaterThanOrEqual(3);
+    expect(ratioOf(light['accent-hover'], light.raised), 'accent-hover/raised').toBeGreaterThanOrEqual(3);
+  });
+
+  it('badge washes (token/0.1 composite) keep text >=4.5', () => {
+    for (const bg of ['canvas', 'surface']) {
+      for (const fg of ['ok', 'warn', 'bad']) {
+        const composited = composite(light[fg], 0.1, light[bg]);
+        const r = ratioOf(light[fg], composited);
+        expect(r, `badge ${fg} on ${fg}/0.1 over ${bg} ${r.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it('confusion-matrix composites keep text >=4.5 at min and max alpha', () => {
+    // Max alpha 0.52 (diagonal accent + strong, off-diagonal warn + ink).
+    expect(
+      ratioOf(light.strong, composite(light.accent, 0.52, light.canvas)),
+      'confusion accent/0.52 + strong'
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      ratioOf(light.ink, composite(light.warn, 0.52, light.canvas)),
+      'confusion warn/0.52 + ink'
+    ).toBeGreaterThanOrEqual(4.5);
+    // Min alpha 0.12 (both texts carry info together with hue).
+    expect(
+      ratioOf(light.ink, composite(light.accent, 0.12, light.canvas)),
+      'confusion accent/0.12 + ink'
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      ratioOf(light.strong, composite(light.accent, 0.12, light.canvas)),
+      'confusion accent/0.12 + strong'
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      ratioOf(light.ink, composite(light.warn, 0.12, light.canvas)),
+      'confusion warn/0.12 + ink'
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('washed tags and ::selection keep text >=4.5', () => {
+    // .newjob-tag: accent text on accent/0.15 wash.
+    expect(
+      ratioOf(light.accent, composite(light.accent, 0.15, light.canvas)),
+      'newjob-tag over canvas'
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      ratioOf(light.accent, composite(light.accent, 0.15, light.surface)),
+      'newjob-tag over surface'
+    ).toBeGreaterThanOrEqual(4.5);
+    // ::selection: ink text on accent/0.35 wash.
+    expect(
+      ratioOf(light.ink, composite(light.accent, 0.35, light.canvas)),
+      '::selection'
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+});

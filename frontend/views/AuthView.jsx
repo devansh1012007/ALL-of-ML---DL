@@ -1,8 +1,9 @@
 // Moved verbatim from App.jsx in R6 (Frontend UI redesign); only import/export wiring changed.
 import React, { useState, useContext } from 'react';
 import { AuthContext } from '../components/shared.jsx';
+import { ThemeToggle } from '../components/theme.jsx';
 
-export const AuthView = ({ mode, setMode }) => {
+export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
   const { login, apiFetch, sessionNotice } = useContext(AuthContext);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -49,6 +50,9 @@ export const AuthView = ({ mode, setMode }) => {
     <main className="min-h-screen flex items-center px-6 py-12">
       <div className="auth-card">
         <p className="auth-brand text-sm font-medium mb-10">PrimeTrade AutoML</p>
+        <div className="mb-6">
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+        </div>
         <h1 className="mb-2">{registering ? 'Create an account' : 'Sign in'}</h1>
         <p className="text-muted mb-8">Train a model on your data, check it against a baseline, and use it.</p>
         {sessionNotice && <p role="status" className="notice mb-5">{sessionNotice}</p>}

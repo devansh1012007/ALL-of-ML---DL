@@ -675,7 +675,7 @@ export const NewJob = ({ navigate }) => {
                 <div className="text-xs text-muted mb-2">Scalability</div>
                 <div className={classNames("text-lg font-bold", 
                   testResults.scalability === 'high' ? 'text-ok' :
-                  testResults.scalability === 'medium' ? 'text-warn' : 'text-orange-400'
+                  testResults.scalability === 'medium' ? 'text-warn' : 'text-warn'
                 )}>
                   {testResults.scalability?.charAt(0).toUpperCase() + testResults.scalability?.slice(1)}
                 </div>

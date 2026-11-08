@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useContext } from 'react';
 import { AdminScreen } from './AdminScreen';
 import { formatBytes } from './format.js';
 import { AuthContext, AuthProvider } from './components/shared.jsx';
+import { resolveTheme, applyTheme, toggleTheme, ThemeToggle } from './components/theme.jsx';
 import { AuthView } from './views/AuthView.jsx';
 import { ModelsCatalog } from './views/ModelsCatalog.jsx';
 import { RunsDashboard } from './views/RunsDashboard.jsx';
@@ -61,7 +62,7 @@ class ErrorBoundary extends React.Component {
 
 // --- MAIN APP COMPONENT ---
 
-const MainApp = () => {
+const MainApp = ({ theme, onToggleTheme }) => {
   const { user, logout, apiFetch } = useContext(AuthContext);
   const [currentView, setCurrentView] = useState('runs');
   const [activeParams, setActiveParams] = useState(null);
@@ -155,6 +156,7 @@ const MainApp = () => {
               </span>
             )}
             <span className="text-strong">{user?.sub}</span>
+            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
             <button onClick={logout} className="min-h-6 inline-flex items-center hover:text-strong underline-offset-4 hover:underline">Sign out</button>
           </div>
         </div>
@@ -174,12 +176,35 @@ const MainApp = () => {
 
 export default function App() {
   const [authMode, setAuthMode] = useState('login');
+  // T-101: theme state lives in App (sole common ancestor of MainApp + AuthView).
+  // React treats documentElement.dataset.theme (set by the head init) as the
+  // source of truth on mount; absence falls back to resolveTheme().
+  const [theme, setTheme] = useState(() => {
+    const current = document.documentElement.dataset.theme;
+    if (current === 'light' || current === 'dark') return current;
+    return resolveTheme();
+  });
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+  const onToggleTheme = useCallback(() => {
+    setTheme((prev) => toggleTheme(prev));
+  }, []);
 
   return (
     <AuthProvider>
       <AuthContext.Consumer>
         {({ token }) => (
-          token ? <MainApp /> : <AuthView mode={authMode} setMode={setAuthMode} />
+          token ? (
+            <MainApp theme={theme} onToggleTheme={onToggleTheme} />
+          ) : (
+            <AuthView
+              mode={authMode}
+              setMode={setAuthMode}
+              theme={theme}
+              onToggleTheme={onToggleTheme}
+            />
+          )
         )}
       </AuthContext.Consumer>
     </AuthProvider>
