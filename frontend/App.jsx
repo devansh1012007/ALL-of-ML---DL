@@ -901,7 +901,7 @@ const ConfusionMatrix = ({ confusion }) => {
         <table className="confusion-table">
           <thead>
             <tr>
-              <th className="px-3 py-2" />
+              <th scope="col" className="px-3 py-2" />
               {labels.map((l) => <th key={String(l)} scope="col" className="px-3 py-2 text-muted font-medium">{String(l)}</th>)}
             </tr>
           </thead>
