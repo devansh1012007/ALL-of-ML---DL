@@ -619,4 +619,54 @@ describe('run details: P3 duration NaN guard', () => {
     expect(screen.getByText('Took 0 s')).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/NaN/);
   });
+
+  it('negative diff hides the duration chip (no Took, no NaN)', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(1, 'Detail_P3_Negative')],
+        runDetails: {
+          1: {
+            ...completedDetail(1, 'Detail_P3_Negative'),
+            started_at: '2026-11-08T00:01:00Z',
+            finished_at: '2026-11-08T00:00:00Z',
+          },
+        },
+      },
+    });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /detail_p3_negative/i });
+
+    // finished before started is an untrustworthy duration; the dishonest
+    // clamp would render "Took 0 s" — hide the chip instead.
+    expect(screen.queryByText(/took/i)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
+
+  it('mixed garbage/valid timestamps hides the duration chip (no Took)', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(1, 'Detail_P3_Mixed')],
+        runDetails: {
+          1: {
+            ...completedDetail(1, 'Detail_P3_Mixed'),
+            started_at: 'garbage',
+            finished_at: '2026-11-08T00:01:00Z',
+          },
+        },
+      },
+    });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /detail_p3_mixed/i });
+
+    // One unparseable side yields NaN regardless of which side produced
+    // it; the chip must hide generically, not only for both-garbage.
+    expect(screen.queryByText(/took/i)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
 });

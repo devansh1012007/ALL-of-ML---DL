@@ -211,13 +211,14 @@ export const RunDetails = ({ runId, navigate }) => {
 
   const effectiveParameters = run.metrics?.model_parameters;
   const live = run.status === 'queued' || run.status === 'running';
-  // INVARIANT: seconds is null unless both timestamps parse; a NaN diff
-  // (garbage-but-truthy dates) must hide the chip, never render "Took NaN s".
+  // INVARIANT: seconds is null unless both timestamps parse to a non-negative
+  // diff; NaN (garbage-but-truthy dates) or finished < started must hide the
+  // chip, never render "Took NaN s" or a false "Took 0 s" for negative diffs.
   // 0 is a valid duration (finished == started), so never use falsiness here.
   const durationMs = run.started_at && run.finished_at
     ? new Date(run.finished_at) - new Date(run.started_at)
     : null;
-  const seconds = durationMs === null || Number.isNaN(durationMs)
+  const seconds = durationMs === null || Number.isNaN(durationMs) || durationMs < 0
     ? null
     : Math.max(0, Math.round(durationMs / 1000));
   const scalarMetrics = run.metrics
