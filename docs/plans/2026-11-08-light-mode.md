@@ -43,26 +43,42 @@ the contract; values live in CSS).
 ## 4. Design decisions pinned here
 
 1. **Canonical attribute:** `document.documentElement.dataset.theme`. Only two legal values:
-   `"light"` (explicit light) and absent/`"dark"` (both render today's dark palette — spec pins
-   the implementation to write `"dark"` explicitly on toggle-to-dark so devtools state is
-   unambiguous; absence = system-was-dark initial).
-2. **Preference resolution (priority order):**
+   `"light"` (explicit light) and `"dark"` (both render today's dark palette; the toggle writes
+   `"dark"` explicitly so devtools state is unambiguous). Absence (initial page load before init
+   runs, or storage denied) renders dark; absence means "no stored choice" — the system
+   preference decides, not "system-was-dark".
+2. **Preference resolution (priority order, one-shot at load):**
    `localStorage[prime_theme]` ∈ {"light","dark"} → if absent, `matchMedia("(prefers-color-scheme: light)")`
    → else dark. Any other stored value (garbage/XSS payload) is IGNORED → falls through to
    system. The stored value is only ever assigned to `dataset.theme` (an allow-listed property),
    never to `innerHTML` — no injection vector.
+   - **Environment guards (P-02):** `resolveTheme()` checks `typeof window.matchMedia === 'function'`
+     and wraps the `localStorage` READ in `try/catch` (access itself can throw in some contexts);
+     any environment absence or throw falls through to dark — never a crash, never an uncaught
+     exception out of a render path. `theme.test.jsx` stubs `matchMedia` per test (both light-
+     and dark-preferring) because jsdom does not implement it.
+   - **No live sync (P-09):** resolution happens once at load. No `matchMedia` listener
+     (mid-session system switches are intentionally ignored) and no cross-tab `storage` listener
+     (a second tab picks up the new value on its next reload; last-write-wins).
 3. **Storage key:** `prime_theme`. Values `"light"`/`"dark"`. **Sign-out must NOT clear it**
    (per-browser preference, unlike `prime_token`).
-4. **Pre-paint init:** an inline script in `index.html` (before first paint) reads the resolved
-   preference and sets `data-theme` + updates the meta color-scheme. React then treats
+4. **Pre-paint init (P-01):** an inline script in `index.html`, placed in the **`<head>` before
+   the stylesheet/module entries**, fully `try/catch`-guarded (storage read, `matchMedia` call,
+   meta update — silent fall-through to dark on any throw, never an uncaught error), that reads
+   the resolved preference once and sets BOTH `documentElement.dataset.theme` and the meta
+   color-scheme `content` from that single resolution. React then treats
    `documentElement.dataset.theme` as the source of truth on mount (no double-apply, idempotent,
-   StrictMode-safe).
-5. **Meta color-scheme:** `index.html` meta starts at the resolved theme (`light`/`dark`) via
-   the same init script; the toggle updates it on flip so scrollbars/native controls follow.
-6. **Toggle placement:** a single header button in `App.jsx` (right-side cluster next to
-   "Sign out", OUTSIDE the `<nav>` element — smoke tests query nav by role/name) + the SAME
-   toggle rendered on the AuthView sign-in card (theme must be reachable pre-login). One
-   component (`components/theme.jsx` — new file; tailwind `content` globs already cover
+   StrictMode/HMR-safe; the init runs once at load, so neither needs handling).
+5. **Meta color-scheme:** the init script sets it from the resolved theme (`light`/`dark`);
+   the toggle updates it on flip so scrollbars/native controls follow.
+6. **Toggle placement + state ownership (P-03):** theme state lives in **`App`** (the sole common
+   ancestor of `MainApp` and `AuthView`). Both `ThemeToggle` instances — header button in
+   `App.jsx` (right-side cluster next to "Sign out", OUTSIDE the `<nav>` element — smoke tests
+   query nav by role/name) and the SAME toggle on the AuthView sign-in card (theme must be
+   reachable pre-login) — render from that state; all writes (attribute + meta + `prime_theme`)
+   go through the one `applyTheme()` path (no split-brain between React state and the DOM
+   attribute). The two shells never co-render, so duplicate accessible names are out of scope.
+   One component (`components/theme.jsx` — new file; tailwind `content` globs already cover
    `components/**`, no config change) exports: `resolveTheme()`, `applyTheme()`,
    `toggleTheme()`, and a `ThemeToggle` button.
 7. **Toggle semantics:** plain `<button aria-pressed>`; accessible label pinned by the design
@@ -76,19 +92,46 @@ the contract; values live in CSS).
 9. **Light palette requirements (design record computes values):** every text/background pair
    ≥4.5:1 (body) / ≥3:1 (large/headings, focus); `--accent-ink` on `--accent` ≥4.5:1 in BOTH
    themes (expect it stays dark-on-blue); `--warn`/`--bad`/`--ok` on `--canvas` ≥4.5:1 in light
-   (warn needs darkening — #E4B95F on white is ~1.9:1 today); alpha washes (e.g. `bg-accent/15`)
-   must be evaluated composited over light canvas, not on raw tokens. No mechanical 255−x invert.
+   (warn needs darkening — #E4B95F on white is ~1.9:1 today); alpha washes must be evaluated
+   composited over light canvas, not on raw tokens. No mechanical 255−x invert.
+   - **Pinned pair inventory (P-04):** the design record's table MUST cover, per theme:
+     body tokens (strong/ink/muted/faint) × (canvas, surface, raised); accent-as-text on
+     canvas + surface; **accent-ink on accent AND on accent-hover** (`.btn-primary` hover,
+     styles.css:94-95); ok/warn/bad × canvas + surface; `--rule` on `--canvas`; `--raised` on
+     `--canvas`; focus outline on `--canvas`. Table columns: `token`, `dark value`,
+     `light value`, `pair checked`, `ratio`. The `--accent` dual-role tension (link text needs
+     ≥4.5:1 on white; fill for `.btn-primary`/`Bar`/ResultLine needs to read as solid against
+     `--raised` tracks) must be shown in both roles.
+   - **Pinned alpha-wash inventory (P-05):** the design record MUST list every composited pair
+     (token/alpha, background token, resulting color, resulting ratio where text sits on it) for
+     at minimum: confusion-matrix cells at alpha min AND max (accent vs warn distinction on
+     white — off-diagonal warn cells vs diagonal accent cells, metrics.jsx:270, plus the
+     `bg-accent/25` CV band metrics.jsx:164); admin badges ok/warn/bad washes (styles.css:298-301);
+     `.newjob-tag` (styles.css:258-262); `::selection` (accent/0.35, :51); `.field:focus` ring
+     (accent/0.2, :85). Distinguishability (accent vs warn cells) must be shown, not just text
+     ratios. Non-text note to record: `ring-canvas` around the ResultLine dot will read as an
+     invisible white gap in light (cosmetic; acceptable) — record it, don't fix it with a token change.
 10. **Test structure:** `frontend/tests/theme.test.jsx` (new) — one `describe` per concern:
-    resolution order (stored/system/default), hostile stored values (XSS, 10KB, unicode),
-    localStorage-throw fallback (theme flips in-memory, no crash), toggle side effects
-    (attribute + meta + storage, sign-out does not clear), afterEach removes `prime_theme`.
-    `frontend/tests/static.test.js` — ADDITIVE guards only: `[data-theme="light"]` block exists,
-    all 14 token names defined in it, sets `color-scheme: light`. Guards pin structure, NOT
-    exact RGB triples (those are pinned by the contrast computation in the design record).
-11. **Probe checklist (manual Chromium, recorded in tech-debt — NOT claimable by jsdom):**
-    all 7 views + Admin at 390px + desktop in both themes; keyboard focus visible; toggle
-    persistence across reload; no dark flash for stored-light on throttled reload. Any
-    component-level fix beyond token values (expected: none) requires a spec amendment.
+    resolution order (stored/system/default; `matchMedia` stubbed per test — P-02), hostile
+    stored values (XSS, 10KB, unicode), localStorage-throw fallback (theme flips in-memory, no
+    crash), toggle side effects (attribute + meta + storage, sign-out does not clear), afterEach
+    removes `prime_theme`. The design record (edge: toggle accessible label — action-describing,
+    e.g. "Switch to light mode" — and no collision with nav link names "Runs"/"Models"/"New
+    run"/"Admin") must land BEFORE `theme.test.jsx` is written (P-10).
+    `frontend/tests/static.test.js` — ADDITIVE guards:
+    - Structural: `[data-theme="light"]` block exists, all 14 token names defined in it, sets
+      `color-scheme: light` (existing rule: pin structure, not values).
+    - **Ratio guards (P-06):** parse the 14 light triples from styles.css, compute relative
+      luminance + pairwise ratios for the full P-04 inventory, assert each meets the §4.9
+      thresholds (values stay free; ratios are pinned — a value edit that destroys contrast fails).
+    - **Dark-value invariance (P-06):** assert the 14 `:root` triples equal today's literals
+      (85acdda), making acceptance #4 automated.
+11. **Probe checklist (manual Chromium, recorded in tech-debt — NOT claimable by jsdom) (P-07):**
+    run against the **production build** (`npm run build` + `vite preview`) — the dev-only
+    unstyled flash (CSS injected via `main.jsx`) is out of scope and must not fail the
+    "no dark flash for stored-light on throttled reload" check. Checklist: all 7 views + Admin
+    at 390px + desktop in both themes; keyboard focus visible; toggle persistence across reload.
+    Any component-level fix beyond token values (expected: none) requires a spec amendment.
 
 ## 5. Acceptance criteria (measurable)
 
@@ -97,8 +140,14 @@ the contract; values live in CSS).
 3. Toggle flips attribute + meta + storage in one interaction; persists across reload; first
    paint matches stored/system (no flash for stored-light).
 4. Dark default at 85acdda is byte-identical (14 token values unchanged) when system is dark.
-5. `npm test` (full) + `npm run build` green; shipped-file greps for hex/`dark:`/palette
-   utilities show zero hits outside comments/tests.
+   (Enforceable form: the 14 `:root` token assignments are textually unchanged from 85acdda;
+   implemented as the P-06 dark-value assertion in static.test.js.)
+5. `npm test` (full) + `npm run build` green; shipped-file greps show zero hits outside
+   comments/tests. Literal commands:
+   `grep -rnE 'dark:' frontend/ --include='*.jsx' --include='*.js'` → no matches;
+   `grep -rnE '#[0-9a-fA-F]{3,8}\b' frontend/ --include='*.jsx'` → no matches
+   (styles.css token-definition comments at frontend/styles.css:16-19 are allowlisted hex);
+   `grep -rnE 'bg-white|text-black|from-|via-|to-' frontend/ --include='*.jsx'` → no matches.
 6. Hostile-value + localStorage-throw tests pass.
 7. Probe outcome recorded in `docs/tech-debt.md` (add a light-mode entry; do not delete the
    historical deferral lines).
