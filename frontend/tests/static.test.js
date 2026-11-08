@@ -54,3 +54,29 @@ describe('static guard: P3 D2 disclosures use a scoped inline marker', () => {
     expect(stylesSource).toContain("summary::before { content: '+';");
   });
 });
+
+describe('static guard: no layout negative margins (R1)', () => {
+  // Negative-margin utilities on any side (-m-*, -mt-*, -mx-*, ...). The
+  // ResultLine ticks are centered with -translate-x-1/2 / -translate-y-1/2,
+  // which are transforms, not layout margins: strip that allow-list before
+  // scanning so every other negative margin fails the suite.
+  const layoutNegativeMargin = /-m[trblxyse]?-\d/g;
+  const stripAllowList = (s) => s.replaceAll('-translate-x-1/2', '').replaceAll('-translate-y-1/2', '');
+
+  it('App.jsx has no layout negative margins (translate allow-list excepted)', () => {
+    const withoutAllowList = stripAllowList(appSource);
+    expect(withoutAllowList.match(layoutNegativeMargin) || []).toEqual([]);
+  });
+
+  it('AdminScreen.jsx has no layout negative margins', () => {
+    const withoutAllowList = stripAllowList(source);
+    expect(withoutAllowList.match(layoutNegativeMargin) || []).toEqual([]);
+  });
+
+  it('the ResultLine translate allow-list is the only intended translate', () => {
+    // Pinned so the allow-list stays visible: if these move, the strip above
+    // must be re-checked (R3 may redesign the ticks).
+    expect(appSource).toContain('-translate-x-1/2');
+    expect(appSource).toContain('-translate-y-1/2');
+  });
+});

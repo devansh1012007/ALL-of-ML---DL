@@ -3,22 +3,9 @@ import {
   Users, Layers, ListOrdered, Ticket, ScrollText, CheckCircle,
   Ban, Trash2, Copy, HardDrive, Cpu, ShieldAlert,
 } from 'lucide-react';
+import { formatBytes, formatWhen } from './format.js';
 
 // --- small shared pieces -----------------------------------------------------------
-
-const formatBytes = (bytes) => {
-  if (bytes === null || bytes === undefined) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-};
-
-const formatWhen = (iso) => {
-  if (!iso) return '—';
-  const date = new Date(iso);
-  return date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
-};
 
 // A usage bar: the value against its limit. A quota the user cannot see is
 // experienced as a bug - showing the limit turns a refusal into information

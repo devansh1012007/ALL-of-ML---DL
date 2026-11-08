@@ -1,5 +1,6 @@
 import React, { useState, useEffect, createContext, useContext, useCallback, useRef } from 'react';
 import { AdminScreen } from './AdminScreen';
+import { formatBytes, timeAgo } from './format.js';
 
 // --- CONFIGURATION ---
 const API_BASE = 'http://localhost:8010';
@@ -69,20 +70,6 @@ const humanizeKey = (value) =>
     .replace(/_/g, ' ')
     .replace(/\bllm\b/gi, 'LLM')
     .replace(/\b\w/g, char => char.toUpperCase());
-
-// "3 min ago", with the exact time left to a tooltip.
-const timeAgo = (iso) => {
-  if (!iso) return '';
-  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
-  if (seconds < 45) return 'just now';
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days} d ago`;
-  return new Date(iso).toLocaleDateString();
-};
 
 const STATUS_LABELS = { queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' };
 const STATUS_TONES = { completed: 'bg-ok', failed: 'bg-bad', running: 'bg-accent animate-pulse', queued: 'bg-faint', cancelled: 'bg-faint' };
@@ -456,7 +443,7 @@ const ModelsCatalog = () => {
               return (
                 <li key={model.name} className="border-b border-rule/60">
                   <details className="group">
-                    <summary className="disclosure-summary flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 -mx-2 px-2 rounded">
+                    <summary className="disclosure-summary flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 px-2 rounded">
                       <span aria-hidden="true" className="disclosure-marker">+</span>
                       <span className="font-medium text-strong w-56 shrink-0 break-words">{model.name}</span>
                       <span className="text-muted flex-1 min-w-0 line-clamp-1 group-open:line-clamp-none">{model.description}</span>
@@ -1283,7 +1270,7 @@ const CompareRuns = ({ runIds, navigate }) => {
         <span>Compare</span>
       </nav>
 
-      <header className="-mt-5">
+      <header>
         <h1 className="mb-1">Compare {runs.length} runs</h1>
         <p className="text-muted">The same score side by side. The best value in each row is marked.</p>
       </header>
@@ -1603,7 +1590,7 @@ const RunDetails = ({ runId, navigate }) => {
         <span>#{run.id}</span>
       </nav>
 
-      <header className="flex flex-wrap items-start justify-between gap-4 -mt-5">
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="mb-1">{run.model_name}</h1>
           <p className="text-muted flex flex-wrap items-center gap-x-5 gap-y-1">
@@ -2578,7 +2565,6 @@ const MainApp = () => {
     }
   };
 
-  const formatBytes = (n) => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
   const usage = me?.usage;
   const inRuns = ['runs', 'run-details', 'compare'].includes(currentView);
   const nav = [
@@ -2593,7 +2579,7 @@ const MainApp = () => {
       <header className="border-b border-rule">
         <div className="max-w-page mx-auto px-5 md:px-8 flex flex-wrap items-center gap-x-8 gap-y-2 py-3">
           <span className="font-semibold text-strong">PrimeTrade AutoML</span>
-          <nav aria-label="Main" className="flex items-center gap-1 -mx-2">
+          <nav aria-label="Main" className="flex items-center gap-1">
             {nav.map((item) => (
               <a
                 key={item.id}
