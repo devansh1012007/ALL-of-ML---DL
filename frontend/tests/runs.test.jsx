@@ -427,7 +427,8 @@ describe('runs: R5 mobile/a11y hardening (scroll shell, table scope, focus order
     });
 
     // Tab order follows DOM order: checkbox, then the model link. Both are
-    // keyboard-focusable (the row click handler is mouse-only by design).
+    // keyboard-focusable; the model link is the sole activation path (the
+    // mouse-only row click handler was removed in B1/D-B1).
     const checkbox = screen.getByLabelText(/select run 7 for a comparison/i);
     const link = screen.getByRole('link', { name: /r5_forest/i });
     expect(
@@ -438,5 +439,80 @@ describe('runs: R5 mobile/a11y hardening (scroll shell, table scope, focus order
     expect(document.activeElement).toBe(checkbox);
     link.focus();
     expect(document.activeElement).toBe(link);
+  });
+});
+
+describe('runs: B1 link-based row activation (D-B1)', () => {
+  it('clicking the row (not the link) does not navigate; the model link does', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(7, 'B1_Forest')],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('B1_Forest')).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs');
+
+    // (a) Row click is inert by design (D-B1): the model link is the sole
+    // activation path, so a click on the tr must not change the hash.
+    const row = screen
+      .getByLabelText(/select run 7 for a comparison/i)
+      .closest('tr');
+    expect(row).not.toBeNull();
+    fireEvent.click(row);
+    expect(window.location.hash).toBe('#/runs');
+
+    // (b) The model link navigates to the run-details view. The link is a
+    // plain <a href> (browser-default navigation), which jsdom processes
+    // asynchronously, so wait for the hash to catch up.
+    const link = screen.getByRole('link', { name: /b1_forest/i });
+    fireEvent.click(link);
+    await waitFor(
+      () => {
+        expect(window.location.hash).toBe('#/run-details/7');
+      },
+      { timeout: 3000 }
+    );
+  });
+
+  it('checkbox still toggles selection and enables Compare after row-click removal', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: {
+        runs: [
+          completedRun(7, 'B1_Check_Forest'),
+          completedRun(8, 'B1_Check_Linear'),
+        ],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('B1_Check_Forest')).toBeInTheDocument();
+
+    const compare = screen.getByRole('button', { name: /^compare$/i });
+    expect(compare).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText(/select run 7 for a comparison/i));
+    expect(
+      screen.getByLabelText(/select run 7 for a comparison/i)
+    ).toBeChecked();
+
+    fireEvent.click(screen.getByLabelText(/select run 8 for a comparison/i));
+    const enabled = screen.getByRole('button', { name: /^compare \(2\)$/i });
+    expect(enabled).not.toBeDisabled();
+
+    // Untick: selection (and the Compare count) updates, no navigation.
+    fireEvent.click(screen.getByLabelText(/select run 7 for a comparison/i));
+    expect(
+      screen.getByLabelText(/select run 7 for a comparison/i)
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole('button', { name: /^compare \(1\)$/i })
+    ).toBeDisabled();
+    expect(window.location.hash).toBe('#/runs');
   });
 });

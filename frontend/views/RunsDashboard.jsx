@@ -87,8 +87,8 @@ export const RunsDashboard = ({ navigate }) => {
               {runs.map((run) => {
                 const result = resultOf(run);
                 return (
-                  <tr key={run.id} onClick={() => navigate('run-details', run.id)} className="cursor-pointer hover:bg-surface/70">
-                    <td className="td" onClick={(e) => e.stopPropagation()}>
+                  <tr key={run.id}>
+                    <td className="td">
                       <input
                         type="checkbox"
                         aria-label={`Select run ${run.id} for a comparison`}
@@ -102,7 +102,6 @@ export const RunsDashboard = ({ navigate }) => {
                       <span className="inline-flex items-baseline gap-2 whitespace-nowrap">
                         <a
                           href={`#/run-details/${run.id}`}
-                          onClick={(e) => e.stopPropagation()}
                           className="font-medium text-strong hover:text-accent"
                         >
                           {run.model_name}
