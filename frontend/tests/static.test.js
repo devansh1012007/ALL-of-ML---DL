@@ -144,3 +144,87 @@ describe('static guard: R4 Admin shared classes', () => {
     expect(withoutAllowList.match(layoutNegativeMargin) || []).toEqual([]);
   });
 });
+
+describe('static guard: R5 mobile stacking', () => {
+  it('.newjob-pair stacks below sm and pairs at sm+', () => {
+    // Base rule is a single column; the two-column pair starts at 640px.
+    // The old stylesheet kept repeat(2, ...) at every width, so the Test Size /
+    // Random State fields were crushed side-by-side at 390px.
+    expect(stylesSource).toMatch(/\.newjob-pair\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;/);
+    expect(stylesSource).toMatch(/@media\s*\(min-width:\s*640px\)\s*\{\s*\.newjob-pair\s*\{[^}]*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+    // Self-check: the old always-two-column rule matches the anti-pattern and
+    // does NOT match the stacked-base rule above.
+    const oldRule = '.newjob-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }';
+    expect(/\.newjob-pair\s*\{[^}]*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(oldRule)).toBe(true);
+    expect(/\.newjob-pair\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*;/.test(oldRule)).toBe(false);
+  });
+
+  it('data tables keep a readable min-width and scroll inside their wrappers at 390px', () => {
+    // Min-width makes 390px layouts scroll instead of crushing columns;
+    // the wrapper owns the horizontal scroll.
+    expect(stylesSource).toMatch(/\.runs-table-wrap table\s*\{[^}]*min-width:/);
+    expect(stylesSource).toMatch(/\.compare-table-wrap table\s*\{[^}]*min-width:/);
+    expect(stylesSource).toMatch(/\.admin-table-wrap table\s*\{[^}]*min-width:/);
+    expect(stylesSource).toMatch(/\.admin-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
+    expect(stylesSource).toMatch(/\.compare-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
+    // The runs wrapper scrolls via its Tailwind overflow-x-auto class.
+    expect(appSource).toContain('overflow-x-auto runs-table-wrap');
+  });
+});
+
+describe('static guard: R5 touch targets (indicative; manual probe in tech-debt)', () => {
+  it('interactive classes declare a 24px floor', () => {
+    // A string scan cannot measure rendered height: this pins the declared
+    // minima only. The definitive check is the manual 390px probe in tech-debt.
+    expect(stylesSource).toMatch(/\.btn\s*\{[^}]*min-height:\s*2rem/);
+    expect(stylesSource).toMatch(/\.nav-link\s*\{[^}]*min-height:\s*1\.5rem/);
+    expect(stylesSource).toMatch(/\.breadcrumb a\s*\{[^}]*min-height:\s*1\.5rem/);
+    expect(stylesSource).toMatch(/\.link\s*\{[^}]*min-height:\s*1\.5rem/);
+    expect(stylesSource).toMatch(/\.compare-check\s*\{[^}]*min-height:\s*1\.5rem/);
+    expect(stylesSource).toMatch(/summary\.disclosure-summary\s*\{[^}]*min-height:\s*1\.5rem/);
+    // Sign-out keeps its 24px Tailwind floor.
+    expect(appSource).toContain('min-h-6');
+  });
+
+  it('focus-visible and the field focus ring are declared', () => {
+    // Preservation pin (audit): keyboard focus is never colour-only.
+    expect(stylesSource).toContain(':focus-visible');
+    expect(stylesSource).toMatch(/\.field:focus\s*\{[^}]*box-shadow/);
+  });
+});
+
+describe('static guard: R5 labels, accessible names, and table scopes', () => {
+  it('remaining in-between labels are explicit (compare metric, quota profile)', () => {
+    expect(appSource).toContain('htmlFor="compare-metric"');
+    expect(appSource).toContain('id="compare-metric"');
+    expect(source).toContain('htmlFor="quota-profile"');
+    expect(source).toContain('id="quota-profile"');
+  });
+
+  it('admin icon-only buttons expose an accessible name matching their title', () => {
+    // Titles stay verbatim (pinned by admin.test.jsx via getByTitle); the
+    // aria-label gives icon-only buttons a name independent of tooltip support.
+    for (const name of [
+      'Approve the pending account',
+      'Suspend the account',
+      'Reinstate the account',
+      'Delete the user and their files',
+      'Copy the code',
+    ]) {
+      expect(source).toContain(`aria-label="${name}"`);
+      expect(source).toContain(`title="${name}"`);
+    }
+  });
+
+  it('table column headers declare scope="col"', () => {
+    const appScopes = appSource.match(/scope="col"/g) || [];
+    const adminScopes = source.match(/scope="col"/g) || [];
+    // Runs (6) + Compare column template (2 sites) = 8 in App.jsx (the
+    // pre-R5 confusion header alone is 1, so this fails without the fix).
+    expect(appScopes.length).toBeGreaterThanOrEqual(8);
+    // Users (6) + Queue (6) + Invites (4) = 16 in AdminScreen.jsx (0 pre-R5).
+    expect(adminScopes.length).toBeGreaterThanOrEqual(16);
+    // Self-check: the unscoped header form has none.
+    expect(('<th className="th">Compare</th>'.match(/scope="col"/g) || []).length).toBe(0);
+  });
+});

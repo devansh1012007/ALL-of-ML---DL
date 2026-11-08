@@ -399,3 +399,44 @@ describe('run details: R3b sections with shared layout hooks', () => {
     expect(document.querySelectorAll('[aria-live]')).toHaveLength(0);
   });
 });
+
+describe('runs: R5 mobile/a11y hardening (scroll shell, table scope, focus order)', () => {
+  it('runs table scrolls in its wrapper, headers declare scope, and compare selection precedes the model link in tab order', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(7, 'R5_Forest')],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('R5_Forest')).toBeInTheDocument();
+
+    // The wrapper owns horizontal scrolling at 390px (the min-width itself
+    // lives in CSS and is guarded in static.test.js: jsdom cannot measure it).
+    const wrap = document.querySelector('.runs-table-wrap');
+    expect(wrap).not.toBeNull();
+    expect(wrap.className).toContain('overflow-x-auto');
+
+    // Column headers declare their scope for screen readers (absent pre-R5).
+    const headers = wrap.querySelectorAll('th');
+    expect(headers.length).toBeGreaterThan(0);
+    headers.forEach((th) => {
+      expect(th).toHaveAttribute('scope', 'col');
+    });
+
+    // Tab order follows DOM order: checkbox, then the model link. Both are
+    // keyboard-focusable (the row click handler is mouse-only by design).
+    const checkbox = screen.getByLabelText(/select run 7 for a comparison/i);
+    const link = screen.getByRole('link', { name: /r5_forest/i });
+    expect(
+      checkbox.compareDocumentPosition(link) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    checkbox.focus();
+    expect(document.activeElement).toBe(checkbox);
+    link.focus();
+    expect(document.activeElement).toBe(link);
+  });
+});

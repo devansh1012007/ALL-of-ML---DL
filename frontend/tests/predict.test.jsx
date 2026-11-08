@@ -411,3 +411,35 @@ describe('predict: R3b redesign keeps the predict request shapes', () => {
     expect(backend.calls.filter((c) => c.pathname === '/api/v1/ml/runs/1/predict')).toHaveLength(0);
   });
 });
+
+describe('predict: R5 segmented control hardening', () => {
+  it('input-style buttons are non-submit buttons in DOM order with pressed state', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('rows'),
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^use this model$/i })
+    ).toBeInTheDocument();
+
+    const oneRow = screen.getByRole('button', { name: /one row/i });
+    const severalRows = screen.getByRole('button', { name: /several rows/i });
+
+    // Non-submit so the control stays safe if the panel is ever nested in a
+    // form (absent pre-R5), and DOM order matches visual order for keyboards.
+    expect(oneRow).toHaveAttribute('type', 'button');
+    expect(severalRows).toHaveAttribute('type', 'button');
+    expect(
+      oneRow.compareDocumentPosition(severalRows) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+
+    expect(oneRow).toHaveAttribute('aria-pressed', 'true');
+    expect(severalRows).toHaveAttribute('aria-pressed', 'false');
+    severalRows.focus();
+    expect(document.activeElement).toBe(severalRows);
+  });
+});

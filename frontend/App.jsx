@@ -584,12 +584,12 @@ const RunsDashboard = ({ navigate }) => {
           <table className="w-full text-sm">
             <thead>
               <tr>
-                <th className="th">Compare</th>
-                <th className="th">Model</th>
-                <th className="th">Dataset</th>
-                <th className="th">Status</th>
-                <th className="th">Result</th>
-                <th className="th text-right">Started</th>
+                <th scope="col" className="th">Compare</th>
+                <th scope="col" className="th">Model</th>
+                <th scope="col" className="th">Dataset</th>
+                <th scope="col" className="th">Status</th>
+                <th scope="col" className="th">Result</th>
+                <th scope="col" className="th text-right">Started</th>
               </tr>
             </thead>
             <tbody>
@@ -1099,7 +1099,7 @@ const PredictPanel = ({ runId }) => {
         {kind === 'rows' && (
           <div className="predict-segmented" role="group" aria-label="Input style">
             {[['form', 'One row'], ['json', 'Several rows']].map(([m, label]) => (
-              <button key={m} onClick={() => setMode(m)} aria-pressed={mode === m}
+              <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
                 className={classNames('predict-segmented-btn', mode === m ? 'bg-raised text-strong' : 'text-muted hover:text-strong')}>
                 {label}
               </button>
@@ -1309,9 +1309,9 @@ const CompareRuns = ({ runIds, navigate }) => {
         <section className="panel compare-chart-panel">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
             <h2>By metric</h2>
-            <label className="flex items-center gap-3 text-sm text-muted">
+            <label htmlFor="compare-metric" className="flex items-center gap-3 text-sm text-muted">
               Metric
-              <select value={selected} onChange={(e) => setMetric(e.target.value)} className="field w-auto">
+              <select id="compare-metric" value={selected} onChange={(e) => setMetric(e.target.value)} className="field w-auto">
                 {choices.map((n) => <option key={n} value={n}>{n.replace(/_/g, ' ')}</option>)}
               </select>
             </label>
@@ -1341,9 +1341,9 @@ const CompareRuns = ({ runIds, navigate }) => {
         <table className="w-full text-sm">
           <thead>
             <tr>
-              <th className="th">Metric</th>
+              <th scope="col" className="th">Metric</th>
               {completed.map((r) => (
-                <th key={r.id} className="th">
+                <th scope="col" key={r.id} className="th">
                   <button onClick={() => navigate('run-details', r.id)} className="compare-run-link text-strong hover:text-accent font-medium">
                     {r.model_name}
                   </button>

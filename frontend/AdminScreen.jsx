@@ -98,12 +98,12 @@ const UsersTab = ({ apiFetch, profiles, reload }) => {
         <table className="w-full text-sm">
           <thead>
             <tr>
-              <th className="th">User</th>
-              <th className="th">Status</th>
-              <th className="th">Profile</th>
-              <th className="th">Last login</th>
-              <th className="th">Usage today</th>
-              <th className="th text-right">Actions</th>
+              <th scope="col" className="th">User</th>
+              <th scope="col" className="th">Status</th>
+              <th scope="col" className="th">Profile</th>
+              <th scope="col" className="th">Last login</th>
+              <th scope="col" className="th">Usage today</th>
+              <th scope="col" className="th text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -177,6 +177,7 @@ const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reloa
                 onClick={() => onAct(`/api/v1/admin/users/${user.id}/approve`)}
                 className="admin-icon-btn admin-icon-btn--ok"
                 title="Approve the pending account"
+                aria-label="Approve the pending account"
               >
                 <CheckCircle className="w-4 h-4" />
               </button>
@@ -187,6 +188,7 @@ const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reloa
                 onClick={() => onAct(`/api/v1/admin/users/${user.id}/suspend`)}
                 className="admin-icon-btn admin-icon-btn--warn"
                 title="Suspend the account"
+                aria-label="Suspend the account"
               >
                 <Ban className="w-4 h-4" />
               </button>
@@ -197,6 +199,7 @@ const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reloa
                 onClick={() => onAct(`/api/v1/admin/users/${user.id}`, 'PATCH', { status: 'active' })}
                 className="admin-icon-btn admin-icon-btn--ok"
                 title="Reinstate the account"
+                aria-label="Reinstate the account"
               >
                 <CheckCircle className="w-4 h-4" />
               </button>
@@ -217,6 +220,7 @@ const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reloa
               }}
               className="admin-icon-btn admin-icon-btn--bad"
               title="Delete the user and their files"
+              aria-label="Delete the user and their files"
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -270,8 +274,9 @@ const QuotaEditor = ({ apiFetch, user, profiles, onSaved }) => {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-3">
-        <span className="text-xs text-muted">Profile</span>
+        <label htmlFor="quota-profile" className="text-xs text-muted">Profile</label>
         <select
+          id="quota-profile"
           value={profileId ?? ''}
           onChange={(event) => setProfileId(event.target.value ? Number(event.target.value) : null)}
           className="field w-auto"
@@ -357,12 +362,12 @@ const QueueTab = ({ apiFetch }) => {
         <table className="w-full text-sm">
           <thead>
             <tr>
-              <th className="th">Run</th>
-              <th className="th">Owner</th>
-              <th className="th">Model</th>
-              <th className="th">Status</th>
-              <th className="th">Since</th>
-              <th className="th text-right" />
+              <th scope="col" className="th">Run</th>
+              <th scope="col" className="th">Owner</th>
+              <th scope="col" className="th">Model</th>
+              <th scope="col" className="th">Status</th>
+              <th scope="col" className="th">Since</th>
+              <th scope="col" className="th text-right" />
             </tr>
           </thead>
           <tbody>
@@ -555,6 +560,7 @@ const InvitesTab = ({ apiFetch }) => {
             onClick={() => { if (created?.code) navigator.clipboard?.writeText(created.code); }}
             className="admin-icon-btn admin-icon-btn--accent"
             title="Copy the code"
+            aria-label="Copy the code"
           >
             <Copy className="w-4 h-4" />
           </button>
@@ -566,10 +572,10 @@ const InvitesTab = ({ apiFetch }) => {
           <table className="w-full text-sm">
             <thead>
               <tr>
-                <th className="th">Invite</th>
-                <th className="th">Uses</th>
-                <th className="th">Expires</th>
-                <th className="th">State</th>
+                <th scope="col" className="th">Invite</th>
+                <th scope="col" className="th">Uses</th>
+                <th scope="col" className="th">Expires</th>
+                <th scope="col" className="th">State</th>
               </tr>
             </thead>
             <tbody>
