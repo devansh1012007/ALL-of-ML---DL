@@ -567,3 +567,56 @@ describe('run details: Phase E Started tooltip NaN guard', () => {
     expect(started.getAttribute('title')).not.toMatch(/Invalid Date/);
   });
 });
+
+// Phase P3: "Took NaN s" must never leak when run timestamps are garbage.
+describe('run details: P3 duration NaN guard', () => {
+  it('garbage started/finished hides the duration chip (no Took, no NaN)', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(1, 'Detail_P3_Garbage')],
+        runDetails: {
+          1: {
+            ...completedDetail(1, 'Detail_P3_Garbage'),
+            started_at: 'garbage',
+            finished_at: 'garbage',
+          },
+        },
+      },
+    });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /detail_p3_garbage/i });
+
+    // The bug renders "Took NaN s"; the fix hides the chip entirely.
+    expect(screen.queryByText(/took/i)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
+
+  it('valid zero duration still renders "Took 0 s"', async () => {
+    const ts = '2026-11-08T00:00:00Z';
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(1, 'Detail_P3_Zero')],
+        runDetails: {
+          1: {
+            ...completedDetail(1, 'Detail_P3_Zero'),
+            started_at: ts,
+            finished_at: ts,
+          },
+        },
+      },
+    });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /detail_p3_zero/i });
+
+    // finished == started must still render "Took 0 s" (not hidden by a
+    // falsy check on the computed 0).
+    expect(screen.getByText('Took 0 s')).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
+});

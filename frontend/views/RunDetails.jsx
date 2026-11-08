@@ -211,9 +211,15 @@ export const RunDetails = ({ runId, navigate }) => {
 
   const effectiveParameters = run.metrics?.model_parameters;
   const live = run.status === 'queued' || run.status === 'running';
-  const seconds = run.started_at && run.finished_at
-    ? Math.max(0, Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000))
+  // INVARIANT: seconds is null unless both timestamps parse; a NaN diff
+  // (garbage-but-truthy dates) must hide the chip, never render "Took NaN s".
+  // 0 is a valid duration (finished == started), so never use falsiness here.
+  const durationMs = run.started_at && run.finished_at
+    ? new Date(run.finished_at) - new Date(run.started_at)
     : null;
+  const seconds = durationMs === null || Number.isNaN(durationMs)
+    ? null
+    : Math.max(0, Math.round(durationMs / 1000));
   const scalarMetrics = run.metrics
     ? Object.entries(run.metrics).filter(([k, v]) => !STRUCTURED_METRICS.has(k) && !k.startsWith('_') && (v === null || typeof v !== 'object'))
     : [];
