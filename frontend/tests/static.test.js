@@ -84,3 +84,63 @@ describe('static guard: no layout negative margins (R1)', () => {
     expect(appSource).toContain('-translate-y-1/2');
   });
 });
+
+describe('static guard: R4 Admin shared classes', () => {
+  it('AdminScreen inputs use .field, not bespoke bg-raised strings', () => {
+    // R4 migration (E1): every bespoke input/select was
+    // "bg-raised border border-rule rounded-md px-2 py-1"; the shared
+    // .field class (with small w-auto/w-24/w-28 modifiers) replaces it.
+    expect(source).not.toContain('bg-raised border border-rule');
+    expect(source).not.toContain('bg-accent hover:bg-accent-hover');
+    expect(source).toContain('className="field w-auto"');
+    expect(source).toContain('className="field"');
+    // Guard self-check: the banned substring catches the old input form.
+    expect('bg-raised border border-rule rounded-md'.includes('bg-raised border border-rule')).toBe(true);
+  });
+
+  it('AdminScreen buttons use shared .btn variants and admin icon buttons', () => {
+    expect(source).toContain('btn btn-primary');
+    expect(source).toContain('btn btn-quiet');
+    expect(source).toContain('btn btn-danger');
+    expect(source).toContain('admin-icon-btn');
+    // Model icons are unchanged (lucide-react).
+    expect(source).toContain('CheckCircle');
+    expect(source).toContain('Trash2');
+    expect(source).toContain('Copy');
+  });
+
+  it('AdminScreen tables use .th/.td, shared wrappers and notices', () => {
+    expect(source).toContain('admin-table-wrap');
+    expect(source).toContain('className="th"');
+    expect(source).toContain('className="td"');
+    expect(source).not.toContain('px-4 py-3');
+    expect(source).not.toContain('divide-rule');
+    expect(source).toContain('notice notice-bad');
+    expect(source).toContain('notice notice-ok');
+    expect(source).toContain('admin-tab');
+    expect(source).toContain('admin-badge');
+    expect(source).toContain('admin-usage');
+    expect(source).toContain('admin-summary');
+  });
+
+  it('R4 admin classes are additive token-only styles with no layout hacks', () => {
+    // Shared accessors live in styles.css (tokens only, no ad-hoc hex, no
+    // negative margins) so Admin converges on the R1/R2/R3 visual system.
+    expect(stylesSource).toContain('.admin-tab');
+    expect(stylesSource).toContain('.admin-table-wrap');
+    expect(stylesSource).toContain('.admin-badge');
+    expect(stylesSource).toContain('.admin-usage');
+    expect(stylesSource).toContain('.admin-summary');
+    expect(stylesSource).toContain('.admin-icon-btn');
+    expect(stylesSource).toContain('.admin-form-label');
+    // Mobile tables scroll: the wrapper owns the horizontal scroll.
+    expect(stylesSource).toMatch(/\.admin-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
+    // Interactive minimum: icon buttons and tabs are at least 24px tall.
+    expect(stylesSource).toMatch(/\.admin-icon-btn\s*\{[^}]*min-height:\s*1\.5rem/);
+    expect(stylesSource).toMatch(/\.admin-tab\s*\{[^}]*min-height:\s*2rem/);
+    // No layout negative margins crept back into AdminScreen.
+    const layoutNegativeMargin = /-m[trblxyse]?-(\d|\[)/g;
+    const withoutAllowList = source.replaceAll('-translate-x-1/2', '').replaceAll('-translate-y-1/2', '');
+    expect(withoutAllowList.match(layoutNegativeMargin) || []).toEqual([]);
+  });
+});

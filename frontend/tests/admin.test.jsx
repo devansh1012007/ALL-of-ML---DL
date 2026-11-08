@@ -441,3 +441,48 @@ describe('admin reads: quota profiles', () => {
     });
   });
 });
+
+describe('admin design: R4 shared classes', () => {
+  it('marks the active tab with aria-current', async () => {
+    const app = renderApp({ hash: '#/admin', token: 'admin', seed: adminSeed() });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /^admin$/i });
+    expect(screen.getByRole('button', { name: /^users$/i })).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(screen.getByRole('button', { name: /^queue$/i }));
+
+    await screen.findByText('#101');
+    expect(screen.getByRole('button', { name: /^queue$/i })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: /^users$/i })).not.toHaveAttribute('aria-current');
+  });
+
+  it('uses shared field/btn/th/td classes for tables, quota editor and saves', async () => {
+    const app = renderApp({ hash: '#/admin', token: 'admin', seed: adminSeed() });
+    backend = app.backend;
+
+    await screen.findByText('alice');
+    // Users table headers/cells use the shared .th/.td classes.
+    const headers = document.querySelectorAll('th');
+    expect(headers.length).toBeGreaterThan(0);
+    headers.forEach((th) => expect(th.classList.contains('th')).toBe(true));
+    expect(document.querySelector('.admin-table-wrap')).not.toBeNull();
+
+    fireEvent.click(screen.getAllByTitle('Edit the quota of this user')[0]);
+
+    const saveBtn = await screen.findByText('Save');
+    expect(saveBtn.classList.contains('btn')).toBe(true);
+    expect(saveBtn.classList.contains('btn-primary')).toBe(true);
+
+    const select = document.querySelector('select');
+    expect(select).not.toBeNull();
+    expect(select.classList.contains('field')).toBe(true);
+
+    const numberInputs = document.querySelectorAll('input[type="number"]');
+    expect(numberInputs.length).toBeGreaterThan(0);
+    numberInputs.forEach((input) => expect(input.classList.contains('field')).toBe(true));
+
+    // Icon actions keep their titles and use the shared icon button class.
+    expect(screen.getByTitle('Approve the pending account').classList.contains('admin-icon-btn')).toBe(true);
+  });
+});
