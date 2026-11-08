@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -7,6 +7,40 @@ const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '..', 'AdminScreen.jsx'), 'utf8');
 const appSource = readFileSync(join(here, '..', 'App.jsx'), 'utf8');
 const stylesSource = readFileSync(join(here, '..', 'styles.css'), 'utf8');
+
+// R6 split (plan F1): App.jsx shrank to the shell + re-exports and the views
+// moved verbatim to views/*.jsx, the shared + metrics pieces to
+// components/*.jsx. The guards below read source text, not rendered output,
+// so a check that only reads App.jsx silently loses every string that moved
+// (disclosure-summary, -mx-3, aria-live, scope="col", ...). Scan the union
+// the guards actually protect: App.jsx + views/** + components/**. Admin
+// stays out of scope for the move and is already scanned separately above
+// as `source`, so the union of `combinedAppSource` and `source` is every
+// shipped .jsx the guards cover.
+const readJsxFiles = (dir) => {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((entry) => {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) return readJsxFiles(full);
+      return entry.isFile() && entry.name.endsWith('.jsx') ? [full] : [];
+    });
+};
+
+const scannedAppFiles = [
+  join(here, '..', 'App.jsx'),
+  ...readJsxFiles(join(here, '..', 'views')),
+  ...readJsxFiles(join(here, '..', 'components')),
+];
+const combinedAppSource = scannedAppFiles
+  .map((file) => readFileSync(file, 'utf8'))
+  .join('\n');
 
 describe('static guard: AdminScreen fetch contract', () => {
   it('contains no response.ok inspection of parsed JSON', () => {
@@ -22,14 +56,14 @@ describe('static guard: P3 aria-live containers are plain content', () => {
   it('RunEvents log and PredictionResult container have no aria-live', () => {
     // Both live containers are gone; the single role="status" status per view
     // carries the announcement (phase-change / summary only).
-    expect(appSource).not.toContain('aria-live');
+    expect(combinedAppSource).not.toContain('aria-live');
   });
 });
 
 describe('static guard: P3 D1 runs wrapper stays in the page', () => {
   it('runs table wrapper has no negative margin', () => {
-    expect(appSource).not.toContain('-mx-3');
-    expect(appSource).toContain('runs-table-wrap');
+    expect(combinedAppSource).not.toContain('-mx-3');
+    expect(combinedAppSource).toContain('runs-table-wrap');
   });
 
   it('D1 scoped padding rule is present without touching global .th/.td', () => {
@@ -43,9 +77,9 @@ describe('static guard: P3 D1 runs wrapper stays in the page', () => {
 
 describe('static guard: P3 D2 disclosures use a scoped inline marker', () => {
   it('three disclosure summaries opt into the inline marker', () => {
-    const uses = appSource.match(/disclosure-summary/g) || [];
+    const uses = combinedAppSource.match(/disclosure-summary/g) || [];
     expect(uses.length).toBeGreaterThanOrEqual(3);
-    expect(appSource).toContain('disclosure-marker');
+    expect(combinedAppSource).toContain('disclosure-marker');
   });
 
   it('scoped D2 marker rule is present and the global summary rule is left alone', () => {
@@ -63,8 +97,8 @@ describe('static guard: no layout negative margins (R1)', () => {
   const layoutNegativeMargin = /-m[trblxyse]?-(\d|\[)/g;
   const stripAllowList = (s) => s.replaceAll('-translate-x-1/2', '').replaceAll('-translate-y-1/2', '');
 
-  it('App.jsx has no layout negative margins (translate allow-list excepted)', () => {
-    const withoutAllowList = stripAllowList(appSource);
+  it('App.jsx + views/components have no layout negative margins (translate allow-list excepted)', () => {
+    const withoutAllowList = stripAllowList(combinedAppSource);
     expect(withoutAllowList.match(layoutNegativeMargin) || []).toEqual([]);
     // Guard self-check: the pattern catches both the numeric (-m-4) and the
     // arbitrary-value (-mt-[5px]) forms; the old /-\d/ form missed the latter.
@@ -80,8 +114,8 @@ describe('static guard: no layout negative margins (R1)', () => {
   it('the ResultLine translate allow-list is the only intended translate', () => {
     // Pinned so the allow-list stays visible: if these move, the strip above
     // must be re-checked (R3 may redesign the ticks).
-    expect(appSource).toContain('-translate-x-1/2');
-    expect(appSource).toContain('-translate-y-1/2');
+    expect(combinedAppSource).toContain('-translate-x-1/2');
+    expect(combinedAppSource).toContain('-translate-y-1/2');
   });
 });
 
@@ -168,7 +202,7 @@ describe('static guard: R5 mobile stacking', () => {
     expect(stylesSource).toMatch(/\.admin-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
     expect(stylesSource).toMatch(/\.compare-table-wrap\s*\{[^}]*overflow-x:\s*auto/);
     // The runs wrapper scrolls via its Tailwind overflow-x-auto class.
-    expect(appSource).toContain('overflow-x-auto runs-table-wrap');
+    expect(combinedAppSource).toContain('overflow-x-auto runs-table-wrap');
   });
 });
 
@@ -183,7 +217,7 @@ describe('static guard: R5 touch targets (indicative; manual probe in tech-debt)
     expect(stylesSource).toMatch(/\.compare-check\s*\{[^}]*min-height:\s*1\.5rem/);
     expect(stylesSource).toMatch(/summary\.disclosure-summary\s*\{[^}]*min-height:\s*1\.5rem/);
     // Sign-out keeps its 24px Tailwind floor.
-    expect(appSource).toContain('min-h-6');
+    expect(combinedAppSource).toContain('min-h-6');
   });
 
   it('focus-visible and the field focus ring are declared', () => {
@@ -195,8 +229,8 @@ describe('static guard: R5 touch targets (indicative; manual probe in tech-debt)
 
 describe('static guard: R5 labels, accessible names, and table scopes', () => {
   it('remaining in-between labels are explicit (compare metric, quota profile)', () => {
-    expect(appSource).toContain('htmlFor="compare-metric"');
-    expect(appSource).toContain('id="compare-metric"');
+    expect(combinedAppSource).toContain('htmlFor="compare-metric"');
+    expect(combinedAppSource).toContain('id="compare-metric"');
     expect(source).toContain('htmlFor="quota-profile"');
     expect(source).toContain('id="quota-profile"');
   });
@@ -217,7 +251,7 @@ describe('static guard: R5 labels, accessible names, and table scopes', () => {
   });
 
   it('table column headers declare scope="col"', () => {
-    const appScopes = appSource.match(/scope="col"/g) || [];
+    const appScopes = combinedAppSource.match(/scope="col"/g) || [];
     const adminScopes = source.match(/scope="col"/g) || [];
     // Runs (6) + Compare column template (2 sites) = 8 in App.jsx (the
     // pre-R5 confusion header alone is 1, so this fails without the fix).
@@ -226,5 +260,59 @@ describe('static guard: R5 labels, accessible names, and table scopes', () => {
     expect(adminScopes.length).toBeGreaterThanOrEqual(16);
     // Self-check: the unscoped header form has none.
     expect(('<th className="th">Compare</th>'.match(/scope="col"/g) || []).length).toBe(0);
+  });
+});
+
+describe('static guard: R6 split coverage (F1)', () => {
+  // The combined scan must actually read the new files. If views/** or
+  // components/** were unscanned, combinedAppSource would collapse to
+  // App.jsx alone and every moved-string guard above would go blind; the
+  // markers below live only in the moved files, so an App-only scan fails
+  // here by construction.
+  it('the combined scan covers App.jsx plus the views and components trees', () => {
+    expect(scannedAppFiles.length).toBeGreaterThanOrEqual(10);
+    expect(scannedAppFiles.some((file) => file.endsWith(join('views', 'AuthView.jsx')))).toBe(true);
+    expect(scannedAppFiles.some((file) => file.endsWith(join('components', 'shared.jsx')))).toBe(true);
+    expect(scannedAppFiles.some((file) => file.endsWith(join('components', 'metrics.jsx')))).toBe(true);
+  });
+
+  it('moved markers are present in the combined scan and absent from App.jsx alone', () => {
+    for (const marker of ['disclosure-summary', 'runs-table-wrap', 'compare-metric', 'scope="col"']) {
+      expect(combinedAppSource).toContain(marker);
+      expect(appSource).not.toContain(marker);
+    }
+    // Guard self-check: an App-only scan really does lose these strings.
+    expect('App.jsx without the moved strings'.includes('disclosure-summary')).toBe(false);
+  });
+
+  it('App.jsx shrank to the shell and defines no view or shared component', () => {
+    const lines = appSource.split('\n').length;
+    expect(lines).toBeLessThan(700);
+    for (const name of [
+      'AuthView', 'ModelsCatalog', 'RunsDashboard', 'RunDetails', 'CompareRuns',
+      'PredictPanel', 'NewJob', 'ResultLine', 'EvaluationPanel', 'AuthProvider',
+      'AuthContext', 'StatusMark', 'Breadcrumb',
+    ]) {
+      expect(appSource).not.toContain(`const ${name} =`);
+    }
+    // The shell itself stays: hash routing, ErrorBoundary key, default export.
+    expect(appSource).toContain('class ErrorBoundary extends');
+    expect(appSource).toContain('export default function App');
+    expect(appSource).toContain('MainApp');
+  });
+
+  it('every moved definition appears exactly once across the scanned files', () => {
+    const moved = [
+      'AuthView', 'ModelsCatalog', 'RunsDashboard', 'RunDetails', 'CompareRuns',
+      'PredictPanel', 'NewJob', 'ResultLine', 'EvaluationPanel', 'Bar',
+      'ConfusionMatrix', 'PreprocessingReport', 'PredictionResult', 'RunEvents',
+      'AuthProvider', 'groupModels', 'resultOf', 'headlineOf', 'formatMetric',
+    ];
+    for (const name of moved) {
+      const defs = combinedAppSource.match(new RegExp(`\\bconst ${name} =`, 'g')) || [];
+      expect(defs.length, name).toBe(1);
+    }
+    const contextDefs = combinedAppSource.match(/\bconst AuthContext =/g) || [];
+    expect(contextDefs.length).toBe(1);
   });
 });
