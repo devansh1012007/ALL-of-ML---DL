@@ -1,6 +1,6 @@
 # Plan: Frontend UI/UX Full Redesign (Round 2 — visual system + shell + views)
 
-Status: In progress — planner-reviewer APPROVE WITH CHANGES folded in 2026-11-08 (see §6); implementing R1→R6
+Status: Done — R1→R6 implemented and reviewed 2026-11-08 (see §7 verification; browser/SR probes remain follow-ups in docs/tech-debt.md)
 Baseline: branch `frontend-ui-round1` @ `0c1b7ed` (clean tree; `npm test` 39/39, `npm run build` green — verified by orchestrator). PR #1 (round-1) MERGED 2026-11-08T04:21:02Z; `origin/main` @ `7e40830` = merge of `0c1b7ed`. Round-2 work branches as `frontend-ui-round2` from `origin/main` @ `7e40830`.
 Prior round: `docs/plans/2026-11-08-frontend-ui-round1-revised.md` (P1 harness + P2 truthful states + P3 a11y/mobile, merged via PR #1)
 Decisions carried forward: D3 keep "PrimeTrade AutoML" name, D4 keep token in `localStorage`, D5 touch targets 24px AA minimum (Playwright deferred), D6 admin shared-classes before `App.jsx` split. No backend API changes.
@@ -74,3 +74,16 @@ Open questions (non-blocking): exact light-mode timing (deferred, token-ready as
 - F6 minor, Tailwind glob vague → R1 adds `./views/**/*.jsx` + `./components/**/*.jsx` up front with build check.
 - F7 minor, 24px string guard unreliable → indicative only; manual probe in tech-debt.
 - F8 minor, light-inversion unproven → marked hypothesis, no parity claim.
+
+## 7. Verification (actual)
+
+- R1: `npm test` 55/55, `npm run build` green. Review APPROVE (3 minor → 1 fixed 33529dd, format Invalid Date deferred).
+- R2: 58/58 + build. Review APPROVE (2 low/info) → nit fixed 58f3e04.
+- R3a: 65/65 + build. Review APPROVE.
+- R3b: 77/77 + build. Review APPROVE.
+- R3c: 85/85 + build. Review APPROVE (2 minor: .newjob-pair → R5, RL env-id gap).
+- R4: 91/91 + build. Review APPROVE (3 low).
+- R5: 100/100 + build. Review APPROVE-WITH-CHANGES (th scope miss → adcb095).
+- R6: 104/104 + build (App.jsx 2636→187 lines, shell + re-exports). Review APPROVE.
+- Backend `pytest`: NOT-RUN (no `.venv`; no backend files changed).
+- 390px/SR probes: NOT-RUN (jsdom cannot measure) — tech-debt.

@@ -10,3 +10,13 @@ Recorded during Frontend UI/UX Round 1 (revised) — `docs/plans/2026-11-08-fron
 - **Copy ownership.** F3/F4/F16/F17 user-facing sentences are spec wording, not content-owner approved. Impact: copy may change. Fix: content-owner review.
 - **Deferred decisions (D3/D4/D5).** Product name still "PrimeTrade AutoML" everywhere; token still in `localStorage`; touch targets 24px AA (not 44px AAA); Playwright not in CI. Each needs an owner decision before its phase (spec §7).
 - **Backend test baseline not run.** No `.venv` in the dev environment, so `pytest backend/tests` was NOT-RUN for this round (no backend files changed). Impact: backend regressions unverified. Fix: run backend suite in CI / with venv before merge.
+
+## Round 2 (full redesign) — `docs/plans/2026-11-08-frontend-ui-full-redesign.md`, 104 tests
+
+- **Browser/SR probes still not run.** Round-2 visuals (shell, views, admin, 390px stacking, 24px floors) verified by jsdom + static guards only; no Chromium screenshot, no NVDA/JAWS pass. Impact: visual/announcement regression could pass tests. Fix: manual probe of sign-in / catalog / runs / run-details / compare / predict / new-job / admin at 390px + keyboard/SR pass (carries D1/D2 items above).
+- **Invalid date renders "Invalid Date".** Canonical `formatWhen`/`timeAgo` (from `frontend/format.js`) do not guard `NaN` dates (R1 minor #2 deferred, pre-existing). Backend always sends ISO/null so impact is nil, but direct calls with garbage strings show JS internals. Fix: `Number.isNaN(d.getTime()) → "—"` + unit test.
+- **Runs row click remains mouse-only.** `RunDetails` via dashboard `<tr onClick>` has no keyboard path; keyboard users use the model link (R5 scope note). Impact: keyboard-only users cannot activate rows the same way. Fix: make row activation a link/button or add key handler + test (separate spec).
+- **Predict segmented has Tab+pressed, not arrow-key toolbar.** R5 restyled segmented control; full ARIA toolbar arrow-key navigation deferred. Impact: minor keyboard-efficiency gap. Fix: roving tabindex if SR pass flags it.
+- **RL model NewJob env-id label uncovered by test.** R3c noted RL `newjob-env-id` lacks a seed test. Impact: regression risk for that one field. Fix: add RL-seed test.
+- **Light mode deferred.** Tokens remain dark-only; `color-scheme:dark` retained. Token inversion remains a hypothesis (may need component fixes). Impact: no light UI. Fix: separate spec; do not invert tokens ad-hoc.
+- **Backend pytest still NOT-RUN.** Same as round-1 (no `.venv`, frontend-only diff). Fix: CI run before merge.
