@@ -2033,8 +2033,11 @@ const NewJob = ({ navigate }) => {
 
   const testResults = formatTestResults();
 
+  // INVARIANT: control ids are stable and unique within the single NewJob
+  // form mount; each visible label's htmlFor resolves to its control so
+  // getByLabelText and click-to-focus keep working after the class restyle.
   return (
-    <div className="max-w-6xl space-y-6">
+    <div className="newjob-page max-w-6xl">
       <header className="page-header">
         <div>
           <h1 className="mb-1">New run</h1>
@@ -2048,37 +2051,40 @@ const NewJob = ({ navigate }) => {
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="space-y-8">
-        
+      <form onSubmit={handleSubmit} className="newjob-form">
+
         {/* Section A: Data */}
         <div className="panel">
-          <h2 className="mb-5">Data</h2>
-          
-          <div className="flex space-x-4 mb-6">
+          <h2 className="newjob-section-title">Data</h2>
+
+          <div className="newjob-mode-toggle" role="group" aria-label="Dataset source">
             <button
               type="button"
               onClick={() => setSourceType('local')}
-              className={classNames("px-4 py-2 rounded-md text-sm font-medium transition-colors border", sourceType === 'local' ? "bg-raised border-rule text-strong" : "bg-transparent border-rule text-muted hover:text-strong")}
+              aria-pressed={sourceType === 'local'}
+              className="newjob-mode-btn"
             >
               Local Dataset (CSV)
             </button>
             <button
               type="button"
               onClick={() => setSourceType('hf')}
-              className={classNames("px-4 py-2 rounded-md text-sm font-medium transition-colors border", sourceType === 'hf' ? "bg-raised border-rule text-strong" : "bg-transparent border-rule text-muted hover:text-strong")}
+              aria-pressed={sourceType === 'hf'}
+              className="newjob-mode-btn"
             >
               Hugging Face Hub
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="newjob-grid-2">
             {sourceType === 'local' ? (
               <div>
-                <label className="block text-sm text-muted mb-1.5">Select Local Dataset</label>
+                <label htmlFor="newjob-dataset" className="newjob-field-label">Select Local Dataset</label>
                 {/* The select stays mounted when the list is empty so the "required"
                     rule keeps blocking the submission instead of posting an empty
                     dataset name to the backend. */}
                 <select
+                  id="newjob-dataset"
                   required={!isReinforcementLearning}
                   value={payload.dataset_id ?? ''}
                   onChange={(e) => selectDataset(e.target.value)}
@@ -2098,24 +2104,25 @@ const NewJob = ({ navigate }) => {
                   </p>
                 )}
                 {!datasetsError && datasets.length === 0 && (
-                  <p className="text-sm text-faint mt-2">
+                  <p className="newjob-hint">
                     No datasets available. Upload a CSV file below to start.
                   </p>
                 )}
                 {isReinforcementLearning && (
-                  <p className="text-sm text-faint mt-1.5">Not required for reinforcement learning models.</p>
+                  <p className="newjob-hint">Not required for reinforcement learning models.</p>
                 )}
                 {selectedDataset && selectedDataset.columns && selectedDataset.columns.length > 0 && (
-                  <p className="text-sm text-faint mt-2">
+                  <p className="newjob-hint">
                     {selectedDataset.row_count} rows, {selectedDataset.columns.length} columns
                     {selectedDataset.source === 'builtin' ? ', shipped with the repository' : ', uploaded by you'}
                   </p>
                 )}
                 {!isReinforcementLearning && (
                   <div className="mt-3">
-                    <label className="block text-xs font-medium text-faint mb-1">Upload a CSV file</label>
-                    <div className="flex items-center gap-3">
+                    <label htmlFor="newjob-upload" className="newjob-field-label-small">Upload a CSV file</label>
+                    <div className="newjob-upload-row">
                       <input
+                        id="newjob-upload"
                         type="file"
                         accept=".csv,text/csv"
                         onChange={handleUpload}
@@ -2139,8 +2146,9 @@ const NewJob = ({ navigate }) => {
               </div>
             ) : (
               <div className="md:col-span-2">
-                <label className="block text-sm text-muted mb-1.5">Hugging Face URL / Path</label>
+                <label htmlFor="newjob-hf-url" className="newjob-field-label">Hugging Face URL / Path</label>
                 <input
+                  id="newjob-hf-url"
                   type="text"
                   required
                   placeholder="e.g., databricks/databricks-dolly-15k"
@@ -2152,9 +2160,11 @@ const NewJob = ({ navigate }) => {
             )}
 
             <div>
-              <label className="block text-sm text-muted mb-1.5">Target / Label Column</label>
+              {/* The select/input share one id: only one mounts at a time. */}
+              <label htmlFor="newjob-label-column" className="newjob-field-label">Target / Label Column</label>
               {labelColumnOptions.length > 0 ? (
                 <select
+                  id="newjob-label-column"
                   required
                   value={payload.label_column}
                   onChange={(e) => setPayload({...payload, label_column: e.target.value})}
@@ -2164,6 +2174,7 @@ const NewJob = ({ navigate }) => {
                 </select>
               ) : (
                 <input
+                  id="newjob-label-column"
                   type="text"
                   required
                   placeholder="label"
@@ -2173,14 +2184,15 @@ const NewJob = ({ navigate }) => {
                 />
               )}
               {labelColumnOptions.length > 0 && (
-                <p className="text-sm text-faint mt-1.5">The columns of the selected dataset.</p>
+                <p className="newjob-hint">The columns of the selected dataset.</p>
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="newjob-pair">
                <div>
-                <label className="block text-sm text-muted mb-1.5">Test Size Split</label>
-                <input 
+                <label htmlFor="newjob-test-size" className="newjob-field-label">Test Size Split</label>
+                <input
+                  id="newjob-test-size"
                   type="number" 
                   step="0.01" min="0.01" max="0.99" required
                   value={payload.test_size}
@@ -2189,8 +2201,9 @@ const NewJob = ({ navigate }) => {
                 />
               </div>
                <div>
-                <label className="block text-sm text-muted mb-1.5">Random State</label>
+                <label htmlFor="newjob-random-state" className="newjob-field-label">Random State</label>
                 <input 
+                  id="newjob-random-state"
                   type="number" 
                   required
                   value={payload.random_state}
@@ -2200,10 +2213,11 @@ const NewJob = ({ navigate }) => {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="newjob-pair">
               <div>
-                <label className="block text-sm text-muted mb-1.5">Task type (tabular models)</label>
+                <label htmlFor="newjob-task-type" className="newjob-field-label">Task type (tabular models)</label>
                 <select
+                  id="newjob-task-type"
                   value={payload.task_type}
                   onChange={(e) => setPayload({...payload, task_type: e.target.value})}
                   className="field"
@@ -2214,8 +2228,9 @@ const NewJob = ({ navigate }) => {
                 </select>
               </div>
               <div>
-                <label className="block text-sm text-muted mb-1.5">Cross-validation folds (0 = off)</label>
+                <label htmlFor="newjob-cv-folds" className="newjob-field-label">Cross-validation folds (0 = off)</label>
                 <input
+                  id="newjob-cv-folds"
                   type="number" min="0" max="20" required
                   value={payload.cv_folds}
                   onChange={(e) => setPayload({...payload, cv_folds: e.target.value})}
@@ -2228,12 +2243,13 @@ const NewJob = ({ navigate }) => {
 
         {/* Section B: Model & Mode Selection */}
         <div className="panel">
-           <h2 className="mb-5">Architecture & Training Configuration</h2>
-           
-           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+           <h2 className="newjob-section-title">Architecture & Training Configuration</h2>
+
+           <div className="newjob-grid-2 mb-6">
              <div>
-                <label className="block text-sm text-muted mb-1.5">Model Selection</label>
-                 <select 
+                <label htmlFor="newjob-model" className="newjob-field-label">Model Selection</label>
+                 <select
+                   id="newjob-model"
                    required
                    value={payload.model_name}
                    onChange={(e) => setPayload({...payload, model_name: e.target.value})}
@@ -2258,7 +2274,7 @@ const NewJob = ({ navigate }) => {
                      Could not load models — {modelsError}. Using the built-in fallback list.
                    </p>
                  )}
-                 <p className="text-sm text-faint mt-1.5">
+                 <p className="newjob-hint">
                    {(() => {
                      const chosen = models.find((m) => m.name === payload.model_name);
                      return chosen && chosen.description ? chosen.description : 'Greyed-out models cannot run on this server; the Models page says why.';
@@ -2267,8 +2283,9 @@ const NewJob = ({ navigate }) => {
                </div>
 
              <div>
-               <label className="block text-sm text-muted mb-1.5">Training Mode</label>
+               <label htmlFor="newjob-mode" className="newjob-field-label">Training Mode</label>
                <select
+                 id="newjob-mode"
                  value={payload.mode}
                  onChange={(e) => setPayload({...payload, mode: e.target.value})}
                  className="field"
@@ -2285,7 +2302,7 @@ const NewJob = ({ navigate }) => {
 
             {/* Mode Description */}
             {payload.mode !== 'manual' && (
-              <div className="mb-6 p-3 bg-accent/15/20 border border-accent/50/50 rounded-md">
+              <div className="newjob-mode-note">
                 <div className="text-sm text-accent">
                   <span className="font-semibold">Mode: {humanizeKey(payload.mode)}</span> - 
                   {modeDescription}
@@ -2293,24 +2310,23 @@ const NewJob = ({ navigate }) => {
               </div>
             )}
 
-           {/* Preset Selector */}
-           <div className="mb-6">
-             <label className="block text-sm text-muted mb-1.5">Training Preset</label>
-             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+           {/* Preset Selector. // DECISION: a preset is a group of toggle
+               buttons, so the title is a group label (aria-labelledby) rather
+               than a <label htmlFor> (which needs one labelable control).
+               Text is verbatim; selection is exposed via aria-pressed. */}
+           <div className="mb-6" role="group" aria-labelledby="newjob-preset-label">
+             <span id="newjob-preset-label" className="newjob-field-label">Training Preset</span>
+             <div className="newjob-preset-grid">
                {trainingPresets.map(p => (
                  <button
                    key={p.name}
                    type="button"
                    onClick={() => setPayload({...payload, preset: p.name})}
-                   className={classNames(
-                     "p-3 rounded-md border text-left transition-all",
-                     payload.preset === p.name 
-                       ? "bg-accent/15/40 border-accent/50 text-strong" 
-                       : "bg-surface border-rule text-muted hover:border-faint/60"
-                   )}
+                   aria-pressed={payload.preset === p.name}
+                   className="newjob-preset-card"
                  >
-                    <div className="font-medium capitalize text-sm">{p.name}</div>
-                    <div className="text-sm text-faint mt-1.5">{p.description}</div>
+                    <div className="newjob-preset-name">{p.name}</div>
+                    <div className="newjob-preset-desc">{p.description}</div>
                   </button>
                 ))}
               </div>
@@ -2323,8 +2339,9 @@ const NewJob = ({ navigate }) => {
 
            {selectedModelDef?.category === 'reinforcement-learning' && (
              <div className="mb-6">
-                <label className="block text-sm text-muted mb-1.5">Gymnasium Environment ID (Required for RL)</label>
-                <input 
+                <label htmlFor="newjob-env-id" className="newjob-field-label">Gymnasium Environment ID (Required for RL)</label>
+                <input
+                  id="newjob-env-id"
                   type="text" 
                   required
                   placeholder="e.g., CartPole-v1"
@@ -2338,22 +2355,22 @@ const NewJob = ({ navigate }) => {
 
         {/* Section C: Model Details Panel */}
         {modelDetails && testResults && (
-          <div className="bg-gradient-to-br from-blue-900/20 to-indigo-900/20 border border-accent/50/50 rounded-md p-6">
+          <div className="newjob-intelligence">
             <h3 className="text-lg font-semibold text-strong mb-4">📊 Model Intelligence</h3>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+            <div className="newjob-intelligence-grid">
+              <div className="newjob-intelligence-cell">
                 <div className="text-xs text-muted mb-2">{testResults.accuracyLabel}</div>
                 <div className="text-lg font-bold text-accent">
                   {testResults.accuracy ? `${(testResults.accuracy[0]*100).toFixed(0)}% - ${(testResults.accuracy[1]*100).toFixed(0)}%` : 'N/A'}
                 </div>
               </div>
 
-              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+              <div className="newjob-intelligence-cell">
                 <div className="text-xs text-muted mb-2">Training Time</div>
                 <div className="text-lg font-bold text-ok">~{testResults.trainingTime}s</div>
               </div>
 
-              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+              <div className="newjob-intelligence-cell">
                 <div className="text-xs text-muted mb-2">Scalability</div>
                 <div className={classNames("text-lg font-bold", 
                   testResults.scalability === 'high' ? 'text-ok' :
@@ -2363,7 +2380,7 @@ const NewJob = ({ navigate }) => {
                 </div>
               </div>
 
-              <div className="bg-surface/50 rounded-md p-4 border border-rule/50">
+              <div className="newjob-intelligence-cell">
                 <div className="text-xs text-muted mb-2">Optimization Targets</div>
                 <div className="text-sm text-ink">
                   {selectedModelDef?.optimization?.length > 0 ? selectedModelDef.optimization.slice(0, 2).join(', ') : 'N/A'}
@@ -2377,7 +2394,7 @@ const NewJob = ({ navigate }) => {
                 <div className="text-xs text-muted mb-2">Best For:</div>
                 <div className="flex flex-wrap gap-2">
                   {testResults.bestFor.map((tag, idx) => (
-                    <span key={idx} className="px-3 py-1 bg-accent/15/40 border border-accent/50/50 rounded-full text-xs text-accent">
+                    <span key={idx} className="newjob-tag">
                       {tag.replace(/_/g, ' ')}
                     </span>
                   ))}
@@ -2398,10 +2415,10 @@ const NewJob = ({ navigate }) => {
         {/* Section D: Hyperparameters */}
         {selectedModelDef && payload.mode === 'manual' && (
           <div className="panel">
-             <h2 className="mb-5">Hyperparameters</h2>
-             
+             <h2 className="newjob-section-title">Hyperparameters</h2>
+
              {Object.keys(payload.hyperparameters).length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="newjob-params-grid">
                 {Object.entries(payload.hyperparameters).map(([key, val]) => {
                   const definition = selectedModelDef?.parameters?.[key];
                   // A null catalog default is an optional numeric parameter (e.g. max_depth).
@@ -2410,10 +2427,13 @@ const NewJob = ({ navigate }) => {
                   // turns 1.0 into 1), so every numeric input accepts any value:
                   // step="1" would make C = 0.5 fail the browser's own validation.
                   const step = isNumeric ? 'any' : undefined;
+                  // Catalog keys are snake_case identifiers, safe as an id fragment.
+                  const paramId = `newjob-param-${key}`;
                   return (
                    <div key={key}>
-                    <label className="block text-xs tabular-nums text-faint mb-1">{key}</label>
+                    <label htmlFor={paramId} className="newjob-field-label-small tabular-nums">{key}</label>
                     <input
+                       id={paramId}
                        type={isNumeric ? 'number' : 'text'}
                        step={step}
                        value={val === null || val === undefined ? '' : val}
@@ -2432,7 +2452,7 @@ const NewJob = ({ navigate }) => {
 
         {selectedModelDef && payload.mode !== 'manual' && (
           <div className="panel">
-             <h2 className="mb-5">Hyperparameters</h2>
+             <h2 className="newjob-section-title">Hyperparameters</h2>
              <div className="text-sm text-muted">
                <p className="mb-2">
                   In <span className="font-semibold">{humanizeKey(payload.mode)}</span> mode, hyperparameters will be automatically {
@@ -2466,7 +2486,7 @@ const NewJob = ({ navigate }) => {
           </div>
         )}
 
-        <div className="flex items-center justify-end gap-4 border-t border-rule pt-6">
+        <div className="newjob-submit-row">
           {!payload.model_name && <p className="text-sm text-faint">Choose a model to continue.</p>}
           <button type="submit" disabled={submitting || !payload.model_name} className="btn btn-primary">
             {submitting ? 'Queueing...' : 'Start run'}
