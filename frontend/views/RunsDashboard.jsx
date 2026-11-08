@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useContext } from 'react';
 import { AuthContext, StatusMark, classNames } from '../components/shared.jsx';
 import { resultOf } from '../components/metrics.jsx';
-import { timeAgo } from '../format.js';
+import { timeAgo, formatWhen } from '../format.js';
 
 export const RunsDashboard = ({ navigate }) => {
   const { apiFetch } = useContext(AuthContext);
@@ -124,7 +124,7 @@ export const RunsDashboard = ({ navigate }) => {
                         </>
                       ) : <span className="text-faint">{run.status === 'completed' ? 'No score' : ''}</span>}
                     </td>
-                    <td className="td text-right text-muted whitespace-nowrap" title={new Date(run.created_at).toLocaleString()}>
+                    <td className="td text-right text-muted whitespace-nowrap" title={formatWhen(run.created_at)}>
                       {timeAgo(run.created_at)}
                     </td>
                   </tr>

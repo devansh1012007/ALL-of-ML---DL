@@ -516,3 +516,30 @@ describe('runs: B1 link-based row activation (D-B1)', () => {
     expect(window.location.hash).toBe('#/runs');
   });
 });
+
+describe('runs: B2 Started tooltip uses formatWhen NaN guard (A1)', () => {
+  it('garbage created_at shows "—" cell and "—" title (no Invalid Date leak)', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: {
+        runs: [{ ...completedRun(7, 'B2_Forest'), created_at: 'garbage' }],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('B2_Forest')).toBeInTheDocument();
+
+    // The Started td is the last cell of the row; assert both its text and
+    // its title tooltip use the "—" unknown sentinel, not "Invalid Date".
+    const row = screen
+      .getByLabelText(/select run 7 for a comparison/i)
+      .closest('tr');
+    expect(row).not.toBeNull();
+    const cells = row.querySelectorAll('td');
+    const startedCell = cells[cells.length - 1];
+    expect(startedCell).toHaveTextContent('—');
+    expect(startedCell).toHaveAttribute('title', '—');
+    expect(startedCell.getAttribute('title')).not.toMatch(/Invalid Date/);
+  });
+});
