@@ -91,9 +91,17 @@ the contract; values live in CSS).
    change in the impl report).
 9. **Light palette requirements (design record computes values):** every text/background pair
    ≥4.5:1 (body) / ≥3:1 (large/headings, focus); `--accent-ink` on `--accent` ≥4.5:1 in BOTH
-   themes (expect it stays dark-on-blue); `--warn`/`--bad`/`--ok` on `--canvas` ≥4.5:1 in light
+   themes. ~~(expect it stays dark-on-blue)~~ **[RESOLVED at design (W2-DEEP-01, §2.4b):**
+   accent-ink is WHITE in the light block (255 255 255). The two constraints are mutually
+   exclusive (dark ink on accent ≥4.5 forces accent luminance ≥0.211; accent-as-text ≥4.5 on
+   white canvas forces accent luminance ≤0.183 — an empty interval), so white ink is the only
+   compliant value. Dark block keeps `10 18 32`.]** `--warn`/`--bad`/`--ok` on `--canvas` ≥4.5:1 in light
    (warn needs darkening — #E4B95F on white is ~1.9:1 today); alpha washes must be evaluated
    composited over light canvas, not on raw tokens. No mechanical 255−x invert.
+   - **[ACCEPTED EXCEPTION (W2-DEEP-01, §2.4a):** `--raised` on `--canvas` is 1.18:1 — a FILL
+     surface, never a boundary. Every raised consumer is bordered by `--rule` (rule/canvas
+     3.36:1) or a fill track (accent fill 5.44:1 on raised). Mitigated by the boundary contract;
+     do not darken raised to chase 3:1 (would break faint text 4.85:1 on raised).]**
    - **Pinned pair inventory (P-04):** the design record's table MUST cover, per theme:
      body tokens (strong/ink/muted/faint) × (canvas, surface, raised); accent-as-text on
      canvas + surface; **accent-ink on accent AND on accent-hover** (`.btn-primary` hover,
