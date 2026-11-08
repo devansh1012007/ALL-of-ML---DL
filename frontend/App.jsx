@@ -795,15 +795,15 @@ const ResultLine = ({ metrics }) => {
   const description = `${h.label} ${fmtNum(h.value)}${hasBase ? `, baseline ${fmtNum(h.baseline)}` : ''}${cv ? `, cross-validation ${fmtNum(cv.mean)} plus or minus ${fmtNum(cv.std)}` : ''}.`;
 
   return (
-    <section aria-label="Result" className="panel">
-      <div className="flex flex-wrap items-baseline gap-x-4">
-        <span className="text-5xl font-semibold text-strong tabular-nums tracking-tight">{fmtNum(h.value)}</span>
+    <section aria-label="Result" className="panel result-panel">
+      <div className="result-headline-row">
+        <span className="result-value">{fmtNum(h.value)}</span>
         <span className="text-muted">{h.label}{h.higherBetter ? '' : ', lower is better'}</span>
       </div>
       {sentence && <p className={classNames('mt-2', better === false ? 'text-warn' : 'text-ink')}>{sentence}</p>}
 
       {hasBase && (
-        <div className="relative mt-12 mb-1 h-5" role="img" aria-label={description}>
+        <div className="result-scale" role="img" aria-label={description}>
           <div className="absolute left-0 right-0 top-1/2 h-px bg-rule" />
           {cv && (
             <div
@@ -826,7 +826,7 @@ const ResultLine = ({ metrics }) => {
         </div>
       )}
       {hasBase && (
-        <div className="flex justify-between text-xs text-faint tabular-nums mt-3">
+        <div className="result-scale-range">
           <span>{fmtNum(lo)}</span>
           <span>{fmtNum(hi)}</span>
         </div>
@@ -858,9 +858,9 @@ const EvaluationPanel = ({ metrics }) => {
     <>
       <ResultLine metrics={metrics} />
       {shown.length > 0 && (
-        <section className="panel">
+        <section className="panel eval-panel">
           <h2 className="mb-4">Other scores</h2>
-          <dl className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-x-8 gap-y-5">
+          <dl className="eval-scores">
             {shown.map(([key, label]) => (
               <div key={key}>
                 <dt className="text-sm text-muted">{label}</dt>
@@ -894,11 +894,11 @@ const ConfusionMatrix = ({ confusion }) => {
   const labels = confusion.labels || [];
   const top = Math.max(1, ...confusion.matrix.flat());
   return (
-    <section className="panel">
+    <section className="panel confusion-panel">
       <h2 className="mb-1">Where it gets confused</h2>
       <p className="text-sm text-muted mb-5">Rows are the true class, columns the predicted one. The diagonal is correct.</p>
-      <div className="overflow-x-auto">
-        <table className="text-sm text-center">
+      <div className="confusion-wrap">
+        <table className="confusion-table">
           <thead>
             <tr>
               <th className="px-3 py-2" />
@@ -932,9 +932,9 @@ const PreprocessingReport = ({ report }) => {
   if (!report) return null;
   const list = (items) => (items && items.length ? items.join(', ') : 'none');
   return (
-    <section className="panel">
+    <section className="panel prep-panel">
       <h2 className="mb-4">How the data was prepared</h2>
-      <dl className="grid grid-cols-[13rem_1fr] gap-x-6 gap-y-3 max-w-prose">
+      <dl className="detail-list detail-list-wide">
         <dt className="text-muted">Number columns</dt><dd className="break-words">{list(report.numeric_columns)}</dd>
         <dt className="text-muted">Text columns, one-hot encoded</dt><dd className="break-words">{list(report.categorical_columns)}</dd>
         <dt className="text-muted">Missing values filled in</dt><dd className="tabular-nums">{report.missing_cells_imputed}</dd>
@@ -1074,13 +1074,13 @@ const PredictPanel = ({ runId }) => {
 
   if (schemaError) {
     return (
-      <section className="panel">
+      <section className="panel predict-panel">
         <h2 className="mb-2">Use this model</h2>
         <p className="text-muted">{schemaError}</p>
       </section>
     );
   }
-  if (!schema) return <section className="panel"><p className="text-muted">Loading the model...</p></section>;
+  if (!schema) return <section className="panel predict-panel"><p className="text-muted">Loading the model...</p></section>;
 
   const kind = schema.request_kind || 'rows';
   const hints = {
@@ -1093,14 +1093,14 @@ const PredictPanel = ({ runId }) => {
   };
 
   return (
-    <section className="panel">
+    <section className="panel predict-panel">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h2 className="whitespace-nowrap">Use this model</h2>
         {kind === 'rows' && (
-          <div className="inline-flex text-sm border border-rule rounded-md overflow-hidden" role="group" aria-label="Input style">
+          <div className="predict-segmented" role="group" aria-label="Input style">
             {[['form', 'One row'], ['json', 'Several rows']].map(([m, label]) => (
               <button key={m} onClick={() => setMode(m)} aria-pressed={mode === m}
-                className={classNames('px-3 h-8 inline-flex items-center', mode === m ? 'bg-raised text-strong' : 'text-muted hover:text-strong')}>
+                className={classNames('predict-segmented-btn', mode === m ? 'bg-raised text-strong' : 'text-muted hover:text-strong')}>
                 {label}
               </button>
             ))}
@@ -1110,7 +1110,7 @@ const PredictPanel = ({ runId }) => {
       {schema.output && <p className="text-sm text-muted mb-5">{schema.output.charAt(0).toUpperCase() + schema.output.slice(1)}.</p>}
 
       {kind === 'rows' && mode === 'form' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+        <div className="predict-form-grid">
           {(schema.features || []).map((f) => (
             <div key={f.name}>
               <label htmlFor={`f-${f.name}`} className="block text-sm text-muted mb-1">
@@ -1161,7 +1161,7 @@ const PredictPanel = ({ runId }) => {
         </div>
       )}
 
-      <div className="mt-5 flex flex-wrap items-center gap-4">
+      <div className="predict-actions">
         <button onClick={predict} disabled={loading} className="btn btn-primary">{loading ? 'Working...' : (kind === 'prompt' ? 'Generate' : 'Predict')}</button>
         {kind === 'rows' && <span className="text-sm text-faint">A field left empty is treated as missing, as in training.</span>}
       </div>
@@ -1190,7 +1190,7 @@ const PredictionResult = ({ result }) => {
     summary = `Reconstruction error ${formatMetric(result.reconstruction_error[0])}.`;
   }
   return (
-    <div className="mt-6 space-y-5">
+    <div className="predict-result">
       <p role="status" className="sr-only">{summary}</p>
       {result.warnings && result.warnings.length > 0 && (
         <ul className="space-y-1">{result.warnings.map((w, i) => <li key={i} className="notice">{w}</li>)}</ul>
@@ -1284,7 +1284,7 @@ const CompareRuns = ({ runIds, navigate }) => {
   const datasets = [...new Set(runs.map((r) => r.dataset_tag).filter(Boolean))];
 
   return (
-    <div className="space-y-10">
+    <div className="compare-page">
       <Breadcrumb items={[{ label: 'Runs', href: '#/runs' }, { label: 'Compare' }]} />
 
       <header className="page-header">
@@ -1306,7 +1306,7 @@ const CompareRuns = ({ runIds, navigate }) => {
       )}
 
       {selected && (
-        <section className="panel">
+        <section className="panel compare-chart-panel">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
             <h2>By metric</h2>
             <label className="flex items-center gap-3 text-sm text-muted">
@@ -1316,7 +1316,7 @@ const CompareRuns = ({ runIds, navigate }) => {
               </select>
             </label>
           </div>
-          <div className="space-y-4 max-w-2xl">
+          <div className="compare-chart">
             {completed.map((r) => {
               const value = valueOf(r, selected);
               const isBest =
@@ -1337,14 +1337,14 @@ const CompareRuns = ({ runIds, navigate }) => {
         </section>
       )}
 
-      <section className="panel overflow-x-auto">
+      <section className="panel compare-table-wrap">
         <table className="w-full text-sm">
           <thead>
             <tr>
               <th className="th">Metric</th>
               {completed.map((r) => (
                 <th key={r.id} className="th">
-                  <button onClick={() => navigate('run-details', r.id)} className="text-strong hover:text-accent font-medium">
+                  <button onClick={() => navigate('run-details', r.id)} className="compare-run-link text-strong hover:text-accent font-medium">
                     {r.model_name}
                   </button>
                   <span className="text-faint ml-2">#{r.id}</span>
@@ -1598,7 +1598,7 @@ const RunDetails = ({ runId, navigate }) => {
     : [];
 
   return (
-    <div className="space-y-10">
+    <div className="run-details-page">
       <Breadcrumb items={[{ label: 'Runs', href: '#/runs' }, { label: `#${run.id}` }]} />
 
       <header className="page-header">
@@ -1661,10 +1661,10 @@ const RunDetails = ({ runId, navigate }) => {
       )}
 
       {run.status === 'completed' && scalarMetrics.length > 0 && (
-        <section className="panel">
+        <section className="panel metrics-panel">
           <details>
             <summary className="disclosure-summary cursor-pointer text-strong font-medium hover:text-accent"><span aria-hidden="true" className="disclosure-marker">+</span>All metrics ({scalarMetrics.length})</summary>
-            <dl className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-8 gap-y-3">
+            <dl className="mt-4 metrics-grid">
               {scalarMetrics.map(([key, val]) => (
                 <div key={key} className="flex justify-between gap-4 border-b border-rule/60 pb-1">
                   <dt className="text-muted">{key.replace(/_/g, ' ')}</dt>
@@ -1676,9 +1676,9 @@ const RunDetails = ({ runId, navigate }) => {
         </section>
       )}
 
-      <section className="panel">
+      <section className="panel training-panel">
         <h2 className="mb-4">How it was trained</h2>
-        <dl className="grid grid-cols-[10rem_1fr] gap-x-6 gap-y-3 max-w-prose">
+        <dl className="detail-list">
           <dt className="text-muted">Data source</dt><dd className="capitalize">{run.dataset_source}</dd>
           <dt className="text-muted">Dataset</dt><dd className="break-all">{run.dataset_tag}</dd>
           {run.hf_dataset_url && (<><dt className="text-muted">Hugging Face</dt><dd><a href={run.hf_dataset_url} target="_blank" rel="noreferrer" className="link break-all">{run.hf_dataset_url}</a></dd></>)}

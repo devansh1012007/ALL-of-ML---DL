@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup, fireEvent } from '@testing-library/react';
+import { screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -162,5 +162,252 @@ describe('predict: result announces a summary, not the whole result', () => {
 
     // The summary is short, not a dump of the probabilities.
     expect(status.textContent).not.toMatch(/0\.9/);
+  });
+});
+
+function seedForKind(requestKind, schemaExtra = {}, predicts = undefined) {
+  const base = completedPredictSeed();
+  const schema = {
+    run_id: 1,
+    kind: 'tabular',
+    model_name: 'Random_Forest',
+    task_type: 'classification',
+    label_column: 'label',
+    features: [
+      { name: 'f1', kind: 'numeric', min: 0, max: 1, default: 0.5 },
+      { name: 'f2', kind: 'categorical', categories: ['a', 'b'], default: 'a' },
+    ],
+    dropped_columns: [],
+    classes: ['a', 'b'],
+    max_rows: 1000,
+    output: 'A class label',
+    request_kind: requestKind,
+    ...schemaExtra,
+  };
+  return {
+    ...base,
+    schemas: { 1: schema },
+    ...(predicts ? { predicts: { 1: predicts } } : {}),
+  };
+}
+
+function predictCall(backend, pathname = '/api/v1/ml/runs/1/predict') {
+  const calls = backend.calls.filter((c) => c.pathname === pathname);
+  return calls[calls.length - 1];
+}
+
+describe('predict: R3b redesign keeps the predict request shapes', () => {
+  it('rows form posts {rows:[row]} with numeric coercion (and R3b hooks)', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('rows'),
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^use this model$/i })
+    ).toBeInTheDocument();
+    // R3b shared layout hooks (absent before the redesign).
+    expect(document.querySelector('.predict-panel')).not.toBeNull();
+    expect(document.querySelector('.predict-segmented')).not.toBeNull();
+    expect(document.querySelector('.predict-form-grid')).not.toBeNull();
+    expect(document.querySelector('.predict-actions')).not.toBeNull();
+    expect(screen.getByRole('button', { name: /one row/i })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+
+    fireEvent.change(screen.getByLabelText(/^f1/i), {
+      target: { value: '0.7' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    expect(await screen.findByText('a', { exact: true })).toBeInTheDocument();
+    expect(document.querySelector('.predict-result')).not.toBeNull();
+    const call = predictCall(backend);
+    expect(call.method).toBe('POST');
+    expect(Object.keys(call.body)).toEqual(['rows']);
+    expect(call.body.rows).toHaveLength(1);
+    expect(call.body.rows[0]).toEqual({ f1: 0.7, f2: 'a' });
+  });
+
+  it('rows JSON posts {rows:[...]} verbatim', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('rows'),
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^use this model$/i })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /several rows/i }));
+    const textarea = await screen.findByLabelText(/rows as json/i);
+    fireEvent.change(textarea, {
+      target: { value: '[{"f1":0.1},{"f1":0.2}]' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend);
+      expect(call).toBeDefined();
+      expect(call.body.rows).toHaveLength(2);
+    });
+    const call = predictCall(backend);
+    expect(Object.keys(call.body)).toEqual(['rows']);
+    expect(call.body.rows).toEqual([{ f1: 0.1 }, { f1: 0.2 }]);
+  });
+
+  it('texts posts {texts:[...]} one per line', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('texts'),
+    });
+    backend = app.backend;
+
+    const input = await screen.findByLabelText(/one text per line/i);
+    fireEvent.change(input, { target: { value: 'hello\nworld' } });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend);
+      expect(call).toBeDefined();
+      expect(call.body.texts).toEqual(['hello', 'world']);
+    });
+    const call = predictCall(backend);
+    expect(Object.keys(call.body)).toEqual(['texts']);
+  });
+
+  it('prompt posts {prompt,max_new_tokens} via Generate', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('prompt'),
+    });
+    backend = app.backend;
+
+    const input = await screen.findByLabelText(
+      /the model continues this text/i
+    );
+    fireEvent.change(input, { target: { value: 'Once upon a time' } });
+    fireEvent.change(screen.getByLabelText(/longest answer.*in tokens/i), {
+      target: { value: '32' },
+    });
+    expect(
+      screen.getByRole('button', { name: /^generate$/i })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^generate$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend);
+      expect(call).toBeDefined();
+      expect(call.body.prompt).toBe('Once upon a time');
+    });
+    const call = predictCall(backend);
+    expect(Object.keys(call.body).sort()).toEqual([
+      'max_new_tokens',
+      'prompt',
+    ]);
+    expect(call.body.max_new_tokens).toBe(32);
+  });
+
+  it('window_rows posts {window_rows:[[numbers]]}', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('window_rows', {
+        window: 2,
+        features: ['y', 'x'],
+      }),
+    });
+    backend = app.backend;
+
+    const input = await screen.findByLabelText(
+      /exactly 2 lines, oldest first/i
+    );
+    fireEvent.change(input, { target: { value: '1, 2\n3, 4' } });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend);
+      expect(call).toBeDefined();
+      expect(call.body.window_rows).toEqual([
+        [1, 2],
+        [3, 4],
+      ]);
+    });
+    const call = predictCall(backend);
+    expect(Object.keys(call.body)).toEqual(['window_rows']);
+  });
+
+  it('node_ids posts {node_ids:[...]}', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('node_ids', { nodes: 10 }),
+    });
+    backend = app.backend;
+
+    const input = await screen.findByLabelText(/node ids from the graph/i);
+    fireEvent.change(input, { target: { value: 'n1, n2' } });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend);
+      expect(call).toBeDefined();
+      expect(call.body.node_ids).toEqual(['n1', 'n2']);
+    });
+    const call = predictCall(backend);
+    expect(Object.keys(call.body)).toEqual(['node_ids']);
+  });
+
+  it('state posts {state:number} for a table agent', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('state', { n_states: 3, n_actions: 2 }),
+    });
+    backend = app.backend;
+
+    const input = await screen.findByLabelText(/a state from 0 to 2/i);
+    fireEvent.change(input, { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend);
+      expect(call).toBeDefined();
+      expect(call.body.state).toBe(2);
+    });
+    const call = predictCall(backend);
+    expect(Object.keys(call.body)).toEqual(['state']);
+  });
+
+  it('image posts FormData with a single file to /predict-image', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('image'),
+    });
+    backend = app.backend;
+
+    const input = await screen.findByLabelText(/an image of one of/i);
+    const file = new File(['fake-png'], 'cat.png', { type: 'image/png' });
+    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+
+    await waitFor(() => {
+      const call = predictCall(backend, '/api/v1/ml/runs/1/predict-image');
+      expect(call).toBeDefined();
+      expect(call.method).toBe('POST');
+      expect(call.rawBody).toBeInstanceOf(FormData);
+      expect(call.rawBody.get('file')).toBeInstanceOf(File);
+    });
+    const call = predictCall(backend, '/api/v1/ml/runs/1/predict-image');
+    expect(call.rawBody.get('file').name).toBe('cat.png');
+    // The JSON predict endpoint is never called for an image.
+    expect(backend.calls.filter((c) => c.pathname === '/api/v1/ml/runs/1/predict')).toHaveLength(0);
   });
 });

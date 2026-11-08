@@ -308,3 +308,94 @@ describe('runs: R3a empty state + select-for-compare', () => {
     expect(window.location.hash).toBe('#/compare/7%2B8');
   });
 });
+
+function completedDetail(id, modelName) {
+  return {
+    ...completedRun(id, modelName),
+    dataset_hash: 'abc123',
+    label_column: 'label',
+    random_state: 42,
+    test_size: 0.2,
+    task_type: 'classification',
+    metrics: {
+      accuracy: 0.9,
+      baseline_accuracy: 0.5,
+      f1_macro: 0.87,
+      artifact_kind: 'tabular',
+      confusion_matrix: { labels: ['a', 'b'], matrix: [[4, 1], [2, 3]] },
+      preprocessing: {
+        numeric_columns: ['age'],
+        categorical_columns: ['f2'],
+        missing_cells_imputed: 5,
+        rows_dropped_missing_label: 2,
+        scaled: true,
+        task_type_source: 'request',
+      },
+      model_parameters: { n_estimators: 50 },
+    },
+    hyperparameters: { n_estimators: 50 },
+    has_charts: false,
+    heartbeat_at: null,
+  };
+}
+
+describe('run details: R3b sections with shared layout hooks', () => {
+  it('completed run renders result stack, training facts, and predict with one status after predict (C2)', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(1, 'Detail_Forest')],
+        runDetails: { 1: completedDetail(1, 'Detail_Forest') },
+      },
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /detail_forest/i })
+    ).toBeInTheDocument();
+    // Result stack: headline, other scores, confusion, preprocessing, training, predict.
+    const result = document.querySelector('section[aria-label="Result"]');
+    expect(result).not.toBeNull();
+    expect(result).toHaveTextContent('0.900');
+    expect(
+      screen.getByRole('heading', { name: /^other scores$/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /where it gets confused/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /how the data was prepared/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /how it was trained/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: /^use this model$/i })
+    ).toBeInTheDocument();
+    expect(screen.getByText('Data source')).toBeInTheDocument();
+    expect(screen.getByText('Dataset')).toBeInTheDocument();
+
+    // R3b shared layout hooks (absent before the redesign).
+    expect(document.querySelector('.run-details-page')).not.toBeNull();
+    expect(document.querySelector('.result-panel')).not.toBeNull();
+    expect(document.querySelector('.result-value')).not.toBeNull();
+    expect(document.querySelector('.result-scale')).not.toBeNull();
+    expect(document.querySelector('.eval-scores')).not.toBeNull();
+    expect(document.querySelector('.confusion-wrap')).not.toBeNull();
+    // Two stacking definition lists: preparation (wide) + training facts.
+    expect(document.querySelectorAll('.detail-list')).toHaveLength(2);
+    expect(document.querySelector('.detail-list-wide')).not.toBeNull();
+    expect(document.querySelector('.predict-panel')).not.toBeNull();
+    expect(document.querySelector('.predict-segmented')).not.toBeNull();
+    expect(document.querySelector('.predict-form-grid')).not.toBeNull();
+
+    // C2: exactly one status after predict, and no other live region.
+    fireEvent.click(screen.getByRole('button', { name: /^predict$/i }));
+    expect(await screen.findByRole('status')).toBeInTheDocument();
+    const statuses = screen.getAllByRole('status');
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toHaveTextContent(/1 prediction/);
+    expect(document.querySelectorAll('[aria-live]')).toHaveLength(0);
+  });
+});
