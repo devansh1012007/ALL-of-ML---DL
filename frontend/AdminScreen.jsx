@@ -24,15 +24,16 @@ const formatWhen = (iso) => {
 // experienced as a bug - showing the limit turns a refusal into information
 // (plan A7).
 const UsageBar = ({ label, value, limit, formatValue, hint }) => {
+  const unknown = value === null || value === undefined;
   const unlimited = limit === null || limit === undefined;
-  const ratio = unlimited ? 0 : Math.min(1, value / limit);
+  const ratio = unlimited || unknown ? 0 : Math.min(1, value / limit);
   const tone = ratio >= 0.9 ? 'bg-bad' : ratio >= 0.7 ? 'bg-warn' : 'bg-accent';
   return (
     <div className="min-w-[140px]">
       <div className="flex justify-between text-xs text-muted mb-1">
         <span>{label}</span>
         <span className="tabular-nums">
-          {formatValue ? formatValue(value) : value} / {unlimited ? '∞' : (formatValue ? formatValue(limit) : limit)}
+          {unknown ? '—' : (formatValue ? formatValue(value) : value)} / {unlimited ? '∞' : (formatValue ? formatValue(limit) : limit)}
         </span>
       </div>
       <div className="h-1.5 bg-raised rounded-full overflow-hidden">
@@ -76,7 +77,7 @@ const UsersTab = ({ apiFetch, profiles, reload }) => {
   const load = useCallback(() => {
     apiFetch('/api/v1/admin/users?limit=200')
       .then((data) => { setUsers(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   useEffect(() => { load(); }, [load]);
@@ -84,26 +85,27 @@ const UsersTab = ({ apiFetch, profiles, reload }) => {
   const act = async (path, method = 'POST', body = null) => {
     setBusy(path);
     try {
-      const response = await apiFetch(path, { method, body: body ? JSON.stringify(body) : undefined });
-      if (!response.ok) throw response;
+      await apiFetch(path, { method, body: body ? JSON.stringify(body) : undefined });
+      setError(null);
       load();
       reload();
     } catch (err) {
-      setError(err.detail ? JSON.stringify(err.detail) : 'the action failed');
+      setError(err?.message || 'The request failed. Please try again.');
     } finally {
       setBusy(null);
     }
   };
 
-  if (error) {
-    return <div className="text-bad text-sm">{error}</div>;
-  }
   if (!users) {
+    if (error) {
+      return <div role="alert" className="text-bad text-sm">{error}</div>;
+    }
     return <div className="text-faint text-sm">Loading the users…</div>;
   }
 
   return (
     <div className="space-y-4">
+      {error ? <div role="alert" className="text-bad text-sm">{error}</div> : null}
       <div className="overflow-x-auto rounded-md border border-rule">
         <table className="w-full text-sm">
           <thead className="bg-surface text-muted text-xs">
@@ -143,16 +145,23 @@ const UsersTab = ({ apiFetch, profiles, reload }) => {
 
 const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reload }) => {
   const [usage, setUsage] = useState(null);
+  const [usageFailed, setUsageFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     apiFetch(`/api/v1/admin/users/${user.id}`)
-      .then((data) => { if (!cancelled) setUsage(data.usage); })
-      .catch(() => {});
+      .then((data) => {
+        if (cancelled) return;
+        setUsage(data.usage);
+        setUsageFailed(false);
+      })
+      .catch(() => { if (!cancelled) setUsageFailed(true); });
     return () => { cancelled = true; };
   }, [apiFetch, user.id]);
 
   const limits = usage?.limits || {};
+  const runsValue = usage ? (usage.runs_today ?? null) : null;
+  const storageValue = usage ? (usage.storage_bytes ?? null) : null;
   return (
     <>
       <tr className="hover:bg-surface/60">
@@ -162,14 +171,15 @@ const UserRow = ({ user, profiles, busy, onAct, onEdit, editing, apiFetch, reloa
         </td>
         <td className="px-4 py-3"><StatusBadge status={user.status} /></td>
         <td className="px-4 py-3 text-muted">
-          {profiles?.find((p) => p.id === user.quota_profile_id)?.name || 'free'}
+          {profiles?.find((p) => p.id === user.quota_profile_id)?.name ?? '—'}
         </td>
         <td className="px-4 py-3 text-muted text-xs">{formatWhen(user.last_login_at)}</td>
         <td className="px-4 py-3">
           <div className="flex gap-4">
-            <UsageBar label="runs today" value={usage?.runs_today ?? 0} limit={limits.max_runs_per_day} />
-            <UsageBar label="storage" value={usage?.storage_bytes ?? 0} limit={limits.max_storage_bytes} formatValue={formatBytes} />
+            <UsageBar label="runs today" value={runsValue} limit={limits.max_runs_per_day} />
+            <UsageBar label="storage" value={storageValue} limit={limits.max_storage_bytes} formatValue={formatBytes} />
           </div>
+          {usageFailed ? <div className="text-[11px] text-bad mt-1">Usage could not be loaded.</div> : null}
         </td>
         <td className="px-4 py-3">
           <div className="flex justify-end gap-1">
@@ -257,15 +267,15 @@ const QuotaEditor = ({ apiFetch, user, profiles, onSaved }) => {
     setError(null);
     setMessage(null);
     const body = { quota_profile_id: profileId, overrides };
-    const response = await apiFetch(`/api/v1/admin/users/${user.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify(body),
-    });
-    if (response.ok) {
+    try {
+      await apiFetch(`/api/v1/admin/users/${user.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
       setMessage('Saved. The limits apply to the next request.');
       onSaved();
-    } else {
-      setError(response.detail ? JSON.stringify(response.detail) : 'the save failed');
+    } catch (err) {
+      setError(err?.message || 'The request failed. Please try again.');
     }
   };
 
@@ -306,7 +316,7 @@ const QuotaEditor = ({ apiFetch, user, profiles, onSaved }) => {
           Save
         </button>
         {message ? <span className="text-xs text-ok">{message}</span> : null}
-        {error ? <span className="text-xs text-bad">{error}</span> : null}
+        {error ? <span role="alert" className="text-xs text-bad">{error}</span> : null}
       </div>
     </div>
   );
@@ -316,12 +326,19 @@ const QuotaEditor = ({ apiFetch, user, profiles, onSaved }) => {
 
 const QueueTab = ({ apiFetch }) => {
   const [queue, setQueue] = useState(null);
-  const [error, setError] = useState(null);
+  // DECISION: keep load errors separate from mutation errors. The queue
+  // polls every 5s; a poll success must not wipe a refused cancel alert.
+  // The poll only clears its own loadError.
+  const [loadError, setLoadError] = useState(null);
+  const [actionError, setActionError] = useState(null);
+  // INVARIANT: at most one alert is shown (action wins over load) so the
+  // existing single role="alert" contract is preserved.
+  const error = actionError || loadError;
 
   const load = useCallback(() => {
     apiFetch('/api/v1/admin/queue')
-      .then((data) => { setQueue(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .then((data) => { setQueue(data.items); setLoadError(null); })
+      .catch((err) => setLoadError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   useEffect(() => {
@@ -331,18 +348,23 @@ const QueueTab = ({ apiFetch }) => {
   }, [load]);
 
   const cancel = async (runId) => {
-    const response = await apiFetch(`/api/v1/admin/queue/${runId}/cancel`, { method: 'POST' });
-    if (!response.ok) {
-      setError('the cancel failed');
+    try {
+      await apiFetch(`/api/v1/admin/queue/${runId}/cancel`, { method: 'POST' });
+      setActionError(null);
+      load();
+    } catch (err) {
+      setActionError(err?.message || 'The request failed. Please try again.');
     }
-    load();
   };
 
-  if (error) return <div className="text-bad text-sm">{error}</div>;
-  if (!queue) return <div className="text-faint text-sm">Loading the queue…</div>;
+  if (!queue) {
+    if (error) return <div role="alert" className="text-bad text-sm">{error}</div>;
+    return <div className="text-faint text-sm">Loading the queue…</div>;
+  }
 
   return (
     <div className="space-y-4">
+      {error ? <div role="alert" className="text-bad text-sm">{error}</div> : null}
       <div className="overflow-x-auto rounded-md border border-rule">
         <table className="w-full text-sm">
           <thead className="bg-surface text-muted text-xs">
@@ -416,16 +438,16 @@ const ProfilesTab = ({ apiFetch, profiles, reload }) => {
 
   const save = async (profile) => {
     const values = drafts[profile.id] || {};
-    const response = await apiFetch(`/api/v1/admin/quota-profiles/${profile.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ values }),
-    });
-    if (response.ok) {
+    try {
+      await apiFetch(`/api/v1/admin/quota-profiles/${profile.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ values }),
+      });
       setSaved(profile.name);
       setError(null);
       reload();
-    } else {
-      setError(response.detail ? JSON.stringify(response.detail) : 'the save failed');
+    } catch (err) {
+      setError(err?.message || 'The request failed. Please try again.');
       setSaved(null);
     }
   };
@@ -472,7 +494,7 @@ const ProfilesTab = ({ apiFetch, profiles, reload }) => {
         </div>
       ))}
       {saved ? <div className="text-xs text-ok">The profile '{saved}' was saved.</div> : null}
-      {error ? <div className="text-xs text-bad">{error}</div> : null}
+      {error ? <div role="alert" className="text-xs text-bad">{error}</div> : null}
     </div>
   );
 };
@@ -489,22 +511,22 @@ const InvitesTab = ({ apiFetch }) => {
   const load = useCallback(() => {
     apiFetch('/api/v1/admin/invites')
       .then((data) => { setInvites(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   useEffect(() => { load(); }, [load]);
 
   const create = async () => {
-    const response = await apiFetch('/api/v1/admin/invites', {
-      method: 'POST',
-      body: JSON.stringify({ max_uses: maxUses, expires_days: expiresDays }),
-    });
-    if (response.ok) {
-      const data = await response.json();
+    try {
+      const data = await apiFetch('/api/v1/admin/invites', {
+        method: 'POST',
+        body: JSON.stringify({ max_uses: maxUses, expires_days: expiresDays }),
+      });
       setCreated(data);
+      setError(null);
       load();
-    } else {
-      setError('the invite could not be created');
+    } catch (err) {
+      setError(err?.message || 'The request failed. Please try again.');
     }
   };
 
@@ -535,14 +557,14 @@ const InvitesTab = ({ apiFetch }) => {
         </span>
       </div>
 
-      {created ? (
+      {created?.code ? (
         <div className="rounded-md border border-accent/50/30 bg-accent/10 p-4 flex items-center justify-between">
           <div>
             <div className="text-sm tabular-nums text-accent">{created.code}</div>
             <div className="text-xs text-muted mt-1">Copy it now - it is not shown again.</div>
           </div>
           <button
-            onClick={() => { navigator.clipboard?.writeText(created.code); }}
+            onClick={() => { if (created?.code) navigator.clipboard?.writeText(created.code); }}
             className="p-2 rounded-md hover:bg-accent-hover/20 text-accent"
             title="Copy the code"
           >
@@ -577,7 +599,7 @@ const InvitesTab = ({ apiFetch }) => {
           </table>
         </div>
       ) : null}
-      {error ? <div className="text-bad text-sm">{error}</div> : null}
+      {error ? <div role="alert" className="text-bad text-sm">{error}</div> : null}
     </div>
   );
 };
@@ -591,7 +613,7 @@ const AuditTab = ({ apiFetch }) => {
   useEffect(() => {
     apiFetch('/api/v1/admin/audit?limit=100')
       .then((data) => { setEvents(data.items); setError(null); })
-      .catch((err) => setError(err.message));
+      .catch((err) => setError(err?.message || 'The request failed. Please try again.'));
   }, [apiFetch]);
 
   if (error) return <div className="text-bad text-sm">{error}</div>;
@@ -633,17 +655,19 @@ export const AdminScreen = ({ apiFetch }) => {
   const [tab, setTab] = useState('users');
   const [profiles, setProfiles] = useState(null);
   const [usage, setUsage] = useState(null);
+  const [profilesFailed, setProfilesFailed] = useState(false);
+  const [usageFailed, setUsageFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
   const reload = useCallback(() => setReloadKey((key) => key + 1), []);
 
   useEffect(() => {
     apiFetch('/api/v1/admin/quota-profiles')
-      .then((data) => setProfiles(data.items))
-      .catch(() => {});
+      .then((data) => { setProfiles(data.items); setProfilesFailed(false); })
+      .catch(() => { setProfilesFailed(true); });
     apiFetch('/api/v1/admin/usage')
-      .then((data) => setUsage(data.items))
-      .catch(() => {});
+      .then((data) => { setUsage(data.items); setUsageFailed(false); })
+      .catch(() => { setUsageFailed(true); });
   }, [apiFetch, reloadKey]);
 
   return (
@@ -656,12 +680,22 @@ export const AdminScreen = ({ apiFetch }) => {
         </p>
       </div>
 
+      {usageFailed ? <div className="text-bad text-sm">Usage could not be loaded.</div> : null}
+      {profilesFailed ? <div className="text-bad text-sm">Quota profiles could not be loaded.</div> : null}
+
       {usage ? (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <SummaryCard icon={Users} label="users" value={usage.length} />
           <SummaryCard icon={ListOrdered} label="near a limit" value={usage.filter((u) => u.near_limits?.length).length} tone="text-warn" />
           <SummaryCard icon={Cpu} label="CPU seconds this month" value={usage.reduce((sum, u) => sum + (u.cpu_seconds_this_month || 0), 0)} />
           <SummaryCard icon={HardDrive} label="storage held" value={formatBytes(usage.reduce((sum, u) => sum + (u.storage_bytes || 0), 0))} />
+        </div>
+      ) : usageFailed ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <SummaryCard icon={Users} label="users" value="—" />
+          <SummaryCard icon={ListOrdered} label="near a limit" value="—" tone="text-warn" />
+          <SummaryCard icon={Cpu} label="CPU seconds this month" value="—" />
+          <SummaryCard icon={HardDrive} label="storage held" value="—" />
         </div>
       ) : null}
 

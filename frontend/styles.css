@@ -58,6 +58,14 @@
   summary::-webkit-details-marker { display: none; }
   summary::before { content: '+'; display: inline-block; width: 0.75rem; color: rgb(var(--faint)); }
   details[open] > summary::before { content: '−'; }
+  /* D2: the three rich disclosures carry an inline marker element instead of
+     the flex pseudo-element, so the marker stays with the summary text.
+     The global summary rule above is left alone. */
+  summary.disclosure-summary::before { content: none; }
+  details[open] > summary.disclosure-summary::before { content: none; }
+  .disclosure-marker { display: inline-block; width: 0.75rem; flex: none; text-align: center; color: rgb(var(--faint)); }
+  details[open] > summary.disclosure-summary .disclosure-marker { font-size: 0; }
+  details[open] > summary.disclosure-summary .disclosure-marker::after { content: '−'; font-size: 1rem; line-height: 1; }
 }
 
 @layer components {
@@ -95,6 +103,16 @@
   .dot { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 9999px; background: rgb(var(--faint)); flex: none; }
   .th { text-align: left; font-weight: 500; color: rgb(var(--muted)); font-size: 0.8125rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid rgb(var(--rule)); }
   .td { padding: 0.75rem; border-bottom: 1px solid rgb(var(--rule) / 0.6); vertical-align: middle; }
+  /* D1: the runs table wrapper stays flush inside the page. Below sm the
+     cells tighten (checkbox column tightest) via this scoped rule only,
+     so the Compare and Confusion tables that share .th/.td are unaffected. */
+  .runs-table-wrap { margin-left: 0; margin-right: 0; }
+  @media (max-width: 639px) {
+    .runs-table-wrap .th,
+    .runs-table-wrap .td { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .runs-table-wrap .th:first-child,
+    .runs-table-wrap .td:first-child { padding-left: 0.25rem; padding-right: 0.25rem; }
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
