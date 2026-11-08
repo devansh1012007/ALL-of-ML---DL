@@ -1,5 +1,5 @@
 // Moved verbatim from App.jsx in R6 (Frontend UI redesign); only import/export wiring changed.
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect, useContext, useRef } from 'react';
 import { AuthContext, classNames } from '../components/shared.jsx';
 import { isNumber, formatMetric, Bar } from '../components/metrics.jsx';
 
@@ -19,6 +19,31 @@ export const PredictPanel = ({ runId }) => {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  // INVARIANT: both segmented buttons stay tabbable (no roving tabIndex) so
+  // Tab reaches each one; refs are only used to move focus on arrow keys.
+  const modeBtnRefs = useRef({});
+
+  // DECISION: keep role="group" + aria-pressed (NOT radio/radiogroup) so the
+  // existing getByRole('button') queries stay valid; clamp at the ends (no
+  // wrap) and select-on-arrow. Events bubble from the focused button.
+  const MODE_ORDER = ['form', 'json'];
+  const handleSegmentedKeyDown = (e) => {
+    const key = e.key;
+    const HANDLED = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'];
+    if (!HANDLED.includes(key)) return;
+    e.preventDefault();
+    const focusedIdx = MODE_ORDER.findIndex((m) => modeBtnRefs.current[m] === document.activeElement);
+    const currentIdx = focusedIdx >= 0 ? focusedIdx : MODE_ORDER.indexOf(mode);
+    let nextIdx;
+    if (key === 'Home') nextIdx = 0;
+    else if (key === 'End') nextIdx = MODE_ORDER.length - 1;
+    else if (key === 'ArrowRight' || key === 'ArrowDown') nextIdx = Math.min(currentIdx + 1, MODE_ORDER.length - 1);
+    else nextIdx = Math.max(currentIdx - 1, 0);
+    const nextMode = MODE_ORDER[nextIdx];
+    setMode(nextMode);
+    const el = modeBtnRefs.current[nextMode];
+    if (el) el.focus();
+  };
 
   useEffect(() => {
     let active = true;
@@ -144,9 +169,9 @@ export const PredictPanel = ({ runId }) => {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h2 className="whitespace-nowrap">Use this model</h2>
         {kind === 'rows' && (
-          <div className="predict-segmented" role="group" aria-label="Input style">
+          <div className="predict-segmented" role="group" aria-label="Input style" onKeyDown={handleSegmentedKeyDown}>
             {[['form', 'One row'], ['json', 'Several rows']].map(([m, label]) => (
-              <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
+              <button key={m} type="button" ref={(el) => { modeBtnRefs.current[m] = el; }} onClick={() => setMode(m)} aria-pressed={mode === m}
                 className={classNames('predict-segmented-btn', mode === m ? 'bg-raised text-strong' : 'text-muted hover:text-strong')}>
                 {label}
               </button>

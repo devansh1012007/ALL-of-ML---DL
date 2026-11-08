@@ -443,3 +443,61 @@ describe('predict: R5 segmented control hardening', () => {
     expect(document.activeElement).toBe(severalRows);
   });
 });
+
+describe('predict: C1 segmented control arrow-key navigation', () => {
+  it('ArrowRight selects+focuses Several rows, ArrowLeft back, Home/End, non-arrow no-op', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: seedForKind('rows'),
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^use this model$/i })
+    ).toBeInTheDocument();
+
+    const oneRow = screen.getByRole('button', { name: /one row/i });
+    const severalRows = screen.getByRole('button', { name: /several rows/i });
+
+    // Keep Tab behavior: both buttons are tabbable (no -1 tabIndex roving).
+    expect(oneRow.tabIndex).toBe(0);
+    expect(severalRows.tabIndex).toBe(0);
+
+    oneRow.focus();
+    expect(document.activeElement).toBe(oneRow);
+
+    fireEvent.keyDown(oneRow, { key: 'ArrowRight' });
+    expect(severalRows).toHaveAttribute('aria-pressed', 'true');
+    expect(oneRow).toHaveAttribute('aria-pressed', 'false');
+    expect(document.activeElement).toBe(severalRows);
+    expect(await screen.findByLabelText(/rows as json/i)).toBeInTheDocument();
+
+    fireEvent.keyDown(severalRows, { key: 'ArrowLeft' });
+    expect(oneRow).toHaveAttribute('aria-pressed', 'true');
+    expect(severalRows).toHaveAttribute('aria-pressed', 'false');
+    expect(document.activeElement).toBe(oneRow);
+
+    fireEvent.keyDown(oneRow, { key: 'End' });
+    expect(severalRows).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(severalRows);
+
+    fireEvent.keyDown(severalRows, { key: 'Home' });
+    expect(oneRow).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(oneRow);
+
+    // Up/Down alias Left/Right.
+    fireEvent.keyDown(oneRow, { key: 'ArrowDown' });
+    expect(severalRows).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(severalRows);
+    fireEvent.keyDown(severalRows, { key: 'ArrowUp' });
+    expect(oneRow).toHaveAttribute('aria-pressed', 'true');
+    expect(document.activeElement).toBe(oneRow);
+
+    // Non-arrow key is a no-op: pressed state and mode unchanged.
+    fireEvent.keyDown(oneRow, { key: 'a' });
+    expect(oneRow).toHaveAttribute('aria-pressed', 'true');
+    expect(severalRows).toHaveAttribute('aria-pressed', 'false');
+    expect(document.activeElement).toBe(oneRow);
+  });
+});
