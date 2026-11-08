@@ -114,6 +114,18 @@ describe('theme: resolution order', () => {
     expect(resolveTheme()).toBe('dark');
   });
 
+  it('absent + matchMedia throws resolves dark without throwing', () => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      configurable: true,
+      value: () => {
+        throw new Error('mq denied');
+      },
+    });
+    expect(() => resolveTheme()).not.toThrow();
+    expect(resolveTheme()).toBe('dark');
+  });
+
   it('App mount applies stored light to attribute + meta', async () => {
     window.localStorage.setItem(THEME_STORAGE_KEY, 'light');
     stubMatchMedia(false);
@@ -138,6 +150,8 @@ describe('theme: hostile stored values fall through', () => {
     ['unicode-only', '🙂🚀✨'.repeat(64)],
     ['empty string', ''],
     ['uppercase LIGHT', 'LIGHT'],
+    ['padded light', ' light '],
+    ['string null', 'null'],
   ];
 
   for (const [name, value] of hostiles) {
@@ -155,6 +169,15 @@ describe('theme: hostile stored values fall through', () => {
       expect(document.querySelector('script[data-hostile]')).toBeNull();
     });
   }
+
+  it('applyTheme normalizes a raw hostile value to dark with no script created', () => {
+    const beforeScripts = document.querySelectorAll('script').length;
+    expect(() => applyTheme('"><script>alert(1)</script>')).not.toThrow();
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(getMetaContent()).toBe('dark');
+    expect(document.querySelectorAll('script').length).toBe(beforeScripts);
+    expect(document.querySelector('script[data-hostile]')).toBeNull();
+  });
 
   it('hostile value still allows toggle to work', async () => {
     window.localStorage.setItem(THEME_STORAGE_KEY, '"><script>alert(1)</script>');

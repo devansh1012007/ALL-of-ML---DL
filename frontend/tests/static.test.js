@@ -7,6 +7,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, '..', 'AdminScreen.jsx'), 'utf8');
 const appSource = readFileSync(join(here, '..', 'App.jsx'), 'utf8');
 const stylesSource = readFileSync(join(here, '..', 'styles.css'), 'utf8');
+const indexHtmlSource = readFileSync(join(here, '..', 'index.html'), 'utf8');
+const newJobSource = readFileSync(join(here, '..', 'views', 'NewJob.jsx'), 'utf8');
 
 // R6 split (plan F1): App.jsx shrank to the shell + re-exports and the views
 // moved verbatim to views/*.jsx, the shared + metrics pieces to
@@ -369,6 +371,18 @@ describe('static guard: T-101 light block structural', () => {
     // Guard self-check: a missing token fails the per-name assertion.
     expect('--canvas:'.includes('--rule:')).toBe(false);
   });
+
+  it('declares exactly 14 custom properties in each token block', () => {
+    const rootBlock = extractBlock(stylesSource, /:root\s*\{([\s\S]*?)\}/);
+    const lightBlock = extractBlock(stylesSource, /\[data-theme="light"\]\s*\{([\s\S]*?)\}/);
+    expect(rootBlock, ':root block exists').not.toBeNull();
+    expect(lightBlock, 'light block exists').not.toBeNull();
+    const countDecls = (block) => (block.match(/--[\w-]+:/g) || []).length;
+    expect(countDecls(rootBlock), ':root --*: count').toBe(14);
+    expect(countDecls(lightBlock), 'light --*: count').toBe(14);
+    // Guard self-check: a 15th rogue token breaks the exactly-14 pin.
+    expect(countDecls(`${rootBlock}\n  --rogue: 1 2 3;`)).toBe(15);
+  });
 });
 
 describe('static guard: T-101 dark-value invariance (85acdda)', () => {
@@ -399,6 +413,7 @@ describe('static guard: T-101 dark-value invariance (85acdda)', () => {
   });
 });
 
+// raised/canvas is excluded by design D2 §2.4a (raised is a non-text surface, not a text foreground) — do not add a raised-as-foreground ratio pin.
 describe('static guard: T-101 light ratio guards (D2 inventory)', () => {
   const lightBlock = extractBlock(stylesSource, /\[data-theme="light"\]\s*\{([\s\S]*?)\}/);
   const light = parseTriples(lightBlock);
@@ -488,5 +503,36 @@ describe('static guard: T-101 light ratio guards (D2 inventory)', () => {
       ratioOf(light.ink, composite(light.accent, 0.35, light.canvas)),
       '::selection'
     ).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+describe('static guard: T-101 pre-paint init parity + NewJob warn token', () => {
+  it('index.html pre-paint init mirrors theme.jsx (head-first, single resolution, dual write)', () => {
+    // The init script duplicates theme.jsx as a second source of truth; this
+    // pins the parity so drift (wrong key, missing guard, split write) fails.
+    const headEnd = indexHtmlSource.indexOf('</head>');
+    const initIdx = indexHtmlSource.indexOf('prime_theme');
+    const moduleIdx = indexHtmlSource.indexOf('type="module"');
+    expect(headEnd, '</head> exists').toBeGreaterThan(-1);
+    expect(initIdx, 'init script references prime_theme').toBeGreaterThan(-1);
+    expect(moduleIdx, 'module entry exists').toBeGreaterThan(-1);
+    expect(initIdx, 'init script is in <head> before the module entry').toBeLessThan(moduleIdx);
+    expect(initIdx, 'init script is before </head>').toBeLessThan(headEnd);
+    expect(indexHtmlSource).toContain("=== 'light'");
+    expect(indexHtmlSource).toContain("=== 'dark'");
+    expect(indexHtmlSource).toContain("typeof window.matchMedia === 'function'");
+    expect(indexHtmlSource).toContain('dataset.theme = resolved');
+    expect(indexHtmlSource).toContain("setAttribute('content', resolved)");
+    expect(indexHtmlSource).toContain('try {');
+    expect(indexHtmlSource).toContain('catch');
+    // Guard self-check: wrong-key drift fails the prime_theme pin above.
+    expect('wrong_key'.includes('prime_theme')).toBe(false);
+  });
+
+  it('NewJob scalability uses the tokenized warn class', () => {
+    expect(newJobSource).toContain('text-warn');
+    expect(newJobSource).not.toContain('text-orange-400');
+    // Guard self-check: the pre-T-101 literal would fail both pins above.
+    expect('text-orange-400'.includes('text-warn')).toBe(false);
   });
 });
