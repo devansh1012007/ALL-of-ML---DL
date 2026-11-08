@@ -1,0 +1,9 @@
+W2-IMPL-01	frontend/styles.css
+W2-IMPL-01	frontend/index.html
+W2-IMPL-01	frontend/components/theme.jsx
+W2-IMPL-01	frontend/App.jsx
+W2-IMPL-01	frontend/views/AuthView.jsx
+W2-IMPL-01	frontend/views/NewJob.jsx
+W2-IMPL-01	frontend/tests/theme.test.jsx
+W2-IMPL-01	frontend/tests/static.test.js
+W2-IMPL-01	docs/tech-debt.md
