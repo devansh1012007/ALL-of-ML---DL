@@ -18,10 +18,13 @@
 ### Wave 0 (investigation, read-only) — DONE
 - W0-INV-01 (INV-light-mode): EXISTS/DEEP, token Census 93 var(--)/94 rgb all token-indirected, 0 hex/dark:, 1 outlier NewJob:678, Option A [data-theme=light] recommended. Confidence high.
 - W0-INV-02 (INV-negative-counts): N1 EXISTS (hide-chip 1-line), D1 EXISTS (exact reword proposed). C1 ordered N1 first.
-### Wave 1 (parallel, disjoint write-sets)
-- T-102: RunDetails.jsx + runs.test.jsx (hide-chip + 2 tests). W1-IMPL-01.
-- T-103: docs/tech-debt.md (reword one line). W1-IMPL-02.
-- Disjoint check: no shared file → parallel-safe. Hotspots: tests/* (runs.test only), tech-debt (single writer).
+### Wave 1 (parallel, disjoint write-sets) — CLOSED (gate green 119/119)
+- T-102 DONE (`ca5d950`+`939fbe4`): hide chip on negative diff + 2 tests. T-103 DONE (`9c73971`+`399c065`): tech-debt:17 genealogy.
+- W1-REV-01 APPROVE: 0 B/M/M, NIT-01 mixed-test asymmetry (REJECT — symmetric NaN, no churn), NIT-02 timeAgo clamp (REJECT — correct relative-time semantics).
+- W1-TREV-01 APPROVE: 16/16 scoped, diff = 2 files, P3 tests byte-unchanged, reversal genuine.
+- Planner-review W1-PLAN-01: APPROVE-WITH-CHANGES, 6 MAJORs folded into spec (P-01..P-10 resolutions committed at `1b8d26a`).
+- Gate: gates/gate-w1-1.md GREEN (119/119 + build). Review/improve cycles 0/2.
+- Ownership file: ownership/W1.tsv (disjoint, verified).
 ### Wave 2 (sequential deep)
 - T-101: spec docs/plans/2026-11-08-light-mode.md → planner-reviewer → DEEP design → approve → DEEP impl (styles, index.html, App/AuthView toggle, NewJob outlier, theme helpers, tests) → probe (manual Chromium) → tech-debt probe record.
 - Pre-mortem (W2): light palette fails contrast without probe; FOUC if init not pre-paint; prime_theme leaks across jsdom tests. Mitigations in spec.
