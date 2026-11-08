@@ -195,3 +195,89 @@ describe('newjob: submit behaviour is preserved (guard + successful train)', () 
     expect(trainCall.body.optimize_metric).toBe('accuracy');
   });
 });
+
+// Phase D1: RL env-id label + submit payload. Per-test seed only -- the
+// shared newJobSeed default is untouched so the suite above keeps passing.
+// Catalog source of truth: backend/app/model_training.py "Q-Learning"
+// (category "reinforcement-learning"); helpers.jsx model-details returns the
+// seeded model verbatim, so no helper change is needed. Verified submit
+// path: handleSubmit guards dataset with isReinforcementLearning
+// (frontend/views/NewJob.jsx `if (!isReinforcementLearning && !payload.dataset_id)`),
+// so an RL run submits without a dataset and still carries env_id.
+describe('newjob: reinforcement-learning env-id field', () => {
+  function rlSeed() {
+    return {
+      models: [
+        {
+          name: 'Random_Forest',
+          category: 'classification',
+          description: 'Random Forest classifier for tabular data.',
+          parameters: { n_estimators: 100, max_depth: null, criterion: 'gini' },
+          optimization: ['F1', 'Log Loss'],
+          test_results: {
+            expected_accuracy: [0.8, 0.95],
+            best_for: ['tabular_classification'],
+            typical_training_time_sec: 7,
+            scalability: 'high',
+          },
+        },
+        {
+          name: 'Q-Learning',
+          category: 'reinforcement-learning',
+          description: 'Tabular Q-learning for Gymnasium environments.',
+          parameters: {},
+          optimization: [],
+          test_results: null,
+        },
+      ],
+    };
+  }
+
+  it('shows the Gymnasium Environment ID field when Q-Learning is selected and relaxes the dataset requirement', async () => {
+    renderNewJob(rlSeed());
+    await selectModel('Q-Learning');
+
+    const envInput = await screen.findByLabelText(/gymnasium environment id/i);
+    expect(envInput).toBeInTheDocument();
+    expect(envInput).toHaveAttribute('id', 'newjob-env-id');
+
+    const datasetSelect = screen.getByLabelText(/select local dataset/i);
+    expect(datasetSelect).not.toBeRequired();
+    expect(
+      screen.getByText(/not required for reinforcement learning/i)
+    ).toBeInTheDocument();
+  });
+
+  it('posts env_id in the train payload when submitting an RL run (no dataset needed)', async () => {
+    renderNewJob(rlSeed());
+    await selectModel('Q-Learning');
+
+    const envInput = await screen.findByLabelText(/gymnasium environment id/i);
+    fireEvent.change(envInput, { target: { value: 'CartPole-v1' } });
+
+    // RL runs submit without a dataset: handleSubmit's dataset guard is
+    // skipped for reinforcement-learning, so click Start directly.
+    fireEvent.click(screen.getByRole('button', { name: /^start run$/i }));
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/run-details/1');
+    });
+    const trainCall = backend.calls.find(
+      (c) => c.method === 'POST' && c.pathname === '/api/v1/ml/train'
+    );
+    expect(trainCall).toBeTruthy();
+    expect(trainCall.body.model_name).toBe('Q-Learning');
+    expect(trainCall.body.env_id).toBe('CartPole-v1');
+  });
+
+  it('shows no env-id field for a non-RL model', async () => {
+    renderNewJob(rlSeed());
+    await selectModel('Random_Forest');
+
+    // Wait for the model-details round trip to settle before asserting absence.
+    await screen.findByText(/model intelligence/i);
+    expect(
+      screen.queryByLabelText(/gymnasium environment id/i)
+    ).toBeNull();
+  });
+});
