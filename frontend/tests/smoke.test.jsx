@@ -281,6 +281,5 @@ describe('smoke: app shell navigation', () => {
     expect(await screen.findByRole('heading', { name: /^runs$/i })).toBeInTheDocument();
     expect(document.querySelector('.page-header')).not.toBeNull();
     expect(await screen.findByText('No runs yet')).toBeInTheDocument();
-    expect(screen.queryByText('No runs yet')).toBeInTheDocument();
   });
 });
