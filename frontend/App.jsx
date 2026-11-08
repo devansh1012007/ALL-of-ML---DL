@@ -302,13 +302,13 @@ const AuthView = ({ mode, setMode }) => {
   const registering = mode === 'register';
   return (
     <main className="min-h-screen flex items-center px-6 py-12">
-      <div className="w-full max-w-sm mx-auto">
-        <p className="text-sm font-medium text-muted mb-10">PrimeTrade AutoML</p>
+      <div className="auth-card">
+        <p className="auth-brand text-sm font-medium mb-10">PrimeTrade AutoML</p>
         <h1 className="mb-2">{registering ? 'Create an account' : 'Sign in'}</h1>
         <p className="text-muted mb-8">Train a model on your data, check it against a baseline, and use it.</p>
         {sessionNotice && <p role="status" className="notice mb-5">{sessionNotice}</p>}
         {error && <p role="alert" className="notice notice-bad mb-5">{error}</p>}
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={handleSubmit} className="auth-form">
           <div>
             <label htmlFor="auth-username" className="block text-sm text-muted mb-1.5">Username</label>
             <input
@@ -429,7 +429,7 @@ const ModelsCatalog = () => {
   const runnable = models.filter((m) => m.implemented !== false && m.available !== false).length;
 
   return (
-    <div className="space-y-8">
+    <div className="catalog-page">
       <header className="page-header">
         <div>
           <h1 className="mb-1">Models</h1>
@@ -441,7 +441,7 @@ const ModelsCatalog = () => {
         </div>
         <input
           type="search" value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="Find a model" aria-label="Find a model" className="field max-w-xs"
+          placeholder="Find a model" aria-label="Find a model" className="field catalog-search"
         />
       </header>
 
@@ -454,20 +454,20 @@ const ModelsCatalog = () => {
       {groups.length === 0 && <p className="text-muted">No model matches that search.</p>}
 
       {groups.map(([label, rows]) => (
-        <section key={label}>
-          <h2 className="mb-2">{label}</h2>
-          <ul className="border-t border-rule">
+        <section key={label} className="catalog-group">
+          <h2 className="catalog-group-title">{label}</h2>
+          <ul className="catalog-list">
             {rows.map((model) => {
               const usable = model.implemented !== false && model.available !== false;
               const result = usable ? expectedResult(model.test_results) : null;
               const parameters = Object.entries(model.parameters || {});
               return (
-                <li key={model.name} className="border-b border-rule/60">
+                <li key={model.name} className="model-row">
                   <details className="group">
-                    <summary className="disclosure-summary flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 px-2 rounded">
+                    <summary className="disclosure-summary model-summary flex items-baseline gap-4 py-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden hover:bg-surface/60 px-2 rounded">
                       <span aria-hidden="true" className="disclosure-marker">+</span>
-                      <span className="font-medium text-strong w-56 shrink-0 break-words">{model.name}</span>
-                      <span className="text-muted flex-1 min-w-0 line-clamp-1 group-open:line-clamp-none">{model.description}</span>
+                      <span className="model-name font-medium text-strong break-words">{model.name}</span>
+                      <span className="model-desc text-muted line-clamp-1 group-open:line-clamp-none">{model.description}</span>
                       <span className={classNames('text-sm shrink-0 text-right', usable ? 'text-faint' : 'text-warn')}>
                         {usable ? needsOf(model) : 'Not available here'}
                       </span>
@@ -480,7 +480,7 @@ const ModelsCatalog = () => {
                             : (model.unavailable_reason || 'This server cannot run it.')}
                         </p>
                       )}
-                      <dl className="grid grid-cols-[9rem_1fr] gap-x-4 gap-y-2 text-sm">
+                      <dl className="model-detail-grid">
                         {result && (<><dt className="text-muted">Typical result</dt><dd className="text-ink">{result}</dd></>)}
                         {usable && model.test_results?.typical_training_time_sec != null && (
                           <><dt className="text-muted">Typical time</dt><dd className="text-ink">about {model.test_results.typical_training_time_sec} s on small data</dd></>
@@ -550,7 +550,7 @@ const RunsDashboard = ({ navigate }) => {
   }, [fetchRuns]);
 
   return (
-    <div className="space-y-8">
+    <div className="runs-page">
       <header className="page-header">
         <div>
           <h1 className="mb-1">Runs</h1>
@@ -574,7 +574,7 @@ const RunsDashboard = ({ navigate }) => {
       )}
 
       {runs.length === 0 && !runsError ? (
-        <div className="panel max-w-prose">
+        <div className="runs-empty">
           <h2 className="mb-1">No runs yet</h2>
           <p className="text-muted mb-4">Pick a dataset and a model, and the first result appears here with its baseline.</p>
           <button onClick={() => navigate('new-job')} className="btn btn-primary">Start a run</button>
@@ -604,7 +604,7 @@ const RunsDashboard = ({ navigate }) => {
                         checked={selected.includes(run.id)}
                         onChange={() => toggleSelected(run.id)}
                         disabled={run.status !== 'completed'}
-                        className="accent-[rgb(var(--accent))]"
+                        className="compare-check accent-[rgb(var(--accent))]"
                       />
                     </td>
                     <td className="td">

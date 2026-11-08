@@ -126,3 +126,57 @@ describe('auth: 401 preserves logout and session-expired', () => {
     expect(window.localStorage.getItem('prime_token')).toBeNull();
   });
 });
+
+describe('auth: R3a sign-in card + successful submit', () => {
+  it('sign-in form sits in the shared auth card and labels keep autocomplete', async () => {
+    const app = renderApp({});
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+
+    // R3a shared card wrapper (absent before the redesign).
+    const card = document.querySelector('.auth-card');
+    expect(card).not.toBeNull();
+    expect(card).toContainElement(screen.getByLabelText(/^username$/i));
+    expect(card).toContainElement(screen.getByLabelText(/^password$/i));
+
+    // Unchanged labelling contract: htmlFor ids plus autocomplete hints.
+    expect(screen.getByLabelText(/^username$/i)).toHaveAttribute('autocomplete', 'username');
+    expect(screen.getByLabelText(/^password$/i)).toHaveAttribute('autocomplete', 'current-password');
+  });
+
+  it('successful submit stores the token and leaves the sign-in view', async () => {
+    const app = renderApp({});
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+
+    // After login the app shell renders with the Runs heading and no alert.
+    expect(
+      await screen.findByRole('heading', { name: /^runs$/i })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('prime_token')).not.toBeNull();
+  });
+
+  it('register mode keeps the create-account wording and mode toggle', async () => {
+    const app = renderApp({});
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /create an account/i }));
+
+    expect(
+      await screen.findByRole('heading', { name: /create an account/i })
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^password$/i)).toHaveAttribute('autocomplete', 'new-password');
+    expect(screen.getByText('At least 8 characters.')).toBeInTheDocument();
+  });
+});

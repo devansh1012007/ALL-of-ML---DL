@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup, act, waitFor } from '@testing-library/react';
+import { screen, cleanup, act, waitFor, fireEvent } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -250,4 +250,61 @@ describe('run details: Progress announces the latest phase only', () => {
     },
     { timeout: 30000 }
   );
+});
+
+describe('runs: R3a empty state + select-for-compare', () => {
+  it('empty history uses the shared empty panel with the pinned copy', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: { runs: [] },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('No runs yet')).toBeInTheDocument();
+    // R3a shared empty-state class (absent before the redesign).
+    const empty = document.querySelector('.runs-empty');
+    expect(empty).not.toBeNull();
+    expect(empty).toHaveTextContent('Pick a dataset and a model, and the first result appears here with its baseline.');
+
+    // New run actions stay available from the header and the empty state.
+    expect(screen.getByRole('button', { name: /^new run$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /start a run/i })).toBeInTheDocument();
+    const compare = screen.getByRole('button', { name: /^compare$/i });
+    expect(compare).toBeDisabled();
+  });
+
+  it('ticking two runs enables Compare and navigates to the compare view', async () => {
+    const app = renderApp({
+      hash: '#/runs',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(7, 'Compare_Forest'), completedRun(8, 'Compare_Linear')],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('Compare_Forest')).toBeInTheDocument();
+
+    // R3a shared checkbox class (absent before the redesign).
+    const boxes = document.querySelectorAll('.compare-check');
+    expect(boxes).toHaveLength(2);
+
+    const compare = screen.getByRole('button', { name: /^compare$/i });
+    expect(compare).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText(/select run 7 for a comparison/i));
+    expect(
+      screen.getByRole('button', { name: /^compare \(1\)$/i })
+    ).toBeDisabled();
+
+    fireEvent.click(screen.getByLabelText(/select run 8 for a comparison/i));
+    const enabled = screen.getByRole('button', { name: /^compare \(2\)$/i });
+    expect(enabled).not.toBeDisabled();
+    expect(enabled).toHaveAttribute('title', 'Tick two to four completed runs');
+
+    fireEvent.click(enabled);
+    // navigate() URL-encodes the joined ids ("7+8" -> "7%2B8"); readHash decodes it.
+    expect(window.location.hash).toBe('#/compare/7%2B8');
+  });
 });
