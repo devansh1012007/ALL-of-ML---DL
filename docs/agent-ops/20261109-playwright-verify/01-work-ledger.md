@@ -5,8 +5,8 @@
 |---|---|---|---|---|---|---|---|---|---|
 | V-101 | W1 rendered re-verify (Auth matrix) | INVESTIGATION | `f53e4ba` never proved in a real browser | — (read-only + screenshots) | W0 | W0-INV-01 | PENDING | — | reports/w0-investigation/INV-rendered-verify.md |
 | V-102 | Aria + overflow code audit | INVESTIGATION | Status mapping shape + wrap point unknown from report alone | — | W0 | W0-INV-02 | PENDING | — | reports/w0-investigation/INV-aria-wrap.md |
-| V-103 | Status-mapped aria | TBD | Both-fields broad (409/429/network) | AuthView.jsx + auth.test | W1 | TBD | PENDING | — | — |
-| V-104 | Invite overflow-wrap | TBD | Unbreakable code overflows 390 | styles.css (+AdminScreen?) + static pin | W1 | TBD | PENDING | — | — |
+| V-103 | Status-mapped aria (whitelist 409/400/else) | FINAL-01 APPROVE | 12f46a0+ef07478 | reports/w1-impl/W1-IMPL-01-V103.md |
+| V-104 | Invite overflow-wrap (anywhere+min-w-0) | FINAL-01 APPROVE | b86d3a2+6bcf96e | reports/w1-impl/W1-IMPL-02-V104.md |
 
 ## Waves
 ### Wave 0 — dispatching (W0-INV-01 rendered, W0-INV-02 code)
