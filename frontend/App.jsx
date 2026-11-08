@@ -84,6 +84,27 @@ const StatusMark = ({ status }) => (
 
 const classNames = (...classes) => classes.filter(Boolean).join(' ');
 
+// Shell breadcrumb (R2): one trail for every nested view, aria-current on the
+// current page, and the same hash destinations the hand-rolled trails used.
+// Items ending in a plain span are the current page; items with href are links.
+const Breadcrumb = ({ items }) => (
+  <nav aria-label="Breadcrumb" className="breadcrumb">
+    <ol>
+      {items.map((item, i) => {
+        const isCurrent = i === items.length - 1;
+        return (
+          <li key={`${item.label}-${i}`}>
+            {item.href && !isCurrent
+              ? <a href={item.href}>{item.label}</a>
+              : <span {...(isCurrent ? { 'aria-current': 'page' } : {})}>{item.label}</span>}
+            {!isCurrent && <span className="text-faint" aria-hidden="true">/</span>}
+          </li>
+        );
+      })}
+    </ol>
+  </nav>
+);
+
 // Fallbacks used when the training-modes endpoint cannot be reached.
 const FALLBACK_TRAINING_MODES = ['manual', 'auto_tune', 'auto_fine_tune', 'llm_fine_tune', 'auto_search'];
 const FALLBACK_MODE_DESCRIPTIONS = {
@@ -409,7 +430,7 @@ const ModelsCatalog = () => {
 
   return (
     <div className="space-y-8">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="page-header">
         <div>
           <h1 className="mb-1">Models</h1>
           <p className="text-muted">
@@ -530,12 +551,12 @@ const RunsDashboard = ({ navigate }) => {
 
   return (
     <div className="space-y-8">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="page-header">
         <div>
           <h1 className="mb-1">Runs</h1>
           <p className="text-muted">Every training you started, and how it did against doing nothing.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="page-header-actions">
           <button
             onClick={() => navigate('compare', selected)}
             disabled={selected.length < 2}
@@ -1264,15 +1285,13 @@ const CompareRuns = ({ runIds, navigate }) => {
 
   return (
     <div className="space-y-10">
-      <nav aria-label="Breadcrumb" className="text-sm text-muted">
-        <a href="#/runs" className="hover:text-strong">Runs</a>
-        <span className="mx-2 text-faint" aria-hidden="true">/</span>
-        <span>Compare</span>
-      </nav>
+      <Breadcrumb items={[{ label: 'Runs', href: '#/runs' }, { label: 'Compare' }]} />
 
-      <header>
-        <h1 className="mb-1">Compare {runs.length} runs</h1>
-        <p className="text-muted">The same score side by side. The best value in each row is marked.</p>
+      <header className="page-header">
+        <div>
+          <h1 className="mb-1">Compare {runs.length} runs</h1>
+          <p className="text-muted">The same score side by side. The best value in each row is marked.</p>
+        </div>
       </header>
 
       {datasets.length > 1 && (
@@ -1557,11 +1576,7 @@ const RunDetails = ({ runId, navigate }) => {
   if (error) {
     return (
       <div className="space-y-6">
-        <nav aria-label="Breadcrumb" className="text-sm text-muted">
-          <a href="#/runs" className="hover:text-strong">Runs</a>
-          <span className="mx-2 text-faint" aria-hidden="true">/</span>
-          <span>#{runId}</span>
-        </nav>
+        <Breadcrumb items={[{ label: 'Runs', href: '#/runs' }, { label: `#${runId}` }]} />
         <p role="alert" className="notice notice-bad">
           {error.status === 404
             ? `Run #${runId} does not exist, or it belongs to another account.`
@@ -1584,13 +1599,9 @@ const RunDetails = ({ runId, navigate }) => {
 
   return (
     <div className="space-y-10">
-      <nav aria-label="Breadcrumb" className="text-sm text-muted">
-        <a href="#/runs" className="hover:text-strong">Runs</a>
-        <span className="mx-2 text-faint" aria-hidden="true">/</span>
-        <span>#{run.id}</span>
-      </nav>
+      <Breadcrumb items={[{ label: 'Runs', href: '#/runs' }, { label: `#${run.id}` }]} />
 
-      <header className="flex flex-wrap items-start justify-between gap-4">
+      <header className="page-header">
         <div>
           <h1 className="mb-1">{run.model_name}</h1>
           <p className="text-muted flex flex-wrap items-center gap-x-5 gap-y-1">
@@ -1600,7 +1611,7 @@ const RunDetails = ({ runId, navigate }) => {
             {seconds !== null && <span className="tabular-nums">Took {seconds} s</span>}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="page-header-actions">
           {live && (
             <button onClick={handleCancel} disabled={cancelling} className="btn btn-danger">
               {cancelling ? 'Cancelling...' : 'Cancel run'}
@@ -2024,10 +2035,12 @@ const NewJob = ({ navigate }) => {
 
   return (
     <div className="max-w-6xl space-y-6">
-      <div>
-        <h1 className="mb-1">New run</h1>
-        <p className="text-muted">Choose the data, the model, and how it should be trained.</p>
-      </div>
+      <header className="page-header">
+        <div>
+          <h1 className="mb-1">New run</h1>
+          <p className="text-muted">Choose the data, the model, and how it should be trained.</p>
+        </div>
+      </header>
 
       {error && (
         <div role="alert" className="notice notice-bad">
@@ -2579,16 +2592,13 @@ const MainApp = () => {
       <header className="border-b border-rule">
         <div className="max-w-page mx-auto px-5 md:px-8 flex flex-wrap items-center gap-x-8 gap-y-2 py-3">
           <span className="font-semibold text-strong">PrimeTrade AutoML</span>
-          <nav aria-label="Main" className="flex items-center gap-1">
+          <nav aria-label="Main" data-shell="main-nav" className="flex flex-wrap items-center gap-1">
             {nav.map((item) => (
               <a
                 key={item.id}
                 href={`#/${item.id}`}
                 aria-current={item.active ? 'page' : undefined}
-                className={classNames(
-                  'px-2 py-1 text-sm rounded transition-colors border-b-2 whitespace-nowrap',
-                  item.active ? 'text-strong border-accent' : 'text-muted border-transparent hover:text-strong'
-                )}
+                className="nav-link"
               >
                 {item.label}
               </a>
@@ -2604,7 +2614,7 @@ const MainApp = () => {
               </span>
             )}
             <span className="text-strong">{user?.sub}</span>
-            <button onClick={logout} className="hover:text-strong underline-offset-4 hover:underline">Sign out</button>
+            <button onClick={logout} className="min-h-6 inline-flex items-center hover:text-strong underline-offset-4 hover:underline">Sign out</button>
           </div>
         </div>
       </header>

@@ -101,6 +101,25 @@
   .notice-bad { border-left-color: rgb(var(--bad)); }
   .notice-ok { border-left-color: rgb(var(--ok)); }
   .dot { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 9999px; background: rgb(var(--faint)); flex: none; }
+  /* App shell (R2): shared nav, page-header, and breadcrumb pattern.
+     Layout classes only — colours come from the tokens above. */
+  .nav-link {
+    display: inline-flex; align-items: center; min-height: 1.5rem;
+    padding: 0.375rem 0.625rem; font-size: 0.875rem; line-height: 1.4;
+    border-radius: 6px; border-bottom: 2px solid transparent;
+    color: rgb(var(--muted)); white-space: nowrap;
+    transition: color 120ms, border-color 120ms, background-color 120ms;
+  }
+  .nav-link:hover { color: rgb(var(--strong)); }
+  .nav-link[aria-current="page"] { color: rgb(var(--strong)); border-bottom-color: rgb(var(--accent)); font-weight: 500; }
+  .page-header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 1rem; }
+  .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+  .breadcrumb { font-size: 0.875rem; color: rgb(var(--muted)); }
+  .breadcrumb ol { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; list-style: none; margin: 0; padding: 0; }
+  .breadcrumb li { display: flex; align-items: center; gap: 0.5rem; }
+  .breadcrumb a { padding: 0.125rem 0; }
+  .breadcrumb a:hover { color: rgb(var(--strong)); }
+  .breadcrumb [aria-current="page"] { color: rgb(var(--strong)); }
   .th { text-align: left; font-weight: 500; color: rgb(var(--muted)); font-size: 0.8125rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid rgb(var(--rule)); }
   .td { padding: 0.75rem; border-bottom: 1px solid rgb(var(--rule) / 0.6); vertical-align: middle; }
   /* D1: the runs table wrapper stays flush inside the page. Below sm the

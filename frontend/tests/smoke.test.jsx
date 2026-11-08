@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup, fireEvent } from '@testing-library/react';
+import { screen, cleanup, fireEvent, within } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -182,5 +182,105 @@ describe('smoke: admin screen', () => {
     expect(
       backend.calls.some((c) => c.pathname === '/api/v1/admin/quota-profiles')
     ).toBe(true);
+  });
+});
+
+describe('smoke: app shell navigation', () => {
+  it('renders every nav destination, marks the active item, and navigates by hash', async () => {
+    const app = renderApp({
+      hash: '#/models',
+      token: 'admin',
+      seed: {
+        me: { username: 'admin', role: 'admin' },
+        models: [
+          {
+            name: 'Fake_Forest',
+            category: 'classification',
+            description: 'A fake model for tests.',
+            parameters: {},
+            optimization: [],
+            test_results: null,
+          },
+        ],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByRole('heading', { name: /^models$/i })).toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: /^main$/i });
+    expect(within(nav).getByRole('link', { name: /^runs$/i })).toHaveAttribute('href', '#/runs');
+    expect(within(nav).getByRole('link', { name: /^models$/i })).toHaveAttribute('href', '#/models');
+    expect(within(nav).getByRole('link', { name: /^new run$/i })).toHaveAttribute('href', '#/new-job');
+    expect(within(nav).getByRole('link', { name: /^admin$/i })).toHaveAttribute('href', '#/admin');
+
+    // The current view is marked for assistive technology; the others are not.
+    expect(within(nav).getByRole('link', { name: /^models$/i })).toHaveAttribute('aria-current', 'page');
+    expect(within(nav).getByRole('link', { name: /^runs$/i })).not.toHaveAttribute('aria-current');
+
+    // Each nav link keeps the shell class and its 24px minimum target.
+    for (const name of [/^runs$/i, /^models$/i, /^new run$/i, /^admin$/i]) {
+      expect(within(nav).getByRole('link', { name }).className).toContain('nav-link');
+    }
+
+    fireEvent.click(within(nav).getByRole('link', { name: /^runs$/i }));
+    expect(await screen.findByRole('heading', { name: /^runs$/i })).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs');
+    expect(screen.getByRole('navigation', { name: /^main$/i }))
+      .toHaveAttribute('data-shell', 'main-nav');
+  });
+
+  it('marks the breadcrumb current page and navigates back to Runs', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [
+          {
+            id: 1,
+            model_name: 'Random_Forest',
+            dataset_source: 'local',
+            dataset_tag: 'sample.csv',
+            dataset_id: 1,
+            mode: 'manual',
+            env_id: null,
+            optimize_metric: 'accuracy',
+            model_candidates: null,
+            status: 'running',
+            job_kind: 'train',
+            artifact_path: null,
+            artifact_removed: false,
+            metrics: null,
+            tags: [],
+            note: null,
+            created_at: '2026-11-08T00:00:00Z',
+            updated_at: '2026-11-08T00:00:00Z',
+            started_at: '2026-11-08T00:00:00Z',
+            finished_at: null,
+            wall_seconds: null,
+          },
+        ],
+      },
+    });
+    backend = app.backend;
+
+    const breadcrumb = await screen.findByRole('navigation', { name: /^breadcrumb$/i });
+    // Breadcrumb trail is a list of links ending in the current page.
+    expect(within(breadcrumb).getByRole('list')).toBeInTheDocument();
+    expect(within(breadcrumb).getByRole('link', { name: /^runs$/i })).toHaveAttribute('href', '#/runs');
+    expect(within(breadcrumb).getByText('#1')).toHaveAttribute('aria-current', 'page');
+
+    fireEvent.click(within(breadcrumb).getByRole('link', { name: /^runs$/i }));
+    expect(await screen.findByRole('heading', { name: /^runs$/i })).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs');
+  });
+
+  it('uses the page-header pattern on the Runs view and keeps its copy', async () => {
+    const app = renderApp({ hash: '#/runs', token: 'testuser' });
+    backend = app.backend;
+
+    expect(await screen.findByRole('heading', { name: /^runs$/i })).toBeInTheDocument();
+    expect(document.querySelector('.page-header')).not.toBeNull();
+    expect(await screen.findByText('No runs yet')).toBeInTheDocument();
+    expect(screen.queryByText('No runs yet')).toBeInTheDocument();
   });
 });
