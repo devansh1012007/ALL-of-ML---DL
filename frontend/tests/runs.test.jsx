@@ -543,3 +543,27 @@ describe('runs: B2 Started tooltip uses formatWhen NaN guard (A1)', () => {
     expect(startedCell.getAttribute('title')).not.toMatch(/Invalid Date/);
   });
 });
+
+// Phase E: RunDetails Started tooltip must use the formatWhen NaN guard.
+describe('run details: Phase E Started tooltip NaN guard', () => {
+  it('garbage created_at shows "—" tooltip and text (no Invalid Date leak)', async () => {
+    const app = renderApp({
+      hash: '#/run-details/1',
+      token: 'testuser',
+      seed: {
+        runs: [completedRun(1, 'Detail_E_Forest')],
+        runDetails: { 1: { ...completedDetail(1, 'Detail_E_Forest'), created_at: 'garbage' } },
+      },
+    });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /detail_e_forest/i });
+
+    // The Started span carries the tooltip; assert title and text both use
+    // the "—" unknown sentinel, not "Invalid Date".
+    const started = screen.getByText(/^started/i);
+    expect(started).toHaveAttribute('title', '—');
+    expect(started).toHaveTextContent('—');
+    expect(started.getAttribute('title')).not.toMatch(/Invalid Date/);
+  });
+});

@@ -1,5 +1,6 @@
 // Moved verbatim from App.jsx in R6 (Frontend UI redesign); only import/export wiring changed.
 import React, { useState, useCallback, createContext } from 'react';
+import { formatWhen } from '../format.js';
 
 // --- CONFIGURATION ---
 export const API_BASE = 'http://localhost:8010';
@@ -54,7 +55,7 @@ export const formatApiDetail = (detail, status) => {
         const limitText = unlimited ? 'unlimited' : `the limit of ${quota.limit}`;
         let text = `${detail.message} (${quota.name}: ${limitText}`;
         if (quota.used !== undefined && quota.used !== null) text += `, currently ${quota.used}`;
-        if (quota.resets_at) text += `, resets at ${new Date(quota.resets_at).toLocaleString()}`;
+        if (quota.resets_at) text += `, resets at ${formatWhen(quota.resets_at)}`;
         return text + ')';
       }
       return detail.message;

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatBytes, timeAgo, formatWhen } from '../format.js';
+import { formatApiDetail } from '../components/shared.jsx';
 
 // Canonical formatter contract (plan §R1 + §6 F2):
 //   formatBytes(null/undefined) -> "—"   unknown, never a zero
@@ -91,5 +92,17 @@ describe('formatWhen', () => {
     expect(formatWhen(iso)).toBe(
       new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
     );
+  });
+});
+
+// Phase E: quota reset text must use the formatWhen NaN guard, never "Invalid Date".
+describe('formatApiDetail quota branch (Phase E)', () => {
+  it('garbage resets_at renders "—" inside the sentence, never "Invalid"', () => {
+    const result = formatApiDetail(
+      { message: 'Quota exceeded', quota: { name: 'runs', limit: 10, used: 10, resets_at: 'garbage' } },
+      403
+    );
+    expect(result).toContain('—');
+    expect(result).not.toContain('Invalid');
   });
 });

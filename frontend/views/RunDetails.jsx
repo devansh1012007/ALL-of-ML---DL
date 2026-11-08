@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useContext } from 'react';
 import { AuthContext, StatusMark, Breadcrumb, RUN_POLL_INTERVAL_MS } from '../components/shared.jsx';
 import { STRUCTURED_METRICS, isNumber, formatMetric, fmtNum, EvaluationPanel, ConfusionMatrix, PreprocessingReport } from '../components/metrics.jsx';
 import { PredictPanel } from './PredictPanel.jsx';
-import { timeAgo } from '../format.js';
+import { timeAgo, formatWhen } from '../format.js';
 
 export const RunEvents = ({ runId }) => {
   const { apiFetch } = useContext(AuthContext);
@@ -228,7 +228,7 @@ export const RunDetails = ({ runId, navigate }) => {
           <p className="text-muted flex flex-wrap items-center gap-x-5 gap-y-1">
             <StatusMark status={run.status} />
             <span>{run.dataset_tag}</span>
-            <span title={new Date(run.created_at).toLocaleString()}>Started {timeAgo(run.created_at)}</span>
+            <span title={formatWhen(run.created_at)}>Started {timeAgo(run.created_at)}</span>
             {seconds !== null && <span className="tabular-nums">Took {seconds} s</span>}
           </p>
         </div>
