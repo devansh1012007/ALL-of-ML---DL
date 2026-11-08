@@ -7,8 +7,8 @@
 //   formatBytes(null/undefined) -> "—"    unknown is never shown as a zero
 //   formatBytes(0)              -> "0 B"  a true zero stays a zero
 //   formatBytes                 -> B / KB / MB / GB progression (1024-based)
-//   timeAgo(null/undefined/"")  -> "—"
-//   formatWhen(null/undefined/"")-> "—"
+//   timeAgo(null/undefined/""/garbage)  -> "—"
+//   formatWhen(null/undefined/""/garbage)-> "—"
 //
 // P2a unknown handling depends on this true-zero vs unknown split, so the
 // null -> "—" guard must never be flattened into a numeric zero.
@@ -24,7 +24,9 @@ export const formatBytes = (bytes) => {
 // "3 min ago", with the exact time left to a tooltip.
 export const timeAgo = (iso) => {
   if (!iso) return '—';
-  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  const seconds = Math.max(0, Math.round((Date.now() - d.getTime()) / 1000));
   if (seconds < 45) return 'just now';
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes} min ago`;
@@ -32,11 +34,12 @@ export const timeAgo = (iso) => {
   if (hours < 24) return `${hours} h ago`;
   const days = Math.round(hours / 24);
   if (days < 30) return `${days} d ago`;
-  return new Date(iso).toLocaleDateString();
+  return d.toLocaleDateString();
 };
 
 export const formatWhen = (iso) => {
   if (!iso) return '—';
   const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '—';
   return date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
 };

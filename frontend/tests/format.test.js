@@ -49,6 +49,11 @@ describe('timeAgo', () => {
     expect(timeAgo('')).toBe('—');
   });
 
+  it('a garbage string renders as "—", never "Invalid Date"', () => {
+    expect(timeAgo('not-a-date')).toBe('—');
+    expect(timeAgo('not-a-date')).not.toContain('Invalid');
+  });
+
   it('a recent timestamp is "just now"', () => {
     expect(timeAgo(isoAt(-30 * 1000))).toBe('just now');
   });
@@ -74,6 +79,11 @@ describe('formatWhen', () => {
     expect(formatWhen(null)).toBe('—');
     expect(formatWhen(undefined)).toBe('—');
     expect(formatWhen('')).toBe('—');
+  });
+
+  it('a garbage string renders as "—", never "Invalid Date"', () => {
+    expect(formatWhen('not-a-date')).toBe('—');
+    expect(formatWhen('not-a-date')).not.toContain('Invalid');
   });
 
   it('a valid timestamp renders the short locale date+time', () => {
