@@ -10,7 +10,7 @@
 ## Tasks
 | Task | Plan items | Domain | Class | Root cause (1 line) | Write-set | Contract-set | Env-set | Depends on | Conflicts (C#) | Wave | Agent | Status | Code commits | Report |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| T-101 | L1 | frontend theme | DEEP | token inversion unproven; palette/toggle/init/probes missing | styles.css, index.html, App.jsx, AuthView.jsx, NewJob:678, theme helpers, tests | data-theme selector; prime_theme; meta color-scheme | jsdom + Chromium probe | spec+planner-review | C1 vs T-102 (lines only) | W2 | TBD | PENDING | — | — |
+| T-101 | L1 | frontend theme | DEEP | token inversion unproven; palette/toggle/init/probes missing | styles.css, index.html, App.jsx, AuthView.jsx, NewJob:678, theme helpers, tests | data-theme selector; prime_theme; meta color-scheme | jsdom + Chromium probe | spec+planner-review | C1 vs T-102 (lines only) | W2 | W2-IMPL-01 + W2-IMPR-01 | DONE | `21f65c13`+`94963e6` | reports/w2-impl/W2-IMPL-01-T-101.md |
 | T-102 | N1 | RunDetails duration | SURFACE | Math.max clamps negative→0 | RunDetails.jsx, runs.test.jsx | none | jsdom | none | C1 vs T-101 if both touch RunDetails | W1 | TBD | PENDING | — | — |
 | T-103 | D1 | docs | SURFACE | dual counts on one line | docs/tech-debt.md | none | none | none | none | W1 | TBD | PENDING | — | — |
 
@@ -25,9 +25,14 @@
 - Planner-review W1-PLAN-01: APPROVE-WITH-CHANGES, 6 MAJORs folded into spec (P-01..P-10 resolutions committed at `1b8d26a`).
 - Gate: gates/gate-w1-1.md GREEN (119/119 + build). Review/improve cycles 0/2.
 - Ownership file: ownership/W1.tsv (disjoint, verified).
-### Wave 2 (sequential deep)
-- T-101: spec docs/plans/2026-11-08-light-mode.md → planner-reviewer → DEEP design → approve → DEEP impl (styles, index.html, App/AuthView toggle, NewJob outlier, theme helpers, tests) → probe (manual Chromium) → tech-debt probe record.
-- Pre-mortem (W2): light palette fails contrast without probe; FOUC if init not pre-paint; prime_theme leaks across jsdom tests. Mitigations in spec.
+### Wave 2 (sequential deep) — CLOSED (gate green 154/154)
+- T-101 DONE (`21f65c13` impl + `94963e6` test-fix + `cfc9e17` report): light mode via [data-theme=light] inversion. 14 design triples + head init + App-state toggles + NewJob text-warn + theme/static guards + build-probe.
+- Design approved by ORCH (white accent-ink + raised exception explicit in spec at `ddf0b25`).
+- W2-REV-01 APPROVE-WITH-CHANGES: 0 B/M; MINOR probe-screenshots described-only ACCEPTED; 2 NITs NOT-WORTH-IT.
+- W2-TREV-01 APPROVE-WITH-CHANGES: 1 MAJOR (init parity) + 3 MINOR + 2 NIT → all FIXED by W2-IMPR-01 (test-only, prod diff empty).
+- W2-DELTA-01 APPROVE: R-W2-01..06 all closed; init guard strict; NewJob pinned both directions.
+- Gate: gates/gate-w2-1.md GREEN (154/154 + build 1670). Cycles used 1/2.
+- No additional rounds: all BLOCKER/MAJOR closed. Final review + SUMMARY next.
 
 ## Deep dives
 | Task | Agent | Design approved by | Report | Reviewers |
