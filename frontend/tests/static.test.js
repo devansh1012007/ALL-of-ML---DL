@@ -536,3 +536,68 @@ describe('static guard: T-101 pre-paint init parity + NewJob warn token', () => 
     expect('text-orange-400'.includes('text-warn')).toBe(false);
   });
 });
+
+// --- Playwright fine-tune guards (T-301..T-303) ---
+describe('static guard: T-301 favicon is an inline data-URI icon link', () => {
+  it('index.html carries a data-URI SVG icon link after color-scheme, before the init script', () => {
+    expect(indexHtmlSource).toContain('<link rel="icon"');
+    expect(indexHtmlSource).toContain('data:image/svg+xml');
+    const colorSchemeIdx = indexHtmlSource.indexOf('name="color-scheme"');
+    const iconIdx = indexHtmlSource.indexOf('<link rel="icon"');
+    const initIdx = indexHtmlSource.indexOf('prime_theme');
+    expect(colorSchemeIdx, 'color-scheme meta exists').toBeGreaterThan(-1);
+    expect(iconIdx, 'icon link exists').toBeGreaterThan(-1);
+    expect(initIdx, 'init script exists').toBeGreaterThan(-1);
+    expect(iconIdx, 'icon link is after the color-scheme meta').toBeGreaterThan(colorSchemeIdx);
+    expect(iconIdx, 'icon link is before the init script').toBeLessThan(initIdx);
+    // Guard self-check: an html without an icon link fails the pins above.
+    expect('<!DOCTYPE html><head></head>'.includes('<link rel="icon"')).toBe(false);
+  });
+});
+
+describe('static guard: T-302 type consistency (emoji + heading overrides removed)', () => {
+  it('no chart emoji (U+1F4CA) remains in shipped JSX', () => {
+    expect(combinedAppSource).not.toContain('\u{1F4CA}');
+    expect(source).not.toContain('\u{1F4CA}');
+    // Guard self-check: the pre-T-302 heading fails the pin above.
+    expect('<h3>\u{1F4CA} Model Intelligence</h3>'.includes('\u{1F4CA}')).toBe(true);
+  });
+
+  it('NewJob Model Intelligence h3 inherits the global h3 scale (no text-lg override)', () => {
+    const h3 = newJobSource.match(/<h3[^>]*>Model Intelligence<\/h3>/);
+    expect(h3, 'Model Intelligence h3 exists').not.toBeNull();
+    expect(h3[0]).not.toContain('text-lg');
+    expect(h3[0]).toContain('font-semibold text-strong mb-4');
+    expect(h3[0]).not.toContain('\u{1F4CA}');
+    // Guard self-check: the pre-T-302 line fails the no-text-lg pin above.
+    expect('<h3 className="text-lg font-semibold text-strong mb-4">Model Intelligence</h3>'.includes('text-lg')).toBe(true);
+  });
+
+  it('AdminScreen h1 is bare (inherits the global 24px/600 h1, no size/weight override)', () => {
+    expect(source).toContain('<h1>Admin</h1>');
+    const h1 = source.match(/<h1[^>]*>Admin<\/h1>/);
+    expect(h1, 'Admin h1 exists').not.toBeNull();
+    expect(h1[0]).not.toContain('text-2xl');
+    expect(h1[0]).not.toContain('font-bold');
+    expect(h1[0]).not.toContain('tracking-tight');
+    // Guard self-check: the pre-T-302 line fails the bare-h1 pin above.
+    expect('<h1 className="text-2xl font-bold tracking-tight">Admin</h1>'.includes('<h1>Admin</h1>')).toBe(false);
+  });
+});
+
+describe('static guard: T-303 control consistency, reduced', () => {
+  it('audit detail truncate carries a title tooltip with the full JSON', () => {
+    const truncate = source.match(/<div[^>]*className="text-xs text-faint truncate"[^>]*>/);
+    expect(truncate, 'audit truncate div exists').not.toBeNull();
+    expect(truncate[0]).toContain('title={JSON.stringify(event.detail)}');
+    // Guard self-check: the pre-T-303 line fails the title pin above.
+    expect('<div className="text-xs text-faint truncate">'.includes('title={JSON.stringify(event.detail)}')).toBe(false);
+  });
+
+  it('.admin-invite-code wraps so a long code cannot squeeze the copy button', () => {
+    expect(stylesSource).toMatch(/\.admin-invite-code\s*\{[^}]*flex-wrap:\s*wrap/);
+    // Guard self-check: the pre-T-303 rule fails the flex-wrap pin above.
+    const preFix = '.admin-invite-code { display: flex; align-items: center; }';
+    expect(/\.admin-invite-code\s*\{[^}]*flex-wrap:\s*wrap/.test(preFix)).toBe(false);
+  });
+});

@@ -657,7 +657,7 @@ export const NewJob = ({ navigate }) => {
         {/* Section C: Model Details Panel */}
         {modelDetails && testResults && (
           <div className="newjob-intelligence">
-            <h3 className="text-lg font-semibold text-strong mb-4">📊 Model Intelligence</h3>
+            <h3 className="font-semibold text-strong mb-4">Model Intelligence</h3>
             <div className="newjob-intelligence-grid">
               <div className="newjob-intelligence-cell">
                 <div className="text-xs text-muted mb-2">{testResults.accuracyLabel}</div>

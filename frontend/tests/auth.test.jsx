@@ -180,3 +180,54 @@ describe('auth: R3a sign-in card + successful submit', () => {
     expect(screen.getByText('At least 8 characters.')).toBeInTheDocument();
   });
 });
+
+describe('auth: T-304 failed submission exposes aria-invalid + aria-describedby on the fields', () => {
+  it('fields carry no invalid state before a failed submission', async () => {
+    const app = renderApp({});
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^username$/i)).not.toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText(/^password$/i)).not.toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText(/^username$/i)).not.toHaveAttribute('aria-describedby');
+    expect(screen.getByLabelText(/^password$/i)).not.toHaveAttribute('aria-describedby');
+    // Guard self-check: a bare input without the attrs fails the pins below.
+    const bare = document.createElement('input');
+    expect(bare.getAttribute('aria-invalid')).toBeNull();
+  });
+
+  it('failed submit marks both fields aria-invalid="true" and describes them with the alert text', async () => {
+    const app = renderApp({
+      seed: {
+        fail: {
+          '/token': { network: true, message: 'Failed to fetch' },
+        },
+      },
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /^sign in$/i })
+    ).toBeInTheDocument();
+    await submitLogin();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/Could not reach the server/);
+    // The alert must be addressable so aria-describedby can point at it.
+    const describedBy = alert.getAttribute('id');
+    expect(describedBy, 'alert carries an id for aria-describedby').toBeTruthy();
+
+    const username = screen.getByLabelText(/^username$/i);
+    const password = screen.getByLabelText(/^password$/i);
+    for (const field of [username, password]) {
+      expect(field).toHaveAttribute('aria-invalid', 'true');
+      expect(field).toHaveAttribute('aria-describedby', describedBy);
+      // The describedby target is the alert itself, so AT announces the error.
+      expect(document.getElementById(field.getAttribute('aria-describedby'))).toBe(alert);
+    }
+    // Mutation tripwire: removing aria-invalid/aria-describedby from AuthView
+    // makes the for-loop assertions above fail (attrs absent -> not 'true').
+  });
+});

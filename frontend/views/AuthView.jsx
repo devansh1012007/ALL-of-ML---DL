@@ -56,7 +56,7 @@ export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
         <h1 className="mb-2">{registering ? 'Create an account' : 'Sign in'}</h1>
         <p className="text-muted mb-8">Train a model on your data, check it against a baseline, and use it.</p>
         {sessionNotice && <p role="status" className="notice mb-5">{sessionNotice}</p>}
-        {error && <p role="alert" className="notice notice-bad mb-5">{error}</p>}
+        {error && <p role="alert" id="auth-error" className="notice notice-bad mb-5">{error}</p>}
         <form onSubmit={handleSubmit} className="auth-form">
           <div>
             <label htmlFor="auth-username" className="block text-sm text-muted mb-1.5">Username</label>
@@ -64,6 +64,8 @@ export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
               id="auth-username" type="text" required autoComplete="username"
               value={username} onChange={(e) => setUsername(e.target.value)}
               className="field"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'auth-error' : undefined}
             />
           </div>
           <div>
@@ -74,6 +76,8 @@ export const AuthView = ({ mode, setMode, theme, onToggleTheme }) => {
               minLength={registering ? 8 : undefined}
               value={password} onChange={(e) => setPassword(e.target.value)}
               className="field"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'auth-error' : undefined}
             />
             {registering && <p className="mt-1.5 text-sm text-faint">At least 8 characters.</p>}
           </div>

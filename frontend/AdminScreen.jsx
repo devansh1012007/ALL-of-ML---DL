@@ -626,7 +626,7 @@ const AuditTab = ({ apiFetch }) => {
               actor #{event.actor_id ?? 'system'} · {event.target_type || ''} {event.target_id || ''} · {formatWhen(event.created_at)}
             </div>
             {event.detail && Object.keys(event.detail).length ? (
-              <div className="text-xs text-faint truncate">{JSON.stringify(event.detail)}</div>
+              <div className="text-xs text-faint truncate" title={JSON.stringify(event.detail)}>{JSON.stringify(event.detail)}</div>
             ) : null}
           </div>
         </div>
@@ -667,7 +667,7 @@ export const AdminScreen = ({ apiFetch }) => {
   return (
     <div className="admin-page">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Admin</h1>
+        <h1>Admin</h1>
         <p className="text-sm text-faint mt-1">
           The users, their quotas and their usage, the queue, the invites and the audit
           trail - the controls of the deployment, without a database shell.
