@@ -30,6 +30,28 @@
   color-scheme: dark;
 }
 
+/* Light theme (T-101): same 14 token names, contrast-valid light triples
+   from the approved design record (W2-DEEP-01 D2 §2.1). :root above is
+   the dark default and must stay byte-identical; this block only overrides
+   when <html data-theme="light">. */
+[data-theme="light"] {
+  --canvas: 248 250 252;
+  --surface: 241 245 249;
+  --raised: 226 232 240;
+  --rule: 120 138 165;
+  --strong: 15 23 42;
+  --ink: 30 41 59;
+  --muted: 60 74 95;
+  --faint: 86 100 124;
+  --accent: 29 78 216;
+  --accent-hover: 30 64 175;
+  --accent-ink: 255 255 255;
+  --ok: 4 110 80;
+  --warn: 165 73 10;
+  --bad: 185 28 28;
+  color-scheme: light;
+}
+
 @layer base {
   html { -webkit-text-size-adjust: 100%; }
   body {
@@ -61,6 +83,7 @@
   /* D2: the three rich disclosures carry an inline marker element instead of
      the flex pseudo-element, so the marker stays with the summary text.
      The global summary rule above is left alone. */
+  summary.disclosure-summary { min-height: 1.5rem; } /* R5: disclosures meet the 24px floor */
   summary.disclosure-summary::before { content: none; }
   details[open] > summary.disclosure-summary::before { content: none; }
   .disclosure-marker { display: inline-block; width: 0.75rem; flex: none; text-align: center; color: rgb(var(--faint)); }
@@ -85,6 +108,7 @@
   .field::placeholder { color: rgb(var(--faint)); }
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem;
+    min-height: 2rem; /* R5: declared 24px+ touch floor (computed height is already above it) */
     padding: 0.5rem 0.9rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem;
     border: 1px solid transparent; cursor: pointer; transition: background-color 120ms, border-color 120ms, color 120ms;
   }
@@ -95,24 +119,226 @@
   .btn-quiet:hover:not(:disabled) { background: rgb(var(--surface)); border-color: rgb(var(--faint) / 0.6); }
   .btn-danger { color: rgb(var(--bad)); border-color: rgb(var(--bad) / 0.4); }
   .btn-danger:hover:not(:disabled) { background: rgb(var(--bad) / 0.1); }
-  .link { color: rgb(var(--accent)); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgb(var(--accent) / 0.4); }
+  .link { display: inline-flex; align-items: center; min-height: 1.5rem; color: rgb(var(--accent)); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgb(var(--accent) / 0.4); }
   .link:hover { text-decoration-color: rgb(var(--accent)); }
   .notice { border-left: 2px solid rgb(var(--warn)); padding: 0.25rem 0 0.25rem 0.875rem; color: rgb(var(--ink)); }
   .notice-bad { border-left-color: rgb(var(--bad)); }
   .notice-ok { border-left-color: rgb(var(--ok)); }
   .dot { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 9999px; background: rgb(var(--faint)); flex: none; }
+  /* App shell (R2): shared nav, page-header, and breadcrumb pattern.
+     Layout classes only — colours come from the tokens above. */
+  .nav-link {
+    display: inline-flex; align-items: center; min-height: 1.5rem;
+    padding: 0.375rem 0.625rem; font-size: 0.875rem; line-height: 1.4;
+    border-radius: 6px; border-bottom: 2px solid transparent;
+    color: rgb(var(--muted)); white-space: nowrap;
+    transition: color 120ms, border-color 120ms, background-color 120ms;
+  }
+  .nav-link:hover { color: rgb(var(--strong)); }
+  .nav-link[aria-current="page"] { color: rgb(var(--strong)); border-bottom-color: rgb(var(--accent)); font-weight: 500; }
+  .page-header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 1rem; }
+  .page-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+  .breadcrumb { font-size: 0.875rem; color: rgb(var(--muted)); }
+  .breadcrumb ol { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; list-style: none; margin: 0; padding: 0; }
+  .breadcrumb li { display: flex; align-items: center; gap: 0.5rem; }
+  .breadcrumb a { display: inline-flex; align-items: center; min-height: 1.5rem; padding: 0.125rem 0; }
+  .breadcrumb a:hover { color: rgb(var(--strong)); }
+  .breadcrumb [aria-current="page"] { color: rgb(var(--strong)); }
+  /* R3a views: shared layout classes for Auth, ModelsCatalog, RunsDashboard.
+     Layout/spacing only — every colour comes from the tokens above. */
+  .auth-card {
+    width: 100%;
+    max-width: 24rem;
+    margin: 0 auto;
+    background: rgb(var(--surface) / 0.45);
+    border: 1px solid rgb(var(--rule));
+    border-radius: 10px;
+    padding: 2rem 1.5rem;
+  }
+  .auth-brand { color: rgb(var(--strong)); font-weight: 600; }
+  .auth-form { display: flex; flex-direction: column; gap: 1.25rem; }
+  .catalog-page, .runs-page { display: flex; flex-direction: column; gap: 2rem; }
+  .catalog-search { width: 100%; min-height: 2.5rem; }
+  @media (min-width: 640px) { .catalog-search { max-width: 20rem; } }
+  .catalog-group-title { margin-bottom: 0.5rem; }
+  .catalog-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid rgb(var(--rule)); }
+  .model-row { border-bottom: 1px solid rgb(var(--rule) / 0.6); }
+  .model-summary { min-height: 1.5rem; flex-wrap: wrap; }
+  .model-name { flex: 0 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+  .model-desc { flex: 1 1 12rem; min-width: 0; }
+  .model-detail-grid { display: grid; grid-template-columns: 9rem 1fr; column-gap: 1rem; row-gap: 0.5rem; font-size: 0.875rem; }
+  .runs-empty {
+    max-width: 42rem;
+    background: rgb(var(--surface) / 0.35);
+    border: 1px solid rgb(var(--rule));
+    border-radius: 10px;
+    padding: 1.5rem;
+  }
+  .compare-check { width: 1.125rem; height: 1.125rem; min-width: 1.5rem; min-height: 1.5rem; margin: 0; }
   .th { text-align: left; font-weight: 500; color: rgb(var(--muted)); font-size: 0.8125rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid rgb(var(--rule)); }
   .td { padding: 0.75rem; border-bottom: 1px solid rgb(var(--rule) / 0.6); vertical-align: middle; }
   /* D1: the runs table wrapper stays flush inside the page. Below sm the
      cells tighten (checkbox column tightest) via this scoped rule only,
      so the Compare and Confusion tables that share .th/.td are unaffected. */
   .runs-table-wrap { margin-left: 0; margin-right: 0; }
+  /* R5: at 390px the runs columns scroll instead of crushing (the wrapper owns the scroll). */
+  .runs-table-wrap table { min-width: 34rem; }
   @media (max-width: 639px) {
+    .model-detail-grid { grid-template-columns: 1fr; row-gap: 0.125rem; }
+    .model-detail-grid > dd { margin-bottom: 0.5rem; }
+    .model-name { flex-basis: 100%; }
+    .runs-empty { padding: 1.25rem 1rem; }
     .runs-table-wrap .th,
     .runs-table-wrap .td { padding-left: 0.5rem; padding-right: 0.5rem; }
     .runs-table-wrap .th:first-child,
     .runs-table-wrap .td:first-child { padding-left: 0.25rem; padding-right: 0.25rem; }
   }
+  /* R3b views: RunDetails, CompareRuns, PredictPanel shared layout classes.
+     Layout/spacing only — every colour comes from the tokens above. */
+  .run-details-page, .compare-page { display: flex; flex-direction: column; gap: 2.5rem; }
+  .result-headline-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1rem; }
+  .result-value {
+    font-size: 2.25rem; line-height: 1.1; font-weight: 600;
+    letter-spacing: -0.02em; color: rgb(var(--strong));
+    font-variant-numeric: tabular-nums;
+  }
+  .result-scale { position: relative; margin-top: 3rem; margin-bottom: 0.25rem; height: 1.25rem; }
+  .result-scale-range {
+    display: flex; justify-content: space-between; margin-top: 0.75rem;
+    font-size: 0.75rem; color: rgb(var(--faint)); font-variant-numeric: tabular-nums;
+  }
+  .eval-scores { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 2rem; row-gap: 1.25rem; }
+  @media (min-width: 640px) { .eval-scores { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 768px) { .eval-scores { grid-template-columns: repeat(4, 1fr); } }
+  .confusion-wrap { overflow-x: auto; }
+  .confusion-table { font-size: 0.875rem; text-align: center; }
+  .detail-list { display: grid; grid-template-columns: 1fr; column-gap: 1.5rem; row-gap: 0.125rem; max-width: 42rem; }
+  .detail-list > dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 639px) { .detail-list > dd { margin-bottom: 0.75rem; } }
+  @media (min-width: 640px) {
+    .detail-list { grid-template-columns: 10rem 1fr; row-gap: 0.75rem; }
+    .detail-list-wide { grid-template-columns: 13rem 1fr; }
+  }
+  .metrics-grid { display: grid; grid-template-columns: 1fr; column-gap: 2rem; row-gap: 0.75rem; }
+  @media (min-width: 640px) { .metrics-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (min-width: 768px) { .metrics-grid { grid-template-columns: repeat(3, 1fr); } }
+  .compare-chart { display: flex; flex-direction: column; gap: 1rem; max-width: 42rem; }
+  .compare-table-wrap { overflow-x: auto; }
+  /* R5: compare columns scroll instead of crushing at 390px. */
+  .compare-table-wrap table { min-width: 30rem; }
+  .compare-run-link { min-height: 1.5rem; display: inline-flex; align-items: center; }
+  .predict-segmented {
+    display: inline-flex; font-size: 0.875rem;
+    border: 1px solid rgb(var(--rule)); border-radius: 6px; overflow: hidden;
+  }
+  .predict-segmented-btn { min-height: 2rem; padding-left: 0.75rem; padding-right: 0.75rem; display: inline-flex; align-items: center; }
+  .predict-form-grid { display: grid; grid-template-columns: 1fr; column-gap: 1.5rem; row-gap: 1rem; }
+  @media (min-width: 768px) { .predict-form-grid { grid-template-columns: repeat(2, 1fr); } }
+  .predict-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-top: 1.25rem; }
+  .predict-result { display: flex; flex-direction: column; gap: 1.25rem; margin-top: 1.5rem; }
+  /* R3c NewJob: shared layout classes for the new-run form (sections, source
+     toggle, preset cards, intelligence panel, submit row). Layout/spacing
+     only — every colour comes from the tokens above. */
+  .newjob-page { display: flex; flex-direction: column; gap: 1.5rem; }
+  .newjob-form { display: flex; flex-direction: column; gap: 2rem; }
+  .newjob-section-title { margin-bottom: 1.25rem; }
+  .newjob-field-label { display: block; font-size: 0.875rem; color: rgb(var(--muted)); margin-bottom: 0.375rem; }
+  .newjob-field-label-small { display: block; font-size: 0.75rem; font-weight: 500; color: rgb(var(--faint)); margin-bottom: 0.25rem; }
+  .newjob-hint { font-size: 0.875rem; color: rgb(var(--faint)); margin-top: 0.375rem; }
+  .newjob-grid-2 { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: 1.5rem; row-gap: 1.5rem; }
+  @media (min-width: 768px) { .newjob-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  /* R5 (R3c MINOR): the pair stacks below sm so the two fields are not
+     crushed side-by-side at 390px. */
+  .newjob-pair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  @media (min-width: 640px) { .newjob-pair { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .newjob-mode-toggle { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; }
+  .newjob-mode-btn {
+    min-height: 2rem; padding: 0.5rem 1rem; border-radius: 6px;
+    font-size: 0.875rem; font-weight: 500; text-align: center; cursor: pointer;
+    border: 1px solid rgb(var(--rule)); background: transparent; color: rgb(var(--muted));
+    transition: color 120ms, background-color 120ms, border-color 120ms;
+  }
+  .newjob-mode-btn:hover { color: rgb(var(--strong)); }
+  .newjob-mode-btn[aria-pressed="true"] { background: rgb(var(--raised)); color: rgb(var(--strong)); border-color: rgb(var(--rule)); }
+  .newjob-upload-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+  .newjob-mode-note { margin-bottom: 1.5rem; padding: 0.75rem; border-radius: 6px; background: rgb(var(--accent) / 0.15); border: 1px solid rgb(var(--accent) / 0.5); }
+  .newjob-preset-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.75rem; }
+  @media (min-width: 768px) { .newjob-preset-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .newjob-preset-card {
+    min-height: 3rem; padding: 0.75rem; border-radius: 6px; text-align: left; cursor: pointer;
+    border: 1px solid rgb(var(--rule)); background: rgb(var(--surface)); color: rgb(var(--muted));
+    transition: border-color 120ms, background-color 120ms, color 120ms;
+  }
+  .newjob-preset-card:hover { border-color: rgb(var(--faint) / 0.6); }
+  .newjob-preset-card[aria-pressed="true"] { background: rgb(var(--accent) / 0.15); border-color: rgb(var(--accent) / 0.5); color: rgb(var(--strong)); }
+  .newjob-preset-name { font-weight: 500; font-size: 0.875rem; text-transform: capitalize; }
+  .newjob-preset-desc { font-size: 0.875rem; color: rgb(var(--faint)); margin-top: 0.375rem; }
+  .newjob-intelligence { background: rgb(var(--surface) / 0.45); border: 1px solid rgb(var(--accent) / 0.5); border-radius: 10px; padding: 1.5rem; }
+  .newjob-intelligence-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  @media (min-width: 768px) { .newjob-intelligence-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .newjob-intelligence-cell { background: rgb(var(--surface) / 0.5); border: 1px solid rgb(var(--rule) / 0.5); border-radius: 6px; padding: 1rem; }
+  .newjob-tag {
+    display: inline-flex; align-items: center; min-height: 1.5rem; padding: 0.25rem 0.75rem;
+    border-radius: 9999px; font-size: 0.75rem; color: rgb(var(--accent));
+    background: rgb(var(--accent) / 0.15); border: 1px solid rgb(var(--accent) / 0.5);
+  }
+  .newjob-params-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; }
+  @media (min-width: 768px) { .newjob-params-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  .newjob-submit-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 1rem; border-top: 1px solid rgb(var(--rule)); padding-top: 1.5rem; }
+  /* R4 Admin: shared layout classes for AdminScreen (tabs, tables, cards,
+     usage, badges, icon buttons). Layout/spacing only — every colour comes
+     from the tokens above. Interactive targets are at least 24px. */
+  .admin-page { display: flex; flex-direction: column; gap: 1.5rem; }
+  .admin-summary { background: rgb(var(--surface) / 0.5); border: 1px solid rgb(var(--rule)); border-radius: 6px; padding: 1rem; }
+  .admin-summary-head { display: flex; align-items: center; gap: 0.5rem; color: rgb(var(--faint)); font-size: 0.75rem; }
+  .admin-summary-value { font-size: 1.5rem; font-weight: 700; margin-top: 0.25rem; color: rgb(var(--strong)); font-variant-numeric: tabular-nums; }
+  .admin-summary-value-warn { color: rgb(var(--warn)); }
+  .admin-tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; border-bottom: 1px solid rgb(var(--rule)); padding-bottom: 0.5rem; }
+  .admin-tab {
+    display: inline-flex; align-items: center; gap: 0.5rem; min-height: 2rem;
+    padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.875rem;
+    color: rgb(var(--muted)); border-bottom: 2px solid transparent;
+    cursor: pointer; transition: color 120ms, background-color 120ms, border-color 120ms;
+  }
+  .admin-tab:hover { color: rgb(var(--strong)); background: rgb(var(--surface)); }
+  .admin-tab[aria-current="page"] { color: rgb(var(--strong)); background: rgb(var(--accent) / 0.1); border-bottom-color: rgb(var(--accent)); font-weight: 500; }
+  .admin-table-wrap { overflow-x: auto; border: 1px solid rgb(var(--rule)); border-radius: 6px; }
+  /* R5: admin tables scroll instead of crushing at 390px. */
+  .admin-table-wrap table { min-width: 34rem; }
+  .admin-card { background: rgb(var(--surface) / 0.35); border: 1px solid rgb(var(--rule)); border-radius: 6px; padding: 1rem; }
+  .admin-audit-row { background: rgb(var(--surface) / 0.35); border: 1px solid rgb(var(--rule)); border-radius: 6px; padding: 0.75rem 1rem; display: flex; align-items: flex-start; gap: 0.75rem; }
+  .admin-invite-code { background: rgb(var(--accent) / 0.1); border: 1px solid rgb(var(--accent) / 0.5); border-radius: 6px; padding: 1rem; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }
+  .admin-invite-code-text { min-width: 0; overflow-wrap: anywhere; }
+  .admin-usage { min-width: 8.75rem; }
+  .admin-usage-head { display: flex; justify-content: space-between; font-size: 0.75rem; color: rgb(var(--muted)); margin-bottom: 0.25rem; }
+  .admin-usage-track { height: 0.375rem; background: rgb(var(--raised)); border-radius: 9999px; overflow: hidden; }
+  .admin-usage-fill { height: 100%; border-radius: 9999px; transition: width 120ms; }
+  .admin-usage-fill--accent { background: rgb(var(--accent)); }
+  .admin-usage-fill--warn { background: rgb(var(--warn)); }
+  .admin-usage-fill--bad { background: rgb(var(--bad)); }
+  .admin-hint { font-size: 0.75rem; color: rgb(var(--faint)); margin-top: 0.25rem; }
+  .admin-hint-bad { font-size: 0.75rem; color: rgb(var(--bad)); margin-top: 0.25rem; }
+  .admin-badge { display: inline-flex; align-items: center; min-height: 1.5rem; padding: 0.125rem 0.5rem; border-radius: 9999px; border: 1px solid; font-size: 0.75rem; font-weight: 500; }
+  .admin-badge--active { background: rgb(var(--ok) / 0.1); color: rgb(var(--ok)); border-color: rgb(var(--ok) / 0.3); }
+  .admin-badge--pending { background: rgb(var(--warn) / 0.1); color: rgb(var(--warn)); border-color: rgb(var(--warn) / 0.4); }
+  .admin-badge--suspended { background: rgb(var(--bad) / 0.1); color: rgb(var(--bad)); border-color: rgb(var(--bad) / 0.4); }
+  .admin-icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 1.5rem; min-height: 1.5rem; padding: 0.375rem;
+    border-radius: 6px; border: 1px solid transparent; cursor: pointer;
+    transition: background-color 120ms, color 120ms;
+  }
+  .admin-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .admin-icon-btn--ok { color: rgb(var(--ok)); }
+  .admin-icon-btn--ok:hover:not(:disabled) { background: rgb(var(--ok) / 0.1); }
+  .admin-icon-btn--warn { color: rgb(var(--warn)); }
+  .admin-icon-btn--warn:hover:not(:disabled) { background: rgb(var(--warn) / 0.1); }
+  .admin-icon-btn--bad { color: rgb(var(--bad)); }
+  .admin-icon-btn--bad:hover:not(:disabled) { background: rgb(var(--bad) / 0.1); }
+  .admin-icon-btn--accent { color: rgb(var(--accent)); }
+  .admin-icon-btn--accent:hover:not(:disabled) { background: rgb(var(--accent) / 0.15); }
+  .admin-form-label { display: block; font-size: 0.75rem; color: rgb(var(--muted)); }
+  .admin-form-label .field { display: block; margin-top: 0.25rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

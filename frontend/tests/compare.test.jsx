@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup, within } from '@testing-library/react';
+import { screen, cleanup, within, fireEvent, waitFor } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -19,7 +19,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function completedWithMetrics(id, modelName, accuracy) {
+function completedWithMetrics(id, modelName, accuracy, f1) {
   return {
     id,
     model_name: modelName,
@@ -36,6 +36,7 @@ function completedWithMetrics(id, modelName, accuracy) {
     artifact_removed: false,
     metrics: {
       accuracy,
+      ...(f1 === undefined ? {} : { f1_macro: f1 }),
       baseline_accuracy: 0.5,
     },
     tags: [],
@@ -78,5 +79,93 @@ describe('compare: best bar says "best", not colour only', () => {
     // Exactly one bar cue in this section (the header sentence is outside it,
     // and the table's own "best" lives in a different section).
     expect(within(byMetric).getAllByText(/best/i)).toHaveLength(1);
+  });
+});
+
+describe('compare: R3b layout, metric switch, and run navigation', () => {
+  it('renders the shared R3b layout hooks for page, chart, and table', async () => {
+    const app = renderApp({
+      hash: '#/compare/1+2',
+      token: 'testuser',
+      seed: {
+        runs: [
+          completedWithMetrics(1, 'Top_Forest', 0.9),
+          completedWithMetrics(2, 'Low_Tree', 0.7),
+        ],
+      },
+    });
+    backend = app.backend;
+
+    expect(
+      await screen.findByRole('heading', { name: /compare 2 runs/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/the same score side by side/i)
+    ).toBeInTheDocument();
+    // R3b shared layout hooks (absent before the redesign).
+    expect(document.querySelector('.compare-page')).not.toBeNull();
+    expect(document.querySelector('.compare-chart')).not.toBeNull();
+    expect(document.querySelector('.compare-table-wrap')).not.toBeNull();
+    // Both runs are charted and tabulated.
+    expect(screen.getByText('#1 Top_Forest')).toBeInTheDocument();
+    expect(screen.getByText('#2 Low_Tree')).toBeInTheDocument();
+    expect(screen.getAllByRole('columnheader', { name: /top_forest/i })).toHaveLength(1);
+    expect(screen.getAllByRole('columnheader', { name: /low_tree/i })).toHaveLength(1);
+    // The table keeps its own best cue, separate from the chart bar cue.
+    const tableWrap = document.querySelector('.compare-table-wrap');
+    expect(within(tableWrap).getByText('best')).toBeInTheDocument();
+  });
+
+  it('switching the chart metric re-ranks the bars and keeps the best cue', async () => {
+    const app = renderApp({
+      hash: '#/compare/1+2',
+      token: 'testuser',
+      seed: {
+        runs: [
+          completedWithMetrics(1, 'Top_Forest', 0.9, 0.72),
+          completedWithMetrics(2, 'Low_Tree', 0.7, 0.88),
+        ],
+      },
+    });
+    backend = app.backend;
+
+    const byMetric = await screen.findByRole('heading', {
+      name: /by metric/i,
+    });
+    const section = byMetric.closest('section');
+    // Accuracy: run 1 is best.
+    expect(within(section).getByText(/0\.900 best/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/metric/i), {
+      target: { value: 'f1_macro' },
+    });
+
+    await waitFor(() => {
+      expect(within(section).getByText(/0\.880 best/)).toBeInTheDocument();
+    });
+    expect(within(section).queryByText(/0\.720 best/)).not.toBeInTheDocument();
+    expect(within(section).getAllByText(/best/i)).toHaveLength(1);
+    expect(within(section).getByText('Higher is better.')).toBeInTheDocument();
+  });
+
+  it('clicking a run name in the table navigates to its details view', async () => {
+    const app = renderApp({
+      hash: '#/compare/1+2',
+      token: 'testuser',
+      seed: {
+        runs: [
+          completedWithMetrics(1, 'Top_Forest', 0.9),
+          completedWithMetrics(2, 'Low_Tree', 0.7),
+        ],
+      },
+    });
+    backend = app.backend;
+
+    await screen.findByRole('heading', { name: /compare 2 runs/i });
+    const link = document.querySelector('.compare-run-link');
+    expect(link).not.toBeNull();
+    expect(link).toHaveTextContent('Top_Forest');
+    fireEvent.click(link);
+    expect(window.location.hash).toBe('#/run-details/1');
   });
 });

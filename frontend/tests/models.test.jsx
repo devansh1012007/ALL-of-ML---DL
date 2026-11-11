@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, cleanup } from '@testing-library/react';
+import { screen, cleanup, fireEvent } from '@testing-library/react';
 import { renderApp } from './helpers.jsx';
 
 let backend;
@@ -83,5 +83,69 @@ describe('models catalog: success still reports capability', () => {
       await screen.findByText('2 of 2 can run on this server.')
     ).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+describe('models catalog: R3a search filter + disclosure cards', () => {
+  it('search filters the catalog and hides non-matching models', async () => {
+    const app = renderApp({
+      hash: '#/models',
+      token: 'testuser',
+      seed: {
+        models: [
+          {
+            name: 'Fake_Forest',
+            category: 'classification',
+            description: 'A fake model for tests.',
+            parameters: {},
+            optimization: [],
+            test_results: null,
+          },
+          {
+            name: 'Fake_Linear',
+            category: 'regression',
+            description: 'A fake regression model.',
+            parameters: {},
+            optimization: [],
+            test_results: null,
+          },
+        ],
+      },
+    });
+    backend = app.backend;
+
+    expect(await screen.findByText('Fake_Forest')).toBeInTheDocument();
+    expect(screen.getByText('Fake_Linear')).toBeInTheDocument();
+
+    // R3a: the search field carries the shared catalog-search class.
+    const search = screen.getByLabelText(/find a model/i);
+    expect(search.className).toContain('catalog-search');
+
+    fireEvent.change(search, { target: { value: 'Fake_Forest' } });
+    expect(screen.getByText('Fake_Forest')).toBeInTheDocument();
+    expect(screen.queryByText('Fake_Linear')).not.toBeInTheDocument();
+
+    fireEvent.change(search, { target: { value: 'matchesnothing' } });
+    expect(
+      await screen.findByText('No model matches that search.')
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Fake_Forest')).not.toBeInTheDocument();
+  });
+
+  it('disclosure rows carry the shared model-row/detail classes and marker', async () => {
+    const app = renderApp({ hash: '#/models', token: 'testuser' });
+    backend = app.backend;
+
+    expect(await screen.findByText('Random_Forest')).toBeInTheDocument();
+
+    // R3a shared classes (absent before the redesign).
+    const row = document.querySelector('.model-row');
+    expect(row).not.toBeNull();
+    const summary = document.querySelector('.model-summary');
+    expect(summary).not.toBeNull();
+    expect(summary.className).toContain('disclosure-summary');
+    expect(summary.querySelector('.disclosure-marker')).not.toBeNull();
+    expect(document.querySelector('.model-detail-grid')).not.toBeNull();
+    expect(document.querySelector('.catalog-group')).not.toBeNull();
   });
 });
