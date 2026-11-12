@@ -1,0 +1,25 @@
+# Production overlay for the stack: run a pulled, tagged backend image instead of
+# building from source. Used together with the root compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# The image tag is supplied through ALLML_IMAGE (for example
+# ALLML_IMAGE=ghcr.io/devansh1012007/allml-backend:0.4.0). deploy.yml exports
+# it as $IMAGE:$IMAGE_TAG and runs `$COMPOSE pull api worker` before every
+# up -d, so production pulls the tagged GHCR image rather than building locally.
+#
+# NOTE: a Compose overlay cannot remove the base file's `build:` key, so the api
+# and worker services carry both `build: .` (from docker-compose.yml) and
+# `image: ${ALLML_IMAGE}` (overlay). The `pull` step above makes the run use the
+# image; a bare `up -d` without a prior pull would build from source instead.
+#
+# Only the api and worker service definitions are extended; db keeps
+# image: postgres:16 unchanged. No other service, volume, or setting is touched
+# (see SPEC B6).
+
+services:
+  api:
+    image: ${ALLML_IMAGE}
+
+  worker:
+    image: ${ALLML_IMAGE}

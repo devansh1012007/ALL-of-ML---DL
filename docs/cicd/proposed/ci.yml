@@ -1,0 +1,158 @@
+# PROPOSED replacement for .github/workflows/ci.yml. Not active: it lives under
+# docs/cicd/proposed/, which GitHub does not run. See docs/cicd/SPEC.md, sections 5.1 and 7.
+#
+# Changes from the active file:
+#   - the frontend tests run (the active file only builds the frontend)
+#   - pushes to every branch are not triggered; main and pull requests are
+#     (the active file names a branch, feature/week1-honest-demo, that no longer exists)
+#   - reusable (workflow_call), so the release workflow can require it
+#   - least-privilege token, cancel superseded runs, timeouts, uv cache
+#   - a Postgres job (manual until the suite is confirmed on Postgres)
+#   - lint, Docker build and compose validation, report-only until triaged
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests and migrations (SQLite)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DATABASE_URL: sqlite+aiosqlite:////tmp/ci-backend.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install backend dependencies (CPU build of torch)
+        run: scripts/install.sh --backend --cpu
+
+      - name: Migrate and check for schema drift
+        run: |
+          cd backend
+          ../.venv/bin/python -m alembic upgrade head
+          ../.venv/bin/python -m alembic check
+
+      - name: Run the test suite
+        run: .venv/bin/python -m pytest backend/tests
+
+  frontend:
+    name: Frontend tests and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Keep the built frontend for seven days
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  backend-postgres:
+    name: Backend on Postgres 16 (manual until confirmed)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: allml
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: allml
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U allml"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://allml:ci-only-password@localhost:5432/allml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install backend dependencies (CPU build of torch)
+        run: scripts/install.sh --backend --cpu
+      - name: Migrate and check for schema drift
+        run: |
+          cd backend
+          ../.venv/bin/python -m alembic upgrade head
+          ../.venv/bin/python -m alembic check
+      - name: Run the test suite
+        run: .venv/bin/python -m pytest backend/tests
+
+  lint:
+    name: Lint (report only, not required)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Python lint with a pinned ruff
+        run: uvx ruff@0.8.4 check backend --output-format=github
+      - name: Dockerfile lint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  docker:
+    name: Build the backend image (no push) and validate compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: allml-backend:ci
+      - name: Validate the root compose file
+        # compose needs a .env file (env_file: .env). CI writes a throwaway one;
+        # there is no committed root .env.example yet (see SPEC blocker B4).
+        run: |
+          printf 'POSTGRES_PASSWORD=ci-only-password\n' > .env
+          docker compose -f docker-compose.yml config --quiet
+          rm -f .env

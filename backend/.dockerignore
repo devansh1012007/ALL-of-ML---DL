@@ -1,0 +1,22 @@
+# backend/.dockerignore (SPEC blocker B5): keep local secrets and runtime data out of the
+# backend build context. For the stack that builds from backend/ (backend/docker-compose.yml,
+# backend/dockerfile); the root .dockerignore does not apply to this build.
+
+.git
+.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+*.log
+
+# secrets and keys (the example file is allowed back in)
+**/.env
+**/.env.*
+!**/.env.example
+**/.secret_key
+
+# runtime data: trained models and user uploads never belong in an image
+models
+**/models
+uploads
+**/uploads

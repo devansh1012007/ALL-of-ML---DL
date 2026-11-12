@@ -13,15 +13,25 @@ live in `docs/MODEL_TIERS.md`; the first-week checkpoint in
   the database and trains them. One worker per machine; scale by adding
   machines, not by editing code.
 * **postgres** - the database is the queue, the registry and the ledger.
-  SQLite works for one user on one box; Postgres is the tested target
-  (see `.github/workflows/ci-postgres.yml`).
+  SQLite works for one user on one box. Postgres is the database of the root
+  compose stack; CI runs the test suite on SQLite. A Postgres job is proposed and
+  not yet active (`docs/cicd/SPEC.md`, CI-5).
 
 ## The start of a deployment
 
     cp .env.example .env          # then edit the values
     docker compose up -d
-    docker compose exec api alembic upgrade head
+    docker compose exec api alembic -c backend/alembic.ini upgrade head
     docker compose exec api python -m backend.app.admin create-admin <username>
+
+One known problem remains (SPEC blocker B2): `alembic upgrade head` run from
+the image's working directory cannot find `alembic.ini`, which lives in
+`backend/`; the root compose command already uses `alembic -c backend/alembic.ini
+upgrade head` to work around it, but end-to-end container verification of the
+fixed stack is still pending.
+
+The root `.env.example` is the template of this stack; the backend keeps its
+own at `backend/.env.example`, for a server that is started without compose.
 
 The startup validates every environment variable (plan H4) and prints the
 effective non-secret configuration; a nonsense value is refused with the

@@ -1,0 +1,100 @@
+# PROPOSED release workflow. Not active (lives under docs/cicd/proposed/).
+# See docs/cicd/SPEC.md, section 5.3 and docs/cicd/RELEASING.md.
+# A tag matching v*.*.* first runs the full CI (it is reusable), then builds and
+# publishes the backend image to GHCR and attaches the frontend build to a GitHub
+# Release. It deploys nothing: deployment is a separate, approved step (deploy.yml).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    name: Build and push the backend image
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags for this release
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # GHCR requires lower-case image names. Change the owner here if the repository moves.
+          images: ghcr.io/devansh1012007/allml-backend
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+  frontend:
+    name: Build the frontend archive
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Archive
+        run: tar -C dist -czf "$RUNNER_TEMP/frontend-${GITHUB_REF_NAME}.tgz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-archive
+          path: ${{ runner.temp }}/frontend-${{ github.ref_name }}.tgz
+
+  github-release:
+    name: Publish the GitHub Release
+    needs: [image, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-archive
+          path: release-assets
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

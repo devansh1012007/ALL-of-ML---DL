@@ -1,0 +1,99 @@
+# PROPOSED deployment TEMPLATE. Not active (lives under docs/cicd/proposed/), and it must not
+# be enabled until the target is chosen (docs/cicd/SPEC.md, decision D1) and blockers B1 to B5
+# are fixed. Written for one Linux host that runs docker compose over SSH.
+#
+# Rules it encodes:
+#   - manual trigger only; the production environment gets a required reviewer
+#   - one deployment per environment at a time (concurrency; never cancelled half-way)
+#   - the database is backed up before migrations run, and migrations run before the new
+#     api and worker start
+#   - inputs and secrets reach the shell through env, never interpolated into a script
+#   - the host key is pinned (DEPLOY_KNOWN_HOSTS); nothing trusts the host on first use
+#   - a failed health check says how to roll the application back; the schema is never
+#     rolled back automatically (see docs/cicd/RELEASING.md)
+name: Deploy (template)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Where to deploy
+        type: choice
+        options: [staging, production]
+        default: staging
+      image_tag:
+        description: Backend image tag already pushed to GHCR, for example 0.4.0 or a commit sha
+        required: true
+      previous_tag:
+        description: Image tag to roll the application back to if the health check fails
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+      HEALTH_URL: ${{ vars.PUBLIC_API_URL }}/healthz
+      IMAGE: ghcr.io/devansh1012007/allml-backend
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      PREVIOUS_TAG: ${{ inputs.previous_tag }}
+      COMPOSE: docker compose -f docker-compose.yml -f docker-compose.prod.yml
+    steps:
+      - name: Set up the SSH key and the pinned host key
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          printf '%s\n' "$SSH_KEY" > "$RUNNER_TEMP/deploy_key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/known_hosts"
+          {
+            echo "SSH_OPTS=-i $RUNNER_TEMP/deploy_key -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts -o StrictHostKeyChecking=yes"
+          } >> "$GITHUB_ENV"
+
+      - name: Back up the database before anything changes
+        run: |
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd \"$DEPLOY_DIR\" && mkdir -p backups && docker compose exec -T db pg_dump -U allml allml | gzip > \"backups/pre-$IMAGE_TAG.sql.gz\" && ls -l \"backups/pre-$IMAGE_TAG.sql.gz\""
+
+      - name: Pull the new image
+        run: |
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd \"$DEPLOY_DIR\" && export ALLML_IMAGE=\"$IMAGE:$IMAGE_TAG\" && $COMPOSE pull api worker"
+
+      # The app refuses to start on an unmigrated database (ci.yml says so), so the
+      # migration runs before the new api and worker start. Expand-and-contract keeps the
+      # previous version working during the window (docs/cicd/RELEASING.md).
+      - name: Migrate (forward only)
+        run: |
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd \"$DEPLOY_DIR\" && export ALLML_IMAGE=\"$IMAGE:$IMAGE_TAG\" && $COMPOSE run --rm api alembic -c backend/alembic.ini upgrade head"
+
+      - name: Start the new api and worker
+        run: |
+          ssh $SSH_OPTS "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd \"$DEPLOY_DIR\" && export ALLML_IMAGE=\"$IMAGE:$IMAGE_TAG\" && $COMPOSE up -d api worker"
+
+      - name: Health check
+        id: health
+        run: curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "$HEALTH_URL"
+
+      - name: On failure, say how to roll back (the application only)
+        if: failure() && steps.health.outcome == 'failure'
+        run: |
+          echo "Health check failed."
+          echo "Roll the application back: ssh there, then ALLML_IMAGE=$IMAGE:$PREVIOUS_TAG $COMPOSE up -d api worker"
+          echo "The schema is NOT rolled back here. To restore the database, follow docs/cicd/RELEASING.md and use backups/pre-$IMAGE_TAG.sql.gz."
+          exit 1
