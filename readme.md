@@ -32,8 +32,12 @@ In a second terminal:
     npm install
     npm run dev          # http://localhost:3000
 
-The frontend calls the API at `http://localhost:8010`. That address is set in the code for now;
-see [`docs/cicd/SPEC.md`](docs/cicd/SPEC.md), blocker B1.
+The frontend calls the API at `http://localhost:8010` by default. The address is read at build
+time from `VITE_API_BASE`: build for a deployment with the variable set, for example
+
+    VITE_API_BASE=https://api.example.com npm run build
+
+and add the frontend's origin to `CORS_ORIGINS` on the backend side.
 
 Create the first administrator with `python -m backend.app.admin create-admin <username>` (see
 [`docs/OPERATOR_GUIDE.md`](docs/OPERATOR_GUIDE.md)).

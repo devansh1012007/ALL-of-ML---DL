@@ -120,6 +120,42 @@ Minor findings and resolutions:
 
 Independent review status: T-B4 APPROVE. T-B5/T-B6/T-B2 APPROVE-WITH-CHANGES from the independent reviewer; all required corrections (dockerignore headers, compose.prod.yml build/image semantics, operator-guide B2 prose) applied in `af395cb`. All P0/P1 tasks reviewed and ready to merge.
 
+## Implementation record (2026-11-12, patch series on top of `2df9bf8`)
+
+The task breakdown below was then applied in full as an atomic commit series on `main`, in
+phase order, on 2026-11-12. Commit hashes are intentionally not recorded here: the series is
+delivered as patch files based on `2df9bf8`, and `git am` re-creates the commits with new
+hashes. Each row keeps the task IDs of the tables above.
+
+| Tasks applied | Commit subject | Phase |
+|---|---|---|
+| T-P0-1 | docs(cicd): record decisions D1-D12 in a decisions log | P0 |
+| T-B3 | fix(B3): one image and one production compose; dev stack named as such | P1 |
+| T-CI-3, T-CI-5, T-CI-6/7, T-CI-8/9 | ci: adopt the reusable CI workflow | P2 |
+| T-REPO-4 | docs: activate the pull-request template | P2 |
+| T-SEC-1 | security: adopt CodeQL, dependency review, secret scan and audits | P3 |
+| T-CI-10 | ci: add the container smoke test job | P4 |
+| T-REL-1 | release: adopt the release workflow and start the changelog | P4 |
+| T-B1 | fix(B1): the frontend reads VITE_API_BASE at build time | P5 |
+
+Verification of the series: actionlint 1.7.7 exits 0 on all four workflows; gitleaks 8.29.1
+scans the full history clean (the `ci-only-*` placeholders are not flagged, so no allowlist
+was needed); frontend `npm test` 173 passed in 12 files (three new tests pin the B1
+behaviour) and `npm run build` is green with a byte-identical bundle when the variable is
+unset; backend `pytest` 464 passed / 12 skipped, with one pre-existing environment failure in
+`test_executor.py::test_a_cancel_stops_the_child_and_frees_the_slot` that reproduces
+identically at `2df9bf8` (no backend code is touched by the series); `alembic upgrade head`
+and `alembic check` are clean on SQLite. Docker build, `docker compose config` and the smoke
+job stay unverified in the environment that produced the series (no Docker daemon), as in
+the spec session; CI runs them.
+
+Still owner actions after the series (they change GitHub or host behaviour, not files):
+SET-1 to SET-10 (SPEC section 4.6), the first manual `backend-postgres` run (D6), the
+required-check flip after two green runs (D5), the `v0.1.0` tag from a green `main`
+(D4/REL-2, `docs/cicd/RELEASING.md`), and the hosts, environments and secrets for the deploy
+template (D1, SET-8, SET-9). The deploy template stays in `docs/cicd/proposed/` (SPEC
+section 5.5) until those exist.
+
 ## Task breakdown (final, after both reviews)
 
 ### Pre-condition (before any implementation task)

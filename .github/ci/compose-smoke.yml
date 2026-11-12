@@ -1,0 +1,23 @@
+# CI-only overlay for the container smoke test (SPEC CI-10; job `smoke` in
+# .github/workflows/ci.yml). Never used by a deployment.
+#
+# It points the api and the worker at the image the job just built and loaded
+# (allml-backend:smoke) instead of building from source, and sets the
+# placeholder SECRET_KEY the application needs to start in a container: the
+# image's /app is not writable by its user, so the development key file cannot
+# be written, and a real deployment sets SECRET_KEY in the host .env instead.
+# The placeholder is a CI-only value, not a secret (the same pattern as the
+# ci-only-password of the Postgres job, which the default gitleaks rules do
+# not flag).
+services:
+  api:
+    image: allml-backend:smoke
+    pull_policy: never
+    environment:
+      SECRET_KEY: ci-only-smoke-key
+
+  worker:
+    image: allml-backend:smoke
+    pull_policy: never
+    environment:
+      SECRET_KEY: ci-only-smoke-key

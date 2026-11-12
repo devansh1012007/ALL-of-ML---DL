@@ -66,7 +66,7 @@ Backend (from repo root, venv at repo root):
 - **migrate first**: `cd backend && ../.venv/bin/python -m alembic upgrade head` (the `alembic` executable is not on the PATH: the virtual environment is at the root of the repository) — the app **verifies** the schema at startup and refuses to start when it is behind. The app never creates tables any more.
 - tests: `.venv/bin/python -m pytest backend/tests` — **run from the repo root**: test modules import `backend.app.*` and neither `backend/` nor `backend/app/` has `__init__.py`, so the repo root must be on `sys.path`. `backend/tests/conftest.py` puts it there (and pins an isolated sqlite `DATABASE_URL`, a temporary `DATASETS_ROOT` and a temporary `MODEL_DIR`), so bare `pytest backend/tests` works from the repo root too. The suite builds its schema with the migrations and runs `alembic check`, so a drift between the migrations and the ORM fails the suite.
 - single test: `.venv/bin/python -m pytest backend/tests/test_model_training.py::test_train_model_auto_fine_tune_tabular`
-- migrations: `cd backend && ../.venv/bin/python -m alembic upgrade head` (needs `DATABASE_URL`); the drift check: `cd backend && ../.venv/bin/python -m alembic check`; new revision: `cd backend && ../.venv/bin/python -m alembic revision --autogenerate -m "..."` (see `backend/commands.txt`, which uses `docker-compose run --rm web ...`)
+- migrations: `cd backend && ../.venv/bin/python -m alembic upgrade head` (needs `DATABASE_URL`); the drift check: `cd backend && ../.venv/bin/python -m alembic check`; new revision: `cd backend && ../.venv/bin/python -m alembic revision --autogenerate -m "..."` (see `backend/commands.txt`, which uses `docker compose -f docker-compose.dev.yml run --rm web alembic -c backend/alembic.ini ...`)
 
 Frontend:
 - install: `scripts/install.sh --frontend` — it runs `npm install` in `frontend/` with the cache of the repository.
@@ -77,9 +77,9 @@ Scripts:
 - `scripts/download.sh <url> [target]` — downloads a file and continues where it stopped (`curl --continue-at -`), retrying a transfer that breaks.
 
 Docker:
-- The compose file is `backend/docker-compose.yml`, **not** the repo root. `cd backend && docker-compose up --build`.
-- Needs `backend/.env` (gitignored; `backend/.env.example` documents every variable) with `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST_PORT`, `POSTGRES_PORT`, `DATABASE_URL` (in compose, `DATABASE_URL` must point at the `db` service, not localhost).
-- The `web` service's `command:` runs `alembic upgrade head` before the server, and the `db` service has a healthcheck, so the migrations do not race the start of Postgres.
+- One image, two stacks (SPEC blocker B3): the only Dockerfile is the root one. The deployment stack is the repository root (`docker-compose.yml` plus the `docker-compose.prod.yml` overlay); development is `backend/docker-compose.dev.yml` (explicitly named as the dev stack): `cd backend && docker compose -f docker-compose.dev.yml up --build`. The old `backend/dockerfile` is deleted.
+- The dev stack needs `backend/.env` (gitignored; `backend/.env.example` documents every variable) with `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST_PORT`, `POSTGRES_PORT`, `DATABASE_URL` (in compose, `DATABASE_URL` must point at the `db` service, not localhost).
+- The `web` service's `command:` runs `alembic -c backend/alembic.ini upgrade head` before the server (the code lives at `/app` in the image), and the `db` service has a healthcheck, so the migrations do not race the start of Postgres.
 
 ## Environment gotchas
 
@@ -107,7 +107,7 @@ Docker:
 ## Frontend conventions
 
 - Single-file SPA, no router, no react-router: navigation is `navigate(view, params)` state in `MainApp` (`frontend/App.jsx`). Views live in `frontend/App.jsx` (`AuthView`, `ModelsCatalog`, `RunsDashboard`, `RunDetails`, `NewJob`).
-- The API base is hardcoded: `const API_BASE = 'http://localhost:8010'` at `frontend/App.jsx:8`. There is no Vite proxy and no env var — change it there.
+- The API base is `API_BASE` in `frontend/components/shared.jsx`: it is read at **build time** from `VITE_API_BASE`, with `http://localhost:8010` as the default (SPEC blocker B1). There is no Vite proxy — a deployed frontend is rebuilt with `VITE_API_BASE` set to the origin of its deployment, and the backend's `CORS_ORIGINS` names that origin.
 - Token is kept in `localStorage` under `prime_token`; `apiFetch` in `AuthProvider` adds the `Authorization` header and auto-logs-out on 401.
 - The dataset of a training job is picked in a dropdown (`GET /api/v1/ml/datasets`) and sent as `dataset_id`; the file input of the form uploads a CSV (`POST /api/v1/ml/datasets/upload`) and the label column is chosen from the columns of the selected dataset.
 - `frontend/tailwind.config.js` `content` lists only `./index.html`, `./App.jsx`, `./main.jsx` — add any new file there or its Tailwind classes won't be generated.
@@ -128,6 +128,6 @@ Docker:
 
 - `backend/app/README.md` — detailed "how to add a model" guide. Mostly accurate; trust `model_training.py` over it where they disagree.
 - `data/README.md` — the datasets that ship with the repository, the two ways to add one and the format a CSV has to have.
-- `readme.md` — describes the shipped system (frontend port 3000, compose at `backend/docker-compose.yml`, the dataset as a row of the registry the client addresses by `dataset_id`, the randomized auto_tune search).
+- `readme.md` — describes the shipped system (frontend port 3000, the stack at the root `docker-compose.yml` and the dev stack at `backend/docker-compose.dev.yml`, the dataset as a row of the registry the client addresses by `dataset_id`, the randomized auto_tune search).
 - `TODO.MD` — the open item (auto fine-tuning with and without the LLM) is done; it was implemented in W1-7.
 - `AUDIT.md`, `FIX_PLAN.md`, `FOLLOWUP_PLAN.md`, `WEEK1_PLAN.md` — the plans of the earlier rounds. They describe the state before the change they plan, on purpose: do not read them as a description of the current code.

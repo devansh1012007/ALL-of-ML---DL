@@ -3,7 +3,13 @@ import React, { useState, useCallback, createContext } from 'react';
 import { formatWhen } from '../format.js';
 
 // --- CONFIGURATION ---
-export const API_BASE = 'http://localhost:8010';
+// The origin of the API. It is read at BUILD time from VITE_API_BASE (Vite
+// bakes the value into the bundle; the browser never reads it again), so a
+// deployed frontend is rebuilt with the origin of its deployment, and the
+// backend's CORS_ORIGINS names that origin (SPEC blocker B1). The default
+// keeps local development working with no configuration: the SPA on
+// http://localhost:3000 against the API on http://localhost:8010.
+export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8010';
 // How often a run that is still going is read again. The training runs in the
 // background, so the metrics of a run appear when a poll sees them.
 export const RUN_POLL_INTERVAL_MS = 2000;

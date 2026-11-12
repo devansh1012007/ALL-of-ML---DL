@@ -1,0 +1,78 @@
+# The development stack: the one image of the repository (the root Dockerfile,
+# SPEC blocker B3) with the development behaviour on top - the backend source
+# is bind-mounted so --reload picks up edits, and the stack exposes the
+# database port for local tooling. This file is for development only; the
+# deployment stack is the root docker-compose.yml with the
+# docker-compose.prod.yml overlay.
+#
+#   cd backend && docker compose -f docker-compose.dev.yml up --build
+#
+# It needs backend/.env (gitignored; backend/.env.example documents every
+# variable). The database is postgres 16, as in the root stack.
+
+services:
+  db:
+    image: postgres:16
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_HOST_PORT}:${POSTGRES_PORT}"
+    # The migration below runs as soon as the "web" container starts, so the
+    # database has to accept connections first. Without the healthcheck the
+    # migration races the start of Postgres and the stack stays down.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: no
+
+  web:
+    build:
+      # The one image of the repository (SPEC blocker B3): the root Dockerfile,
+      # built from the repository root. There is no development variant of the
+      # image any more; the development behaviour lives in the command and the
+      # mounts below.
+      context: ..
+      dockerfile: Dockerfile
+    # The schema is owned by the migrations, so they have to run before the
+    # application starts. The paths are the ones of the root image: the code
+    # lives in /app and alembic.ini in /app/backend, so the migration needs
+    # -c backend/alembic.ini (the same command the root stack runs).
+    command: >
+      sh -c "alembic -c backend/alembic.ini upgrade head &&
+             uvicorn backend.app.main:app --host 0.0.0.0 --port 8010 --reload"
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      # The development signing key is written next to the code. In the image
+      # the code lives at /app/backend, and that path is the bind mount below,
+      # so the key survives a restart of the container and stays on the host
+      # (git-ignored). If the mount is not writable by the container user, set
+      # SECRET_KEY in backend/.env instead.
+      - SECRET_KEY_FILE=/app/backend/.secret_key
+      # DATASETS_ROOT keeps the default of the image: the repository root
+      # inside the container (/app), which holds data/ and uploads/.
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # The backend source: editing it on the host reloads the server.
+      - .:/app/backend
+      # The built-in datasets of the repository, live from the host.
+      - ../data:/app/data
+      # The uploads of the users. A named volume keeps them when the container
+      # is replaced; a bind mount would keep them on the disk of the host.
+      - uploads:/app/uploads
+    restart: no
+
+volumes:
+  # The uploads of the users: they survive the redeployment of the container.
+  uploads:

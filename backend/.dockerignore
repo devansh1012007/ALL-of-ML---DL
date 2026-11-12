@@ -1,6 +1,8 @@
-# backend/.dockerignore (SPEC blocker B5): keep local secrets and runtime data out of the
-# backend build context. For the stack that builds from backend/ (backend/docker-compose.yml,
-# backend/dockerfile); the root .dockerignore does not apply to this build.
+# backend/.dockerignore (SPEC blocker B5): keep local secrets and runtime data out of any
+# build whose context is backend/. Since blocker B3 the repository builds one image from the
+# root Dockerfile (context: the repository root, which uses the root .dockerignore), and no
+# compose file builds from this directory any more. The file stays as a guard for a direct
+# `docker build backend/`.
 
 .git
 .venv

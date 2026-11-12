@@ -1,44 +1,190 @@
+# The reusable CI of the repository, adopted from docs/cicd/proposed/ci.yml
+# (docs/cicd/SPEC.md, sections 5.1 and 7) on 2026-11-12. What changed from the
+# file this replaces:
+#   - the frontend tests run (the old file only built the frontend; blocker B7)
+#   - pushes trigger on main only; the stale branch feature/week1-honest-demo
+#     is gone (blocker B10)
+#   - reusable (workflow_call), so the release workflow can require it
+#   - least-privilege token, cancelled superseded runs, timeouts, uv cache
+#   - a Postgres job (manual until the suite is confirmed on Postgres, D6)
+#   - lint report-only; docker build and compose validation (CI-8/CI-9)
+#   - a container smoke test (CI-10): the image starts with the stack and
+#     answers /healthz (job `smoke`, overlay .github/ci/compose-smoke.yml)
+# Every action is pinned to a full commit SHA (SEC-11); Dependabot keeps the
+# SHAs current.
 name: CI
 
 on:
   push:
-    branches: [main, feature/week1-honest-demo]
-  pull_request:
     branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
 
-env:
-  # The application and the Alembic migrations share DATABASE_URL, so both
-  # talk to the same database. The app refuses to start on an unmigrated
-  # database, so CI migrates first and the suite runs against sqlite.
-  DATABASE_URL: sqlite+aiosqlite:////tmp/ci-backend.db
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  backend:
+    name: Backend tests and migrations (SQLite)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DATABASE_URL: sqlite+aiosqlite:////tmp/ci-backend.db
     steps:
-      - name: Checkout the repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
 
-      - name: Install backend and frontend dependencies
-        run: |
-          scripts/install.sh --backend --frontend --cpu
+      - name: Install backend dependencies (CPU build of torch)
+        run: scripts/install.sh --backend --cpu
 
-      - name: Migrate the database
+      - name: Migrate and check for schema drift
         run: |
-          cd backend && ../.venv/bin/python -m alembic upgrade head
-
-      - name: Verify no migration drift
-        run: |
-          cd backend && ../.venv/bin/python -m alembic check
+          cd backend
+          ../.venv/bin/python -m alembic upgrade head
+          ../.venv/bin/python -m alembic check
 
       - name: Run the test suite
         run: .venv/bin/python -m pytest backend/tests
 
-      - name: Build the frontend
+  frontend:
+    name: Frontend tests and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Keep the built frontend for seven days
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  backend-postgres:
+    name: Backend on Postgres 16 (manual until confirmed)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: allml
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: allml
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U allml"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://allml:ci-only-password@localhost:5432/allml
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+      - name: Install backend dependencies (CPU build of torch)
+        run: scripts/install.sh --backend --cpu
+      - name: Migrate and check for schema drift
         run: |
-          cd frontend && npm run build
+          cd backend
+          ../.venv/bin/python -m alembic upgrade head
+          ../.venv/bin/python -m alembic check
+      - name: Run the test suite
+        run: .venv/bin/python -m pytest backend/tests
+
+  lint:
+    name: Lint (report only, not required)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - name: Python lint with a pinned ruff
+        run: uvx ruff@0.8.4 check backend --output-format=github
+      - name: Dockerfile lint
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  docker:
+    name: Build the backend image (no push) and validate compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: allml-backend:ci
+      - name: Validate the root compose file
+        # compose needs a .env file (env_file: .env). The root .env.example
+        # exists now (blocker B4 is fixed), so CI copies it and validates with
+        # the real template values - the P1 exit criterion of the spec.
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config --quiet
+          rm -f .env
+
+  smoke:
+    name: Container smoke test (the image runs and answers /healthz)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the image the test will run
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: allml-backend:smoke
+      - name: Start the stack from the built image and wait for the health check
+        # CI-10: the image must run, not just build. The overlay pins the api
+        # and the worker to the image built above (no rebuild, no pull) and
+        # gives them the placeholder SECRET_KEY the image needs to start.
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml -f .github/ci/compose-smoke.yml up -d --no-build --wait db api
+      - name: Call /healthz from the runner
+        run: curl -fsS --retry 5 --retry-delay 3 http://127.0.0.1:8010/healthz
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f .github/ci/compose-smoke.yml down -v --remove-orphans

@@ -1,2 +1,7 @@
-docker-compose run --rm web alembic revision --autogenerate -m "initial migration"
-docker-compose run web alembic upgrade head
+# Generate a new migration from the models (the schema is owned by the
+# migrations; alembic.ini is at /app/backend/alembic.ini inside the image, so
+# the command carries -c backend/alembic.ini):
+docker compose -f docker-compose.dev.yml run --rm web alembic -c backend/alembic.ini revision --autogenerate -m "initial migration"
+
+# Apply the migrations:
+docker compose -f docker-compose.dev.yml run --rm web alembic -c backend/alembic.ini upgrade head
