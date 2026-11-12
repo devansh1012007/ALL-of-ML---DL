@@ -1,0 +1,31 @@
+# PROPOSED root .dockerignore (SPEC blocker B5). To activate, copy it to /.dockerignore.
+# The stack that builds from backend/ needs its own backend/.dockerignore (the root file does
+# not apply to a build whose context is backend/).
+#
+# Without this, a build copies whatever is on the developer's disk into the image:
+# backend/.env, backend/.secret_key, backend/models/, data/uploads/.
+
+.git
+.github
+.cache
+.venv
+**/.venv
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+frontend
+docs
+*.log
+
+# secrets and keys (the example file is allowed back in)
+**/.env
+**/.env.*
+!**/.env.example
+**/.secret_key
+
+# runtime data
+backend/models
+**/uploads
+data/*.csv
+!data/sample_*.csv

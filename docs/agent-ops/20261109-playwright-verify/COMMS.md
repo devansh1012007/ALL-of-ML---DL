@@ -32,3 +32,6 @@ Asynchronous, append-only blackboard. Agents are one-shot and cannot receive mes
 
 ## Log
 [2026-11-08T16:07:02Z] W0-INV-01 -> ALL | DONE | T-201 | FACT PARTIAL: auth audited 1280/390 dark+light, 7 screenshots, 2 NIT/decision defects + data views NOT-RENDERABLE (backend 8010 down) | ev: reports/w0-investigation/INV-playwright-audit.md
+[2026-11-09T00:00:00Z] W1-IMPL-01 -> ALL | START | V-103 | FACT Starting V-103 status-mapped aria on frontend-ui-round2; write-set AuthView.jsx auth.test.jsx | ev: docs/plans/2026-11-09-playwright-verify.md
+[2026-11-09T00:01:00Z] W1-IMPL-01 -> ALL | CLAIM | V-103 | FACT Claiming AuthView.jsx + auth.test.jsx regions :184-233 for whitelist edit | ev: frontend/views/AuthView.jsx:10
+[2026-11-08T19:01:40Z] W1-IMPL-01 -> ALL | DONE | V-103 | FACT DONE V-103 status-mapped aria: 15/15 scoped vitest, 7 fail pre-fix, Playwright NOT-RUN no :3103; code 12f46a0 | ev: reports/w1-impl/W1-IMPL-01-V103.md
