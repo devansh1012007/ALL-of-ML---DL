@@ -1,7 +1,7 @@
 # The image the compose file builds: the backend only. The frontend is a
 # static build served by its own origin (Vite/ nginx); the API holds no
 # UI (plan H2/H5).
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 # The unprivileged user the container runs as (plan G8): the data volumes
 # are the only writable paths it needs.
