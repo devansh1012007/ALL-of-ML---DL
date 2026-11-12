@@ -27,9 +27,11 @@ live in `docs/MODEL_TIERS.md`; the first-week checkpoint in
 Two known problems with this sequence, both recorded in `docs/cicd/SPEC.md`:
 the root `.env.example` is not in the repository yet (B4), so start from
 `backend/.env.example` and keep the variables the compose file uses; and
-`alembic upgrade head` run from the image's working directory cannot find
-`alembic.ini`, which lives in `backend/` (B2). Until B2 is fixed, use
-`alembic -c backend/alembic.ini upgrade head` in that step.
+One known problem remains (SPEC blocker B2): `alembic upgrade head` run from
+the image's working directory cannot find `alembic.ini`, which lives in
+`backend/`; the root compose command already uses `alembic -c backend/alembic.ini
+upgrade head` to work around it, but end-to-end container verification of the
+fixed stack is still pending.
 
 The startup validates every environment variable (plan H4) and prints the
 effective non-secret configuration; a nonsense value is refused with the

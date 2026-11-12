@@ -1,6 +1,6 @@
-# PROPOSED backend/.dockerignore (SPEC blocker B5). To activate, copy it to backend/.dockerignore.
-# For the stack whose build context is backend/ (backend/docker-compose.yml, backend/dockerfile).
-# The root .dockerignore does not apply to that build.
+# backend/.dockerignore (SPEC blocker B5): keep local secrets and runtime data out of the
+# backend build context. For the stack that builds from backend/ (backend/docker-compose.yml,
+# backend/dockerfile); the root .dockerignore does not apply to this build.
 
 .git
 .venv
