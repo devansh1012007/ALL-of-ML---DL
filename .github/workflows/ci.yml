@@ -161,6 +161,16 @@ jobs:
           docker compose -f docker-compose.yml config --quiet
           rm -f .env
 
+      - name: Validate the production compose overlay
+        # The deploy overlay (docker-compose.prod.yml) pins api/worker to a
+        # tagged image; validate it composes with the root file too (B6). The
+        # overlay cannot be validated standalone because ALLML_IMAGE is set at
+        # deploy time, so pin a placeholder here.
+        run: |
+          cp .env.example .env
+          ALLML_IMAGE=ghcr.io/devansh1012007/allml-backend:ci docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+          rm -f .env
+
   smoke:
     name: Container smoke test (the image runs and answers /healthz)
     runs-on: ubuntu-24.04
