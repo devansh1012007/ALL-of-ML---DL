@@ -1,0 +1,17 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - paragraph [ref=e5]: PrimeTrade AutoML
+    - button "Switch to light mode" [active] [ref=e20] [cursor=pointer]
+    - heading "Sign in" [level=1] [ref=e8]
+    - paragraph [ref=e9]: Train a model on your data, check it against a baseline, and use it.
+    - generic [ref=e10]:
+      - generic [ref=e11]:
+        - generic [ref=e12]: Username
+        - textbox "Username" [ref=e13]
+      - generic [ref=e14]:
+        - generic [ref=e15]: Password
+        - textbox "Password" [ref=e16]
+      - button "Sign in" [ref=e17] [cursor=pointer]
+    - paragraph [ref=e18]:
+      - text: New here?
+      - button "Create an account" [ref=e19] [cursor=pointer]
