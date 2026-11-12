@@ -10,7 +10,7 @@ python-jose[cryptography]
 bcrypt
 python-multipart
 
-python-dotenv==1.0.1      # Loads environment variables from a .env file (useful for local testing)
+python-dotenv==1.2.4      # Loads environment variables from a .env file (useful for local testing)
 
 alembic>=1.9
 pandas
