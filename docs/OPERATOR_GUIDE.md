@@ -24,12 +24,13 @@ live in `docs/MODEL_TIERS.md`; the first-week checkpoint in
     docker compose exec api alembic upgrade head
     docker compose exec api python -m backend.app.admin create-admin <username>
 
-Two known problems with this sequence, both recorded in `docs/cicd/SPEC.md`:
-the root `.env.example` is not in the repository yet (B4), so start from
-`backend/.env.example` and keep the variables the compose file uses; and
+One known problem with this sequence, recorded in `docs/cicd/SPEC.md`:
 `alembic upgrade head` run from the image's working directory cannot find
 `alembic.ini`, which lives in `backend/` (B2). Until B2 is fixed, use
 `alembic -c backend/alembic.ini upgrade head` in that step.
+
+The root `.env.example` is the template of this stack; the backend keeps its
+own at `backend/.env.example`, for a server that is started without compose.
 
 The startup validates every environment variable (plan H4) and prints the
 effective non-secret configuration; a nonsense value is refused with the
