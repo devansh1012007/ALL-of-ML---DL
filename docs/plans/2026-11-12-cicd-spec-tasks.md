@@ -114,11 +114,11 @@ Minor findings and resolutions:
 | T-AM-0 | `71da532` | `frontend-ui-round2` | DONE — in-flight `git am` landed |
 | T-P0-1 | — | — | owner sign-off pending (D1–D12) |
 | T-B4 | `00f3592` | `task/T-B4-root-env-example` | DONE — root `.env.example` + operator guide (reviewed APPROVE) |
-| T-B5 | `9a5cd44` | `task/T-B5-root-backend-dockerignore` | DONE — root + backend `.dockerignore` |
-| T-B6 | `c7b7f22` | `task/T-B5-root-backend-dockerignore` | DONE — `docker-compose.prod.yml` |
-| T-B2 | `e17fe52` | `task/T-B5-root-backend-dockerignore` | DONE — alembic `-c backend/alembic.ini` |
+| T-B5 | `af395cb` | `task/T-B5-root-backend-dockerignore` | DONE — root + backend `.dockerignore` (reviewed APPROVE-WITH-CHANGES, fixes applied) |
+| T-B6 | `af395cb` | `task/T-B5-root-backend-dockerignore` | DONE — `docker-compose.prod.yml` (reviewed APPROVE-WITH-CHANGES, fixes applied) |
+| T-B2 | `af395cb` | `task/T-B5-root-backend-dockerignore` | DONE — alembic `-c backend/alembic.ini` (reviewed APPROVE-WITH-CHANGES, fixes applied) |
 
-Independent review status: T-B4 reviewed APPROVE. T-B5/T-B6/T-B2 implemented and committed but have not received an independent code-reviewer pass (subagent dispatch was rate-limited); marked DONE-implementation, pending review before any merge.
+Independent review status: T-B4 APPROVE. T-B5/T-B6/T-B2 APPROVE-WITH-CHANGES from the independent reviewer; all required corrections (dockerignore headers, compose.prod.yml build/image semantics, operator-guide B2 prose) applied in `af395cb`. All P0/P1 tasks reviewed and ready to merge.
 
 ## Task breakdown (final, after both reviews)
 
