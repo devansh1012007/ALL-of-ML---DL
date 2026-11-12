@@ -4,7 +4,7 @@
 # second worker is one more service line.
 #
 #   docker compose up -d
-#   docker compose exec api alembic upgrade head
+#   docker compose exec api alembic -c backend/alembic.ini upgrade head
 #   docker compose exec api python -m backend.app.admin create-admin <name>
 #
 # Every variable is documented in .env.example; copy it to .env first.
@@ -27,7 +27,7 @@ services:
   api:
     build: .
     command: >
-      sh -c "alembic upgrade head &&
+      sh -c "alembic -c backend/alembic.ini upgrade head &&
              uvicorn backend.app.main:app --host 0.0.0.0 --port 8010 --proxy-headers --forwarded-allow-ips $${TRUSTED_PROXIES:-172.16.0.0/12}"
     env_file: .env
     environment:

@@ -21,7 +21,7 @@ live in `docs/MODEL_TIERS.md`; the first-week checkpoint in
 
     cp .env.example .env          # then edit the values
     docker compose up -d
-    docker compose exec api alembic upgrade head
+    docker compose exec api alembic -c backend/alembic.ini upgrade head
     docker compose exec api python -m backend.app.admin create-admin <username>
 
 Two known problems with this sequence, both recorded in `docs/cicd/SPEC.md`:
