@@ -1,0 +1,19 @@
+# Production overlay for the stack: pull a tagged backend image instead of
+# building from source. Used together with the root compose file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# The image tag is supplied through ALLML_IMAGE (for example
+# ALLML_IMAGE=ghcr.io/devansh1012007/allml-backend:0.4.0). deploy.yml exports
+# it as $IMAGE:$IMAGE_TAG before every compose call.
+#
+# Only the api and worker services are overridden: they switch from build: .
+# to image: ${ALLML_IMAGE}. db keeps image: postgres:16 unchanged. No other
+# service, volume, or setting is touched (see SPEC B6).
+
+services:
+  api:
+    image: ${ALLML_IMAGE}
+
+  worker:
+    image: ${ALLML_IMAGE}
